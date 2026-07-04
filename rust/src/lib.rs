@@ -22,6 +22,7 @@ pub mod room_versions;
 pub mod segmenter;
 pub mod tokio_runtime;
 pub mod types;
+pub mod tikv_engine;
 
 lazy_static! {
     static ref LOGGING_HANDLE: ResetHandle = pyo3_log::init();
@@ -76,6 +77,7 @@ fn synapse_rust(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     segmenter::register_module(py, m)?;
     room_versions::register_module(py, m)?;
     types::register_module(py, m)?;
+    tikv_engine::register_module(py, m)?;
 
     Ok(())
 }
