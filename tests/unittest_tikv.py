@@ -4,7 +4,7 @@ from synapse.synapse_rust import tikv_engine
 
 
 class TestNativeTiKVEngine(unittest.TestCase):
-    def test_import_and_registration(self):
+    def test_import_and_registration(self) -> None:
         """Test that the tikv_engine module is registered and has all functions."""
         self.assertTrue(hasattr(tikv_engine, "open_client"))
         self.assertTrue(hasattr(tikv_engine, "put"))
@@ -14,7 +14,7 @@ class TestNativeTiKVEngine(unittest.TestCase):
         self.assertTrue(hasattr(tikv_engine, "delete"))
         self.assertTrue(hasattr(tikv_engine, "scan_prefix"))
 
-    def test_uninitialized_calls_raise_runtime_error(self):
+    def test_uninitialized_calls_raise_runtime_error(self) -> None:
         """Test that calling operations before open_client raises RuntimeError."""
         with self.assertRaises(RuntimeError):
             tikv_engine.put(b"test_key", b"test_val")
@@ -34,7 +34,7 @@ class TestNativeTiKVEngine(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             tikv_engine.scan_prefix(b"test_prefix", 10)
 
-    def test_open_client_fallback_or_connection(self):
+    def test_open_client_fallback_or_connection(self) -> None:
         """Test connecting to pd_endpoints. Since we might not have a local TiKV, we handle connection error."""
         try:
             tikv_engine.open_client(["127.0.0.1:2379"])

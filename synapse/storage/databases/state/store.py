@@ -770,7 +770,8 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
 
                         groups = await self._get_state_for_groups([prev_group])
                         full_state_ids = dict(groups[prev_group])
-                        full_state_ids.update(delta_ids)
+                        if delta_ids:
+                            full_state_ids.update(delta_ids)
                         key = f"sg:{state_group}".encode("utf-8")
                         val = json.dumps(
                             [
