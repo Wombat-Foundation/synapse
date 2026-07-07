@@ -386,6 +386,8 @@ select = [
     "W",
     # pyflakes
     "F",
+    # flake8-logging-format
+    "G004",
     # isort
     "I001",
     # flake8-bugbear

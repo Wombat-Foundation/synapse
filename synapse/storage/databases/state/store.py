@@ -1022,7 +1022,9 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
 
                 def _do_delete() -> None:
                     try:
-                        tikv_engine.batch_delete([f"sg:{sg}".encode("utf-8") for sg in groups])
+                        tikv_engine.batch_delete(
+                            [f"sg:{sg}".encode("utf-8") for sg in groups]
+                        )
                     except Exception as e:
                         logger.error("Failed to delete state groups from TiKV: %s", e)
 
