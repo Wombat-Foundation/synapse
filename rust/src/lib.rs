@@ -20,9 +20,9 @@ pub mod push;
 pub mod rendezvous;
 pub mod room_versions;
 pub mod segmenter;
+pub mod tikv_engine;
 pub mod tokio_runtime;
 pub mod types;
-pub mod tikv_engine;
 
 lazy_static! {
     static ref LOGGING_HANDLE: ResetHandle = pyo3_log::init();
