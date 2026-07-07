@@ -151,8 +151,11 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         if self.tikv_pd_endpoints:
             try:
                 from synapse.synapse_rust import tikv_engine
+
                 tikv_engine.open_client(self.tikv_pd_endpoints)
-                logger.info(f"Connected to TiKV cluster at {self.tikv_pd_endpoints} for state group offload")
+                logger.info(
+                    f"Connected to TiKV cluster at {self.tikv_pd_endpoints} for state group offload"
+                )
             except Exception as e:
                 logger.error(f"Failed to connect to TiKV cluster: {e}")
                 self.tikv_pd_endpoints = None
@@ -220,25 +223,31 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
 
         if self.tikv_pd_endpoints:
             try:
-                from synapse.synapse_rust import tikv_engine
                 import json
+
+                from synapse.synapse_rust import tikv_engine
+
                 keys = [f"sg:{g}".encode("utf-8") for g in groups]
                 pairs = tikv_engine.batch_get(keys)
                 for k, v in pairs:
                     sg_id = int(k.decode("utf-8")[3:])
                     state_list = json.loads(v.decode("utf-8"))
-                    state_map = { (item[0], item[1]): item[2] for item in state_list }
+                    state_map = {(item[0], item[1]): item[2] for item in state_list}
                     results[sg_id] = state_filter.filter_state(state_map)
-                
+
                 # Check for missing groups in TiKV and fetch them from database if needed
                 missing_groups = [g for g in groups if g not in results]
                 if not missing_groups:
                     return results
                 else:
-                    logger.warning(f"State groups missing in TiKV: {missing_groups}, falling back to SQL for those")
+                    logger.warning(
+                        f"State groups missing in TiKV: {missing_groups}, falling back to SQL for those"
+                    )
                     groups = missing_groups
             except Exception as e:
-                logger.error(f"Failed to fetch state groups from TiKV, falling back to SQL: {e}")
+                logger.error(
+                    f"Failed to fetch state groups from TiKV, falling back to SQL: {e}"
+                )
                 results = {}
 
         chunks = [groups[i : i + 100] for i in range(0, len(groups), 100)]
@@ -752,20 +761,28 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             if state_group is not None:
                 if self.tikv_pd_endpoints:
                     try:
-                        from synapse.synapse_rust import tikv_engine
                         import json
+
+                        from synapse.synapse_rust import tikv_engine
+
                         groups = await self._get_state_for_groups([prev_group])
                         full_state_ids = dict(groups[prev_group])
                         full_state_ids.update(delta_ids)
                         key = f"sg:{state_group}".encode("utf-8")
-                        val = json.dumps([
-                            [key[0], key[1], event_id]
-                            for key, event_id in full_state_ids.items()
-                        ]).encode("utf-8")
+                        val = json.dumps(
+                            [
+                                [key[0], key[1], event_id]
+                                for key, event_id in full_state_ids.items()
+                            ]
+                        ).encode("utf-8")
                         tikv_engine.put(key, val)
-                        logger.info(f"Successfully stored state group {state_group} in TiKV (size: {len(full_state_ids)} entries)")
+                        logger.info(
+                            f"Successfully stored state group {state_group} in TiKV (size: {len(full_state_ids)} entries)"
+                        )
                     except Exception as e:
-                        logger.error(f"Failed to store state group {state_group} in TiKV: {e}")
+                        logger.error(
+                            f"Failed to store state group {state_group} in TiKV: {e}"
+                        )
                 return state_group
 
         # We're going to persist the state as a complete group rather than
@@ -786,15 +803,21 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
 
         if self.tikv_pd_endpoints:
             try:
-                from synapse.synapse_rust import tikv_engine
                 import json
+
+                from synapse.synapse_rust import tikv_engine
+
                 key = f"sg:{state_group}".encode("utf-8")
-                val = json.dumps([
-                    [key[0], key[1], event_id]
-                    for key, event_id in current_state_ids.items()
-                ]).encode("utf-8")
+                val = json.dumps(
+                    [
+                        [key[0], key[1], event_id]
+                        for key, event_id in current_state_ids.items()
+                    ]
+                ).encode("utf-8")
                 tikv_engine.put(key, val)
-                logger.info(f"Successfully stored state group {state_group} in TiKV (size: {len(current_state_ids)} entries)")
+                logger.info(
+                    f"Successfully stored state group {state_group} in TiKV (size: {len(current_state_ids)} entries)"
+                )
             except Exception as e:
                 logger.error(f"Failed to store state group {state_group} in TiKV: {e}")
 

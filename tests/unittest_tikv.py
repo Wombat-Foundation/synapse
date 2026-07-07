@@ -1,4 +1,5 @@
 import unittest
+
 from synapse.synapse_rust import tikv_engine
 
 
@@ -39,25 +40,25 @@ class TestNativeTiKVEngine(unittest.TestCase):
             tikv_engine.open_client(["127.0.0.1:2379"])
             # If we successfully connected (e.g. if local TiKV is running)
             print("Successfully connected to local TiKV cluster, running KV tests...")
-            
+
             # Put and Get
             tikv_engine.put(b"tikv_test_key", b"tikv_test_val")
             self.assertEqual(tikv_engine.get(b"tikv_test_key"), b"tikv_test_val")
-            
+
             # Batch Put and Batch Get
             tikv_engine.batch_put([(b"tk1", b"v1"), (b"tk2", b"v2")])
             batch_res = dict(tikv_engine.batch_get([b"tk1", b"tk2"]))
             self.assertEqual(batch_res.get(b"tk1"), b"v1")
             self.assertEqual(batch_res.get(b"tk2"), b"v2")
-            
+
             # Scan Prefix
             scan_res = tikv_engine.scan_prefix(b"tk", 10)
             self.assertEqual(len(scan_res), 2)
-            
+
             # Delete
             tikv_engine.delete(b"tikv_test_key")
             self.assertIsNone(tikv_engine.get(b"tikv_test_key"))
-            
+
         except RuntimeError as e:
             # Expected if TiKV cluster is not running/available locally
             print(f"Skipping live TiKV operations (TiKV cluster is offline): {e}")
