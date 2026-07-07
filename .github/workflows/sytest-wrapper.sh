@@ -66,9 +66,9 @@ with open('/sytest/scripts/synapse_sytest.sh', 'r') as f:
 # Assertions to ensure we are patching the expected script and have not drifted silently
 assert 'poetry install -vv --extras all' in content or 'pip install' in content, 'Upstream synapse_sytest.sh has drifted: expected installation commands not found'
 
-content = content.replace('poetry install -vv --extras all', '/venv/bin/uv sync --all-extras $UV_ARGS && /venv/bin/uv pip install pyopenssl==26.0.0 cryptography==46.0.7 service-identity==24.2.0')
-content = content.replace('/venv/bin/pip install -q --upgrade --upgrade-strategy eager --no-cache-dir /synapse[all]', '(cd /synapse && /venv/bin/uv sync --all-extras $UV_ARGS && /venv/bin/uv pip install pyopenssl==26.0.0 cryptography==46.0.7 service-identity==24.2.0)')
-content = content.replace('/venv/bin/pip install --no-deps --no-index --find-links /pypi-offline-cache /synapse', '(cd /synapse && /venv/bin/uv sync --all-extras $UV_ARGS && /venv/bin/uv pip install pyopenssl==26.0.0 cryptography==46.0.7 service-identity==24.2.0)')
+content = content.replace('poetry install -vv --extras all', '/venv/bin/uv sync --all-extras $UV_ARGS')
+content = content.replace('/venv/bin/pip install -q --upgrade --upgrade-strategy eager --no-cache-dir /synapse[all]', '(cd /synapse && /venv/bin/uv sync --all-extras $UV_ARGS)')
+content = content.replace('/venv/bin/pip install --no-deps --no-index --find-links /pypi-offline-cache /synapse', '(cd /synapse && /venv/bin/uv sync --all-extras $UV_ARGS)')
 
 # Create sytest_template database to quiet speculative DBI connect noise and errors
 content = content.replace(

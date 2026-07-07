@@ -138,6 +138,12 @@ saml2 = [
 ]
 oidc = ["authlib>=0.15.1"]
 url-preview = ["lxml>=4.6.3"]
+sytest = [
+    "pyopenssl==26.0.0",
+    "cryptography==46.0.7",
+    "service-identity==24.2.0",
+]
+
 sentry = ["sentry-sdk>=0.7.2"]
 opentracing = [
     "jaeger-client>=4.2.0",

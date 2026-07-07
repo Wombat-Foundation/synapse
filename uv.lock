@@ -1260,6 +1260,11 @@ saml2 = [
 sentry = [
     { name = "sentry-sdk" },
 ]
+sytest = [
+    { name = "cryptography" },
+    { name = "pyopenssl" },
+    { name = "service-identity" },
+]
 test = [
     { name = "idna" },
     { name = "parameterized" },
@@ -1343,6 +1348,7 @@ requires-dist = [
     { name = "canonicaljson", specifier = ">=2.0.0,<3.0.0" },
     { name = "cffi", specifier = ">=1.15" },
     { name = "cryptography", specifier = ">=3.4.7" },
+    { name = "cryptography", marker = "extra == 'sytest'", specifier = "==46.0.7" },
     { name = "defusedxml", marker = "extra == 'all'", specifier = ">=0.7.1" },
     { name = "defusedxml", marker = "extra == 'saml2'", specifier = ">=0.7.1" },
     { name = "hiredis", marker = "extra == 'all'", specifier = ">=0.3" },
@@ -1383,6 +1389,7 @@ requires-dist = [
     { name = "pympler", marker = "extra == 'cache-memory'", specifier = ">=1.0" },
     { name = "pynacl", specifier = ">=1.3" },
     { name = "pyopenssl", specifier = ">=16.2.0" },
+    { name = "pyopenssl", marker = "extra == 'sytest'", specifier = "==26.0.0" },
     { name = "pyparsing", specifier = ">=2.4" },
     { name = "pyrsistent", specifier = ">=0.18.0" },
     { name = "pysaml2", marker = "extra == 'all'", specifier = ">=4.5.0" },
@@ -1396,6 +1403,7 @@ requires-dist = [
     { name = "sentry-sdk", marker = "extra == 'all'", specifier = ">=0.7.2" },
     { name = "sentry-sdk", marker = "extra == 'sentry'", specifier = ">=0.7.2" },
     { name = "service-identity", specifier = ">=18.1.0" },
+    { name = "service-identity", marker = "extra == 'sytest'", specifier = "==24.2.0" },
     { name = "setuptools-rust", specifier = ">=1.3" },
     { name = "signedjson", specifier = ">=1.1.4,<2.0.0" },
     { name = "sortedcontainers", specifier = ">=2.0.5" },
@@ -1412,7 +1420,7 @@ requires-dist = [
     { name = "urllib3", specifier = ">=1.26.5" },
     { name = "zope-interface", specifier = ">=5.2" },
 ]
-provides-extras = ["matrix-synapse-ldap3", "postgres", "saml2", "oidc", "url-preview", "sentry", "opentracing", "jwt", "redis", "cache-memory", "test", "all"]
+provides-extras = ["matrix-synapse-ldap3", "postgres", "saml2", "oidc", "url-preview", "sytest", "sentry", "opentracing", "jwt", "redis", "cache-memory", "test", "all"]
 
 [package.metadata.requires-dev]
 core-dev = [
