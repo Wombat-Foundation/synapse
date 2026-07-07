@@ -26,6 +26,7 @@ offline)
 esac
 
 export UV_ARGS
+export UV_PROJECT_ENVIRONMENT=/venv
 
 # Pin a known-good commit of SyTest for determinism in CI.
 # To update, run: git ls-remote https://github.com/matrix-org/sytest.git refs/heads/develop
