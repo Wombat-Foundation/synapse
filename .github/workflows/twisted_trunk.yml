@@ -132,7 +132,7 @@ jobs:
         #       We symlink it before running uv so that uv actually
         #       ends up installing to `/venv`.
         run: |
-          /venv/bin/pip install uv
+          /venv/bin/pip install uv==0.5.31
           ln -s -T /venv /src/.venv
           /venv/bin/uv remove twisted
           /venv/bin/uv add "twisted[tls] @ git+https://github.com/twisted/twisted.git#trunk"

@@ -8,152 +8,10 @@ resolution-markers = [
     "python_full_version < '3.11'",
 ]
 
-[manifest]
-overrides = [
-    { name = "annotated-types", specifier = "==0.7.0" },
-    { name = "attrs", specifier = "==26.1.0" },
-    { name = "authlib", specifier = "==1.6.12" },
-    { name = "automat", specifier = "==25.4.16" },
-    { name = "backports-tarfile", specifier = "==1.2.0" },
-    { name = "bcrypt", specifier = "==5.0.0" },
-    { name = "bleach", specifier = "==6.4.0" },
-    { name = "canonicaljson", specifier = "==2.0.0" },
-    { name = "certifi", specifier = "==2026.2.25" },
-    { name = "cffi", specifier = "==2.0.0" },
-    { name = "charset-normalizer", specifier = "==3.4.4" },
-    { name = "click", specifier = "==8.3.1" },
-    { name = "colorama", specifier = "==0.4.6" },
-    { name = "constantly", specifier = "==23.10.4" },
-    { name = "cryptography", specifier = "==46.0.7" },
-    { name = "defusedxml", specifier = "==0.7.1" },
-    { name = "docutils", specifier = "==0.22.4" },
-    { name = "elementpath", specifier = "==4.8.0" },
-    { name = "gitdb", specifier = "==4.0.12" },
-    { name = "gitpython", specifier = "==3.1.50" },
-    { name = "hiredis", specifier = "==3.3.1" },
-    { name = "hyperlink", specifier = "==21.0.0" },
-    { name = "id", specifier = "==1.6.1" },
-    { name = "idna", specifier = "==3.15" },
-    { name = "ijson", specifier = "==3.5.0" },
-    { name = "immutabledict", specifier = "==4.3.1" },
-    { name = "importlib-metadata", specifier = "==8.7.1" },
-    { name = "incremental", specifier = "==24.11.0" },
-    { name = "jaeger-client", specifier = "==4.8.0" },
-    { name = "jaraco-classes", specifier = "==3.4.0" },
-    { name = "jaraco-context", specifier = "==6.1.0" },
-    { name = "jaraco-functools", specifier = "==4.4.0" },
-    { name = "jeepney", specifier = "==0.9.0" },
-    { name = "jinja2", specifier = "==3.1.6" },
-    { name = "jsonschema", specifier = "==4.26.0" },
-    { name = "jsonschema-specifications", specifier = "==2025.9.1" },
-    { name = "keyring", specifier = "==25.7.0" },
-    { name = "ldap3", specifier = "==2.9.1" },
-    { name = "librt", specifier = "==0.8.1" },
-    { name = "lxml", specifier = "==6.1.0" },
-    { name = "lxml-stubs", specifier = "==0.5.1" },
-    { name = "markdown-it-py", specifier = "==4.0.0" },
-    { name = "markupsafe", specifier = "==3.0.3" },
-    { name = "matrix-common", specifier = "==1.3.0" },
-    { name = "matrix-synapse-ldap3", specifier = "==0.4.0" },
-    { name = "mdurl", specifier = "==0.1.2" },
-    { name = "more-itertools", specifier = "==10.8.0" },
-    { name = "msgpack", specifier = "==1.2.1" },
-    { name = "multipart", specifier = "==1.3.1" },
-    { name = "mypy", specifier = "==1.19.1" },
-    { name = "mypy-extensions", specifier = "==1.1.0" },
-    { name = "mypy-zope", specifier = "==1.0.14" },
-    { name = "netaddr", specifier = "==1.3.0" },
-    { name = "nh3", specifier = "==0.3.3" },
-    { name = "opentracing", specifier = "==2.4.0" },
-    { name = "packaging", specifier = "==26.0" },
-    { name = "parameterized", specifier = "==0.9.0" },
-    { name = "pathspec", specifier = "==1.0.4" },
-    { name = "phonenumbers", specifier = "==9.0.28" },
-    { name = "pillow", specifier = "==12.2.0" },
-    { name = "prometheus-client", specifier = "==0.24.1" },
-    { name = "psycopg2", specifier = "==2.9.11" },
-    { name = "psycopg2cffi", specifier = "==2.9.0" },
-    { name = "psycopg2cffi-compat", specifier = "==1.1" },
-    { name = "pyasn1", specifier = "==0.6.3" },
-    { name = "pyasn1-modules", specifier = "==0.4.2" },
-    { name = "pycparser", specifier = "==3.0" },
-    { name = "pydantic", specifier = "==2.12.5" },
-    { name = "pydantic-core", specifier = "==2.41.5" },
-    { name = "pygithub", specifier = "==2.9.0" },
-    { name = "pygments", specifier = "==2.20.0" },
-    { name = "pyjwt", specifier = "==2.13.0" },
-    { name = "pymacaroons", specifier = "==0.13.0" },
-    { name = "pympler", specifier = "==1.0.1" },
-    { name = "pynacl", specifier = "==1.6.2" },
-    { name = "pyopenssl", specifier = "==26.0.0" },
-    { name = "pyparsing", specifier = "==3.3.2" },
-    { name = "pyrsistent", specifier = "==0.20.0" },
-    { name = "pysaml2", specifier = "==7.5.0" },
-    { name = "python-dateutil", specifier = "==2.9.0.post0" },
-    { name = "python-multipart", specifier = "==0.0.31" },
-    { name = "pytz", specifier = "==2026.1.post1" },
-    { name = "pywin32-ctypes", specifier = "==0.2.3" },
-    { name = "pyyaml", specifier = "==6.0.3" },
-    { name = "readme-renderer", specifier = "==44.0" },
-    { name = "referencing", specifier = "==0.37.0" },
-    { name = "requests", specifier = "==2.33.1" },
-    { name = "requests-toolbelt", specifier = "==1.0.0" },
-    { name = "rfc3986", specifier = "==2.0.0" },
-    { name = "rich", specifier = "==14.3.3" },
-    { name = "rpds-py", specifier = "==0.30.0" },
-    { name = "ruff", specifier = "==0.14.6" },
-    { name = "secretstorage", specifier = "==3.5.0" },
-    { name = "semantic-version", specifier = "==2.10.0" },
-    { name = "sentry-sdk", specifier = "==2.57.0" },
-    { name = "service-identity", specifier = "==24.2.0" },
-    { name = "setuptools", specifier = "==82.0.0" },
-    { name = "setuptools-rust", specifier = "==1.12.1" },
-    { name = "signedjson", specifier = "==1.1.4" },
-    { name = "six", specifier = "==1.17.0" },
-    { name = "smmap", specifier = "==5.0.2" },
-    { name = "sortedcontainers", specifier = "==2.4.0" },
-    { name = "sqlglot", specifier = "==30.2.1" },
-    { name = "threadloop", specifier = "==1.0.2" },
-    { name = "thrift", specifier = "==0.22.0" },
-    { name = "tomli", specifier = "==2.4.1" },
-    { name = "tornado", specifier = "==6.5.7" },
-    { name = "towncrier", specifier = "==25.8.0" },
-    { name = "treq", specifier = "==25.5.0" },
-    { name = "twine", specifier = "==6.2.0" },
-    { name = "twisted", specifier = "==25.5.0" },
-    { name = "txredisapi", specifier = "==1.4.11" },
-    { name = "types-bleach", specifier = "==6.3.0.20251115" },
-    { name = "types-cffi", specifier = "==1.17.0.20250915" },
-    { name = "types-html5lib", specifier = "==1.1.11.20251117" },
-    { name = "types-jsonschema", specifier = "==4.26.0.20260508" },
-    { name = "types-netaddr", specifier = "==1.3.0.20260130" },
-    { name = "types-opentracing", specifier = "==2.4.10.20250622" },
-    { name = "types-pillow", specifier = "==10.2.0.20240822" },
-    { name = "types-psycopg2", specifier = "==2.9.21.20260223" },
-    { name = "types-pyopenssl", specifier = "==24.1.0.20240722" },
-    { name = "types-pyyaml", specifier = "==6.0.12.20250915" },
-    { name = "types-requests", specifier = "==2.33.0.20260408" },
-    { name = "types-setuptools", specifier = "==82.0.0.20260210" },
-    { name = "types-webencodings", specifier = "==0.5.0.20251108" },
-    { name = "typing-extensions", specifier = "==4.15.0" },
-    { name = "typing-inspection", specifier = "==0.4.2" },
-    { name = "unpaddedbase64", specifier = "==2.1.0" },
-    { name = "urllib3", specifier = "==2.7.0" },
-    { name = "webencodings", specifier = "==0.5.1" },
-    { name = "xmlschema", specifier = "==2.5.1" },
-    { name = "zipp", specifier = "==3.23.0" },
-    { name = "zope-event", specifier = "==6.1" },
-    { name = "zope-interface", specifier = "==8.2" },
-    { name = "zope-schema", specifier = "==8.1" },
-]
-
 [[package]]
 name = "annotated-types"
 version = "0.7.0"
 source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "typing-extensions" },
-]
 sdist = { url = "https://files.pythonhosted.org/packages/ee/67/531ea369ba64dcff5ec9c3402f9f51bf748cec26dde048a2f973a4eea7f5/annotated_types-0.7.0.tar.gz", hash = "sha256:aff07c09a53a08bc8cfccb9c85b05f1aa9a2a6f23728d790723543408344ce89", size = 16081, upload-time = "2024-05-20T21:33:25.928Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/78/b6/6307fbef88d9b5ee7421e68d78a9f162e0da4900bc5f5793f6d3d0e34fb8/annotated_types-0.7.0-py3-none-any.whl", hash = "sha256:1f02e8b43a8fbbc3f3e0d4f0f4bfc8131bcb4eebe8849b8e5c773f3a1c582a53", size = 13643, upload-time = "2024-05-20T21:33:24.1Z" },
@@ -184,9 +42,6 @@ wheels = [
 name = "automat"
 version = "25.4.16"
 source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "typing-extensions" },
-]
 sdist = { url = "https://files.pythonhosted.org/packages/e3/0f/d40bbe294bbf004d436a8bcbcfaadca8b5140d39ad0ad3d73d1a8ba15f14/automat-25.4.16.tar.gz", hash = "sha256:0017591a5477066e90d26b0e696ddc143baafd87b588cfac8100bc6be9634de0", size = 129977, upload-time = "2025-04-16T20:12:16.002Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/02/ff/1175b0b7371e46244032d43a56862d0af455823b5280a50c63d99cc50f18/automat-25.4.16-py3-none-any.whl", hash = "sha256:04e9bce696a8d5671ee698005af6e5a9fa15354140a87f4870744604dcdd3ba1", size = 42842, upload-time = "2025-04-16T20:12:14.447Z" },
@@ -306,7 +161,7 @@ name = "cffi"
 version = "2.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pycparser" },
+    { name = "pycparser", marker = "implementation_name != 'PyPy'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/eb/56/b1ba7935a17738ae8453301356628e8147c79dbb825bcbc73dc7401f9846/cffi-2.0.0.tar.gz", hash = "sha256:44d1b5909021139fe36001ae048dbdde8214afa20200eda0f64c068cac5d5529", size = 523588, upload-time = "2025-09-08T23:24:04.541Z" }
 wheels = [
@@ -477,7 +332,7 @@ name = "click"
 version = "8.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama" },
+    { name = "colorama", marker = "sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/3d/fa/656b739db8587d7b5dfa22e22ed02566950fbfbcdc20311993483657a5c0/click-8.3.1.tar.gz", hash = "sha256:12ff4785d337a1bb490bb7e9c2b1ee5da3112e94a8622f26a6c77f5d2fc6842a", size = 295065, upload-time = "2025-11-15T20:45:42.706Z" }
 wheels = [
@@ -507,8 +362,8 @@ name = "cryptography"
 version = "46.0.7"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cffi" },
-    { name = "typing-extensions" },
+    { name = "cffi", marker = "platform_python_implementation != 'PyPy'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/47/93/ac8f3d5ff04d54bc814e961a43ae5b0b146154c89c61b47bb07557679b18/cryptography-46.0.7.tar.gz", hash = "sha256:e4cfd68c5f3e0bfdad0d38e023239b96a2fe84146481852dffbcca442c245aa5", size = 750652, upload-time = "2026-04-08T01:57:54.692Z" }
 wheels = [
@@ -607,7 +462,6 @@ version = "3.1.50"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "gitdb" },
-    { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/33/f6/354ae6491228b5eb40e10d89c4d13c651fe1cf7556e35ebdded50cff57ce/gitpython-3.1.50.tar.gz", hash = "sha256:80da2d12504d52e1f998772dc5baf6e553f8d2fcfe1fcc226c9d9a2ee3372dcc", size = 219798, upload-time = "2026-05-06T04:01:26.571Z" }
 wheels = [
@@ -851,7 +705,7 @@ version = "24.11.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "packaging" },
-    { name = "tomli" },
+    { name = "tomli", marker = "python_full_version < '3.11'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/ef/3c/82e84109e02c492f382c711c58a3dd91badda6d746def81a1465f74dc9f5/incremental-24.11.0.tar.gz", hash = "sha256:87d3480dbb083c1d736222511a8cf380012a8176c2456d01ef483242abbbcf8c", size = 24000, upload-time = "2025-11-28T02:30:17.861Z" }
 wheels = [
@@ -887,7 +741,7 @@ name = "jaraco-context"
 version = "6.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "backports-tarfile" },
+    { name = "backports-tarfile", marker = "python_full_version < '3.12'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/cb/9c/a788f5bb29c61e456b8ee52ce76dbdd32fd72cd73dd67bc95f42c7a8d13c/jaraco_context-6.1.0.tar.gz", hash = "sha256:129a341b0a85a7db7879e22acd66902fda67882db771754574338898b2d5d86f", size = 15850, upload-time = "2026-01-13T02:53:53.847Z" }
 wheels = [
@@ -959,13 +813,13 @@ name = "keyring"
 version = "25.7.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "importlib-metadata" },
+    { name = "importlib-metadata", marker = "python_full_version < '3.12'" },
     { name = "jaraco-classes" },
     { name = "jaraco-context" },
     { name = "jaraco-functools" },
-    { name = "jeepney" },
-    { name = "pywin32-ctypes" },
-    { name = "secretstorage" },
+    { name = "jeepney", marker = "sys_platform == 'linux'" },
+    { name = "pywin32-ctypes", marker = "sys_platform == 'win32'" },
+    { name = "secretstorage", marker = "sys_platform == 'linux'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/43/4b/674af6ef2f97d56f0ab5153bf0bfa28ccb6c3ed4d1babf4305449668807b/keyring-25.7.0.tar.gz", hash = "sha256:fe01bd85eb3f8fb3dd0405defdeac9a5b4f6f0439edbb3149577f244a2e8245b", size = 63516, upload-time = "2025-11-16T16:26:09.482Z" }
 wheels = [
@@ -1299,7 +1153,6 @@ version = "1.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "attrs" },
-    { name = "importlib-metadata" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/b9/ca/a5e92bc5f01374fadc56e2249f876d70c6b60798c73d3d5c889709691b14/matrix_common-1.3.0.tar.gz", hash = "sha256:62e121cccd9f243417b57ec37a76dc44aeb198a7a5c67afd6b8275992ff2abd1", size = 12157, upload-time = "2022-09-13T09:18:35.457Z" }
 wheels = [
@@ -1345,7 +1198,7 @@ dependencies = [
     { name = "signedjson" },
     { name = "sortedcontainers" },
     { name = "treq" },
-    { name = "twisted" },
+    { name = "twisted", extra = ["tls"] },
     { name = "typing-extensions" },
     { name = "unpaddedbase64" },
     { name = "urllib3" },
@@ -1361,9 +1214,9 @@ all = [
     { name = "lxml" },
     { name = "matrix-synapse-ldap3" },
     { name = "opentracing" },
-    { name = "psycopg2" },
-    { name = "psycopg2cffi" },
-    { name = "psycopg2cffi-compat" },
+    { name = "psycopg2", marker = "platform_python_implementation != 'PyPy'" },
+    { name = "psycopg2cffi", marker = "platform_python_implementation == 'PyPy'" },
+    { name = "psycopg2cffi-compat", marker = "platform_python_implementation == 'PyPy'" },
     { name = "pympler" },
     { name = "pysaml2" },
     { name = "pytz" },
@@ -1391,9 +1244,9 @@ opentracing = [
     { name = "tornado" },
 ]
 postgres = [
-    { name = "psycopg2" },
-    { name = "psycopg2cffi" },
-    { name = "psycopg2cffi-compat" },
+    { name = "psycopg2", marker = "platform_python_implementation != 'PyPy'" },
+    { name = "psycopg2cffi", marker = "platform_python_implementation == 'PyPy'" },
+    { name = "psycopg2cffi-compat", marker = "platform_python_implementation == 'PyPy'" },
 ]
 redis = [
     { name = "hiredis" },
@@ -1406,6 +1259,11 @@ saml2 = [
 ]
 sentry = [
     { name = "sentry-sdk" },
+]
+sytest = [
+    { name = "cryptography" },
+    { name = "pyopenssl" },
+    { name = "service-identity" },
 ]
 test = [
     { name = "idna" },
@@ -1490,6 +1348,7 @@ requires-dist = [
     { name = "canonicaljson", specifier = ">=2.0.0,<3.0.0" },
     { name = "cffi", specifier = ">=1.15" },
     { name = "cryptography", specifier = ">=3.4.7" },
+    { name = "cryptography", marker = "extra == 'sytest'", specifier = "==46.0.7" },
     { name = "defusedxml", marker = "extra == 'all'", specifier = ">=0.7.1" },
     { name = "defusedxml", marker = "extra == 'saml2'", specifier = ">=0.7.1" },
     { name = "hiredis", marker = "extra == 'all'", specifier = ">=0.3" },
@@ -1530,6 +1389,7 @@ requires-dist = [
     { name = "pympler", marker = "extra == 'cache-memory'", specifier = ">=1.0" },
     { name = "pynacl", specifier = ">=1.3" },
     { name = "pyopenssl", specifier = ">=16.2.0" },
+    { name = "pyopenssl", marker = "extra == 'sytest'", specifier = "==26.0.0" },
     { name = "pyparsing", specifier = ">=2.4" },
     { name = "pyrsistent", specifier = ">=0.18.0" },
     { name = "pysaml2", marker = "extra == 'all'", specifier = ">=4.5.0" },
@@ -1543,6 +1403,7 @@ requires-dist = [
     { name = "sentry-sdk", marker = "extra == 'all'", specifier = ">=0.7.2" },
     { name = "sentry-sdk", marker = "extra == 'sentry'", specifier = ">=0.7.2" },
     { name = "service-identity", specifier = ">=18.1.0" },
+    { name = "service-identity", marker = "extra == 'sytest'", specifier = "==24.2.0" },
     { name = "setuptools-rust", specifier = ">=1.3" },
     { name = "signedjson", specifier = ">=1.1.4,<2.0.0" },
     { name = "sortedcontainers", specifier = ">=2.0.5" },
@@ -1559,7 +1420,7 @@ requires-dist = [
     { name = "urllib3", specifier = ">=1.26.5" },
     { name = "zope-interface", specifier = ">=5.2" },
 ]
-provides-extras = ["matrix-synapse-ldap3", "postgres", "saml2", "oidc", "url-preview", "sentry", "opentracing", "jwt", "redis", "cache-memory", "test", "all"]
+provides-extras = ["matrix-synapse-ldap3", "postgres", "saml2", "oidc", "url-preview", "sytest", "sentry", "opentracing", "jwt", "redis", "cache-memory", "test", "all"]
 
 [package.metadata.requires-dev]
 core-dev = [
@@ -1745,10 +1606,10 @@ name = "mypy"
 version = "1.19.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "librt" },
+    { name = "librt", marker = "platform_python_implementation != 'PyPy'" },
     { name = "mypy-extensions" },
     { name = "pathspec" },
-    { name = "tomli" },
+    { name = "tomli", marker = "python_full_version < '3.11'" },
     { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/f5/db/4efed9504bc01309ab9c2da7e352cc223569f05478012b5d9ece38fd44d2/mypy-1.19.1.tar.gz", hash = "sha256:19d88bb05303fe63f71dd2c6270daca27cb9401c4ca8255fe50d1d920e0eb9ba", size = 3582404, upload-time = "2025-12-15T05:03:48.42Z" }
@@ -2201,7 +2062,7 @@ name = "pygithub"
 version = "2.9.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pyjwt" },
+    { name = "pyjwt", extra = ["crypto"] },
     { name = "pynacl" },
     { name = "requests" },
     { name = "typing-extensions" },
@@ -2226,11 +2087,16 @@ name = "pyjwt"
 version = "2.13.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "typing-extensions" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/3b/81/58d0ac84e1ef3a3843791d6954d94c0b33d526c75eeb1efbce9d0a4c4077/pyjwt-2.13.0.tar.gz", hash = "sha256:41571c89ca91598c79e8ef18a2d07367d4810fbbd6f637794879baf1b7703423", size = 107515, upload-time = "2026-05-21T19:54:36.618Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a3/5e/ecf12fdb62546d64385c158514e9b2b671f7832108ef2ecd2020ce0af2d1/pyjwt-2.13.0-py3-none-any.whl", hash = "sha256:66adcc2aff09b3f1bbd95fc1e1577df8ac8723c978552fd43304c8a290ac5728", size = 31274, upload-time = "2026-05-21T19:54:35.362Z" },
+]
+
+[package.optional-dependencies]
+crypto = [
+    { name = "cryptography" },
 ]
 
 [[package]]
@@ -2260,7 +2126,7 @@ name = "pynacl"
 version = "1.6.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cffi" },
+    { name = "cffi", marker = "platform_python_implementation != 'PyPy'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/d9/9a/4019b524b03a13438637b11538c82781a5eda427394380381af8f04f467a/pynacl-1.6.2.tar.gz", hash = "sha256:018494d6d696ae03c7e656e5e74cdfd8ea1326962cc401bcf018f1ed8436811c", size = 3511692, upload-time = "2026-01-01T17:48:10.851Z" }
 wheels = [
@@ -2296,7 +2162,7 @@ version = "26.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cryptography" },
-    { name = "typing-extensions" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/8e/11/a62e1d33b373da2b2c2cd9eb508147871c80f12b1cacde3c5d314922afdd/pyopenssl-26.0.0.tar.gz", hash = "sha256:f293934e52936f2e3413b89c6ce36df66a0b34ae1ea3a053b8c5020ff2f513fc", size = 185534, upload-time = "2026-03-15T14:28:26.353Z" }
 wheels = [
@@ -2346,7 +2212,6 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cryptography" },
     { name = "defusedxml" },
-    { name = "importlib-metadata" },
     { name = "pyopenssl" },
     { name = "python-dateutil" },
     { name = "pytz" },
@@ -2482,7 +2347,7 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "attrs" },
     { name = "rpds-py" },
-    { name = "typing-extensions" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/22/f5/df4e9027acead3ecc63e50fe1e36aca1523e1719559c499951bb4b53188f/referencing-0.37.0.tar.gz", hash = "sha256:44aefc3142c5b842538163acb373e24cce6632bd54bdb01b21ad5863489f50d8", size = 78036, upload-time = "2025-10-13T15:30:48.871Z" }
 wheels = [
@@ -2764,9 +2629,7 @@ version = "1.1.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "canonicaljson" },
-    { name = "importlib-metadata" },
     { name = "pynacl" },
-    { name = "typing-extensions" },
     { name = "unpaddedbase64" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/8e/3b/614317881125d7c9d582cf54d81f537cfb52c81c4fc0177a1709f3d475d1/signedjson-1.1.4.tar.gz", hash = "sha256:cd91c56af53f169ef032c62e9c4a3292dc158866933318d0592e3462db3d6492", size = 13565, upload-time = "2022-03-29T16:30:28.208Z" }
@@ -2902,9 +2765,8 @@ version = "25.8.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
-    { name = "importlib-metadata" },
     { name = "jinja2" },
-    { name = "tomli" },
+    { name = "tomli", marker = "python_full_version < '3.11'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/c2/eb/5bf25a34123698d3bbab39c5bc5375f8f8bcbcc5a136964ade66935b8b9d/towncrier-25.8.0.tar.gz", hash = "sha256:eef16d29f831ad57abb3ae32a0565739866219f1ebfbdd297d32894eb9940eb1", size = 76322, upload-time = "2025-08-30T11:41:55.393Z" }
 wheels = [
@@ -2921,7 +2783,7 @@ dependencies = [
     { name = "incremental" },
     { name = "multipart" },
     { name = "requests" },
-    { name = "twisted" },
+    { name = "twisted", extra = ["tls"] },
     { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/ed/7b/b9dba8d947584481aad7e29b01f2ea6bbe794a0352e0cdb68e99ab135c31/treq-25.5.0.tar.gz", hash = "sha256:25dde3a55ae85ec2f2c56332c99aef255ab14f997d0d00552ebff13538a9804a", size = 83588, upload-time = "2025-06-03T03:42:32.594Z" }
@@ -2935,8 +2797,7 @@ version = "6.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "id" },
-    { name = "importlib-metadata" },
-    { name = "keyring" },
+    { name = "keyring", marker = "platform_machine != 'ppc64le' and platform_machine != 's390x'" },
     { name = "packaging" },
     { name = "readme-renderer" },
     { name = "requests" },
@@ -2966,6 +2827,13 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/13/0f/82716ed849bf7ea4984c21385597c949944f0f9b428b5710f79d0afc084d/twisted-25.5.0.tar.gz", hash = "sha256:1deb272358cb6be1e3e8fc6f9c8b36f78eb0fa7c2233d2dbe11ec6fee04ea316", size = 3545725, upload-time = "2025-06-07T09:52:24.858Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/eb/66/ab7efd8941f0bc7b2bd555b0f0471bff77df4c88e0cc31120c82737fec77/twisted-25.5.0-py3-none-any.whl", hash = "sha256:8559f654d01a54a8c3efe66d533d43f383531ebf8d81d9f9ab4769d91ca15df7", size = 3204767, upload-time = "2025-06-07T09:52:21.428Z" },
+]
+
+[package.optional-dependencies]
+tls = [
+    { name = "idna" },
+    { name = "pyopenssl" },
+    { name = "service-identity" },
 ]
 
 [[package]]
