@@ -22,6 +22,7 @@
 import logging
 from typing import (
     TYPE_CHECKING,
+    Collection,
     Iterable,
     Mapping,
     cast,
@@ -1013,6 +1014,21 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             "DELETE FROM state_groups_pending_deletion WHERE state_group = ?",
             [(sg,) for sg in state_groups_to_delete],
         )
+
+        def delete_from_tikv(groups: "Collection[int]") -> None:
+            if self.tikv_pd_endpoints:
+                from synapse.logging.context import defer_to_thread
+                from synapse.synapse_rust import tikv_engine
+
+                def _do_delete() -> None:
+                    try:
+                        tikv_engine.batch_delete([f"sg:{sg}".encode("utf-8") for sg in groups])
+                    except Exception as e:
+                        logger.error("Failed to delete state groups from TiKV: %s", e)
+
+                defer_to_thread(self.hs.get_reactor(), _do_delete)
+
+        txn.call_after(delete_from_tikv, state_groups_to_delete)
 
         return True
 

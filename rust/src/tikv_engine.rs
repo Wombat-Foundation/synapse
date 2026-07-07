@@ -126,6 +126,22 @@ pub fn delete(py: Python<'_>, key: Vec<u8>) -> PyResult<()> {
 }
 
 #[pyfunction]
+pub fn batch_delete(py: Python<'_>, keys: Vec<Vec<u8>>) -> PyResult<()> {
+    let client = CLIENT.get().ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err(
+            "TiKV client is not open. Call open_client first.",
+        )
+    })?;
+    let rt = get_runtime();
+    py.detach(|| {
+        rt.block_on(async { client.batch_delete(keys).await })
+            .map_err(|e| e.to_string())
+    })
+    .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    Ok(())
+}
+
+#[pyfunction]
 pub fn scan_prefix(
     py: Python<'_>,
     prefix: Vec<u8>,
@@ -175,6 +191,7 @@ pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     child_module.add_function(wrap_pyfunction!(batch_get, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(batch_put, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(delete, &child_module)?)?;
+    child_module.add_function(wrap_pyfunction!(batch_delete, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(scan_prefix, &child_module)?)?;
 
     m.add_submodule(&child_module)?;
