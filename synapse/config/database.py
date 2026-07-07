@@ -22,7 +22,7 @@
 import argparse
 import logging
 import os
-from typing import Any
+from typing import Any, Optional
 
 from synapse.config._base import Config, ConfigError
 from synapse.types import JsonDict

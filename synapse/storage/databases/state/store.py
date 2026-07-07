@@ -154,10 +154,11 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
 
                 tikv_engine.open_client(self.tikv_pd_endpoints)
                 logger.info(
-                    f"Connected to TiKV cluster at {self.tikv_pd_endpoints} for state group offload"
+                    "Connected to TiKV cluster at %s for state group offload",
+                    self.tikv_pd_endpoints,
                 )
             except Exception as e:
-                logger.error(f"Failed to connect to TiKV cluster: {e}")
+                logger.error("Failed to connect to TiKV cluster: %s", e)
                 self.tikv_pd_endpoints = None
 
     @cached(max_entries=10000, iterable=True)
@@ -241,12 +242,14 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     return results
                 else:
                     logger.warning(
-                        f"State groups missing in TiKV: {missing_groups}, falling back to SQL for those"
+                        "State groups missing in TiKV: %s, falling back to SQL for those",
+                        missing_groups,
                     )
                     groups = missing_groups
             except Exception as e:
                 logger.error(
-                    f"Failed to fetch state groups from TiKV, falling back to SQL: {e}"
+                    "Failed to fetch state groups from TiKV, falling back to SQL: %s",
+                    e,
                 )
                 results = {}
 
@@ -777,11 +780,15 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                         ).encode("utf-8")
                         tikv_engine.put(key, val)
                         logger.info(
-                            f"Successfully stored state group {state_group} in TiKV (size: {len(full_state_ids)} entries)"
+                            "Successfully stored state group %s in TiKV (size: %s entries)",
+                            state_group,
+                            len(full_state_ids),
                         )
                     except Exception as e:
                         logger.error(
-                            f"Failed to store state group {state_group} in TiKV: {e}"
+                            "Failed to store state group %s in TiKV: %s",
+                            state_group,
+                            e,
                         )
                 return state_group
 
@@ -816,10 +823,14 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 ).encode("utf-8")
                 tikv_engine.put(key, val)
                 logger.info(
-                    f"Successfully stored state group {state_group} in TiKV (size: {len(current_state_ids)} entries)"
+                    "Successfully stored state group %s in TiKV (size: %s entries)",
+                    state_group,
+                    len(current_state_ids),
                 )
             except Exception as e:
-                logger.error(f"Failed to store state group {state_group} in TiKV: {e}")
+                logger.error(
+                    "Failed to store state group %s in TiKV: %s", state_group, e
+                )
 
         return state_group
 
