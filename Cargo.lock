@@ -1619,8 +1619,9 @@ dependencies = [
 
 [[package]]
 name = "rezzy"
-version = "0.5.0"
-source = "git+https://github.com/gamesguru/rezzy.git?branch=dev#d4b10b9d5c0a9cdef9371e5d6c538ccd60f4675a"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5348657b99f762b4251894d425bef2239c852d9c987f2363931ff2b33fbafea0"
 dependencies = [
  "blake2",
  "hashbrown 0.15.4",
