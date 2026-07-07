@@ -55,9 +55,27 @@ export SYTEST_LIB="/sytest/lib"
 echo "--- Patching SyTest's SQLite DB clearing to remove WAL and SHM files"
 sed -i 's/unlink $db if -f $db;/unlink $db if -f $db;\n    unlink "$db-wal" if -f "$db-wal";\n    unlink "$db-shm" if -f "$db-shm";/g' /sytest/lib/SyTest/Homeserver.pm
 
-echo "--- Patching /sytest/scripts/synapse_sytest.sh with uv sync and sytest_template"
-# Patch synapse_sytest.sh to run 'uv sync' instead of legacy pip/poetry install,
-# and pre-create the sytest_template database to avoid speculative DBI connection warnings.
+echo "--- Patching /sytest/scripts/synapse_sytest.sh to pre-create sytest_template database"
+# Create sytest_template database to quiet speculative DBI connect noise and errors
+/venv/bin/python -c "
+with open('/sytest/scripts/synapse_sytest.sh', 'r') as f:
+    content = f.read()
+
+content = content.replace(
+    'su -c \'psql -c \"CREATE DATABASE pg2;\"\' postgres',
+    'su -c \'psql -c \"CREATE DATABASE pg2;\"\' postgres\n    su -c \'psql -c \"CREATE DATABASE sytest_template;\"\' postgres'
+)
+content = content.replace(
+    'CREATE DATABASE pg2_state;',
+    'CREATE DATABASE pg2_state;\nCREATE DATABASE sytest_template;'
+)
+
+with open('/sytest/scripts/synapse_sytest.sh', 'w') as f:
+    f.write(content)
+"
+
+echo "--- Patching /sytest/scripts/synapse_sytest.sh to use uv sync"
+# Patch synapse_sytest.sh to run 'uv sync' instead of legacy pip/poetry install
 # We use the absolute path /venv/bin/python to avoid any container PATH issues
 /venv/bin/python -c "
 with open('/sytest/scripts/synapse_sytest.sh', 'r') as f:
@@ -69,16 +87,6 @@ assert 'poetry install -vv --extras all' in content or 'pip install' in content,
 content = content.replace('poetry install -vv --extras all', '/venv/bin/uv sync --all-extras $UV_ARGS')
 content = content.replace('/venv/bin/pip install -q --upgrade --upgrade-strategy eager --no-cache-dir /synapse[all]', '(cd /synapse && /venv/bin/uv sync --all-extras $UV_ARGS)')
 content = content.replace('/venv/bin/pip install --no-deps --no-index --find-links /pypi-offline-cache /synapse', '(cd /synapse && /venv/bin/uv sync --all-extras $UV_ARGS)')
-
-# Create sytest_template database to quiet speculative DBI connect noise and errors
-content = content.replace(
-    'su -c \'psql -c \"CREATE DATABASE pg2;\"\' postgres',
-    'su -c \'psql -c \"CREATE DATABASE pg2;\"\' postgres\n    su -c \'psql -c \"CREATE DATABASE sytest_template;\"\' postgres'
-)
-content = content.replace(
-    'CREATE DATABASE pg2_state;',
-    'CREATE DATABASE pg2_state;\nCREATE DATABASE sytest_template;'
-)
 
 # Confirm replacements actually succeeded
 assert 'poetry install -vv --extras all' not in content, 'Failed to replace poetry install command'
