@@ -59,6 +59,67 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _fetch_tikv_state_groups_sync(
+    groups: list[int], state_filter: StateFilter
+) -> tuple[dict[int, StateMap[str]], list[int]]:
+    import json
+
+    from synapse.synapse_rust import tikv_engine
+
+    results: dict[int, StateMap[str]] = {}
+    missing_groups: list[int] = []
+
+    groups_to_fetch = set(groups)
+    fetched_data = {}
+
+    while groups_to_fetch:
+        keys = [f"sg:{g}".encode("utf-8") for g in groups_to_fetch]
+        pairs = tikv_engine.batch_get(keys)
+
+        found_groups = set()
+        for k, v in pairs:
+            sg_id = int(k.decode("utf-8")[3:])
+            found_groups.add(sg_id)
+            fetched_data[sg_id] = json.loads(v.decode("utf-8"))
+
+        groups_to_fetch = set()
+        for sg_id in found_groups:
+            data = fetched_data[sg_id]
+            prev = data.get("prev")
+            if prev is not None and prev not in fetched_data:
+                groups_to_fetch.add(prev)
+
+    for g in groups:
+        if g not in fetched_data:
+            missing_groups.append(g)
+            continue
+
+        state_map: dict[tuple[str, str], str] = {}
+        curr = g
+        valid = True
+        deltas_stack = []
+
+        while curr is not None:
+            if curr not in fetched_data:
+                valid = False
+                break
+            data = fetched_data[curr]
+            deltas_stack.append(data.get("deltas", []))
+            curr = data.get("prev")
+
+        if not valid:
+            missing_groups.append(g)
+            continue
+
+        for deltas in reversed(deltas_stack):
+            for item in deltas:
+                state_map[(item[0], item[1])] = item[2]
+
+        results[g] = state_filter.filter_state(state_map)
+
+    return results, missing_groups
+
+
 MAX_STATE_DELTA_HOPS = 100
 
 
@@ -224,34 +285,35 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
 
         if self.tikv_pd_endpoints:
             try:
-                import json
+                from synapse.logging.context import (
+                    defer_to_thread,
+                    make_deferred_yieldable,
+                )
 
-                from synapse.synapse_rust import tikv_engine
+                tikv_res, missing_groups = await make_deferred_yieldable(
+                    defer_to_thread(
+                        self.hs.get_reactor(),
+                        _fetch_tikv_state_groups_sync,
+                        groups,
+                        state_filter,
+                    )
+                )
 
-                keys = [f"sg:{g}".encode("utf-8") for g in groups]
-                pairs = tikv_engine.batch_get(keys)
-                for k, v in pairs:
-                    sg_id = int(k.decode("utf-8")[3:])
-                    state_list = json.loads(v.decode("utf-8"))
-                    state_map = {(item[0], item[1]): item[2] for item in state_list}
-                    results[sg_id] = state_filter.filter_state(state_map)
+                results.update(tikv_res)
 
-                # Check for missing groups in TiKV and fetch them from database if needed
-                missing_groups = [g for g in groups if g not in results]
-                if not missing_groups:
-                    return results
-                else:
+                if missing_groups:
                     logger.warning(
                         "State groups missing in TiKV: %s, falling back to SQL for those",
                         missing_groups,
                     )
                     groups = missing_groups
+                else:
+                    return results
             except Exception as e:
                 logger.error(
                     "Failed to fetch state groups from TiKV, falling back to SQL: %s",
                     e,
                 )
-                results = {}
 
         chunks = [groups[i : i + 100] for i in range(0, len(groups), 100)]
         for chunk in chunks:
@@ -766,24 +828,29 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     try:
                         import json
 
+                        from synapse.logging.context import (
+                            defer_to_thread,
+                            make_deferred_yieldable,
+                        )
                         from synapse.synapse_rust import tikv_engine
 
-                        groups = await self._get_state_for_groups([prev_group])
-                        full_state_ids = dict(groups[prev_group])
-                        if delta_ids:
-                            full_state_ids.update(delta_ids)
                         key = f"sg:{state_group}".encode("utf-8")
-                        val = json.dumps(
-                            [
-                                [key[0], key[1], event_id]
-                                for key, event_id in full_state_ids.items()
-                            ]
-                        ).encode("utf-8")
-                        tikv_engine.put(key, val)
+                        deltas = (
+                            [[k[0], k[1], v] for k, v in delta_ids.items()]
+                            if delta_ids
+                            else []
+                        )
+                        payload = {"prev": prev_group, "deltas": deltas}
+                        val = json.dumps(payload).encode("utf-8")
+                        await make_deferred_yieldable(
+                            defer_to_thread(
+                                self.hs.get_reactor(), tikv_engine.put, key, val
+                            )
+                        )
                         logger.info(
-                            "Successfully stored state group %s in TiKV (size: %s entries)",
+                            "Successfully stored state group %s in TiKV (delta size: %s)",
                             state_group,
-                            len(full_state_ids),
+                            len(deltas),
                         )
                     except Exception as e:
                         logger.error(
@@ -813,20 +880,25 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             try:
                 import json
 
+                from synapse.logging.context import (
+                    defer_to_thread,
+                    make_deferred_yieldable,
+                )
                 from synapse.synapse_rust import tikv_engine
 
                 key = f"sg:{state_group}".encode("utf-8")
-                val = json.dumps(
-                    [
-                        [key[0], key[1], event_id]
-                        for key, event_id in current_state_ids.items()
-                    ]
-                ).encode("utf-8")
-                tikv_engine.put(key, val)
+                deltas = [
+                    [k[0], k[1], event_id] for k, event_id in current_state_ids.items()
+                ]
+                payload = {"prev": None, "deltas": deltas}
+                val = json.dumps(payload).encode("utf-8")
+                await make_deferred_yieldable(
+                    defer_to_thread(self.hs.get_reactor(), tikv_engine.put, key, val)
+                )
                 logger.info(
                     "Successfully stored state group %s in TiKV (size: %s entries)",
                     state_group,
-                    len(current_state_ids),
+                    len(deltas),
                 )
             except Exception as e:
                 logger.error(
