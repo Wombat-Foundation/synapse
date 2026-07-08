@@ -34,13 +34,7 @@ fn py_to_lean_event(py_ev: &Bound<'_, PyAny>) -> PyResult<LeanEvent<String, Valu
     let py_content = py_ev.getattr("content")?;
     let content: Value = depythonize(&py_content)?;
 
-    let power_level = if event_type == "m.room.power_levels" {
-        content
-            .get("users")
-            .and_then(|u| u.get(&sender))
-            .and_then(|p| p.as_i64())
-            .unwrap_or(100)
-    } else if event_type == "m.room.create" {
+    let power_level = if event_type == "m.room.create" || event_type == "m.room.power_levels" {
         100
     } else {
         0
@@ -62,25 +56,15 @@ fn py_to_lean_event(py_ev: &Bound<'_, PyAny>) -> PyResult<LeanEvent<String, Valu
 
 #[pyfunction]
 #[pyo3(
-    text_signature = "(unconflicted_state, conflicted_event_ids, event_map, state_res_version, /)"
+    text_signature = "(unconflicted_state, conflicted_event_ids, event_map, /)"
 )]
 pub fn resolve_v2_via_lattice_fold<'py>(
     py: Python<'py>,
     unconflicted_state: Bound<'py, PyDict>,
     conflicted_event_ids: Bound<'py, PyAny>,
     event_map: Bound<'py, PyDict>,
-    state_res_version: i32,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let version = match state_res_version {
-        2 => StateResVersion::V2,
-        3 => StateResVersion::V2_1,
-        _ => {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "Unsupported state resolution version: {}",
-                state_res_version
-            )))
-        }
-    };
+    let version = StateResVersion::V2;
 
     let mut unconf_state = SharedState::new();
     for (k, v) in unconflicted_state.iter() {

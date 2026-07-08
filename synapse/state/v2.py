@@ -160,49 +160,49 @@ async def resolve_events_with_store(
             )
 
     # Attempt to run high-performance state resolution in Rust via rezzy's lattice fold
-    try:
-        from synapse.synapse_rust.state_res import resolve_v2_via_lattice_fold
+    if room_version.state_res == StateResolutionVersions.V2:
+        try:
+            from synapse.synapse_rust.state_res import resolve_v2_via_lattice_fold
 
-        # Pre-fetch all reachable auth events to avoid any missing events in Rust
-        while True:
-            missing_auth_ids = set()
-            for eid in list(full_conflicted_set):
-                ev = event_map.get(eid)
-                if ev:
-                    for aid in ev.auth_event_ids():
-                        if aid not in event_map:
-                            missing_auth_ids.add(aid)
-            if not missing_auth_ids:
-                break
-            fetched = await state_res_store.get_events(
-                missing_auth_ids, allow_rejected=True
-            )
-            for ev in fetched.values():
-                if ev.room_id != room_id:
-                    raise Exception(
-                        "Attempting to state-resolve for room %s with event %s which is in %s"
-                        % (
-                            room_id,
-                            ev.event_id,
-                            ev.room_id,
+            # Pre-fetch all reachable auth events to avoid any missing events in Rust
+            while True:
+                missing_auth_ids = set()
+                for eid in list(full_conflicted_set):
+                    ev = event_map.get(eid)
+                    if ev:
+                        for aid in ev.auth_event_ids():
+                            if aid not in event_map:
+                                missing_auth_ids.add(aid)
+                if not missing_auth_ids:
+                    break
+                fetched = await state_res_store.get_events(
+                    missing_auth_ids, allow_rejected=True
+                )
+                for ev in fetched.values():
+                    if ev.room_id != room_id:
+                        raise Exception(
+                            "Attempting to state-resolve for room %s with event %s which is in %s"
+                            % (
+                                room_id,
+                                ev.event_id,
+                                ev.room_id,
+                            )
                         )
-                    )
-            event_map.update(fetched)
-            full_conflicted_set.update(fetched.keys())
+                event_map.update(fetched)
+                full_conflicted_set.update(fetched.keys())
 
-        logger.info("Resolving state v2 via Rust rezzy lattice fold")
-        resolved_state_rust: StateMap[str] = resolve_v2_via_lattice_fold(
-            unconflicted_state,
-            list(full_conflicted_set),
-            event_map,
-            room_version.state_res,
-        )
-        return resolved_state_rust
-    except Exception as e:
-        logger.exception(
-            "Failed to run Rust state resolution via lattice fold, falling back to python",
-            exc_info=e,
-        )
+            logger.info("Resolving state v2 via Rust rezzy lattice fold")
+            resolved_state_rust: StateMap[str] = resolve_v2_via_lattice_fold(
+                unconflicted_state,
+                list(full_conflicted_set),
+                event_map,
+            )
+            return resolved_state_rust
+        except Exception as e:
+            logger.exception(
+                "Failed to run Rust state resolution via lattice fold, falling back to python",
+                exc_info=e,
+            )
 
     full_conflicted_set = {eid for eid in full_conflicted_set if eid in event_map}
 
