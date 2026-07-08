@@ -60,7 +60,7 @@ class DependencyException(Exception):
             yield '"' + i + '"'
 
 
-DEV_EXTRAS = {"lint", "mypy", "test", "dev"}
+DEV_EXTRAS = {"lint", "mypy", "test", "dev", "sytest"}
 ALL_EXTRAS = metadata.metadata(DISTRIBUTION_NAME).get_all("Provides-Extra")
 assert ALL_EXTRAS is not None
 RUNTIME_EXTRAS = set(ALL_EXTRAS) - DEV_EXTRAS
