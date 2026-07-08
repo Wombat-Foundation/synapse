@@ -42,6 +42,14 @@ fn py_to_lean_event(
         None => 0,
     };
 
+    let rejected_reason: Option<String> = py_ev.getattr("rejected_reason")?.extract()?;
+    let rejected = rejected_reason.is_some();
+
+    let internal_metadata = py_ev.getattr("internal_metadata")?;
+    let soft_fail: bool = internal_metadata
+        .call_method0("is_soft_failed")?
+        .extract()?;
+
     Ok(LeanEvent {
         event_id,
         event_type,
@@ -53,6 +61,8 @@ fn py_to_lean_event(
         prev_events,
         auth_events,
         depth,
+        rejected,
+        soft_fail,
     })
 }
 

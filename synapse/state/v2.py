@@ -162,7 +162,9 @@ async def resolve_events_with_store(
     # Attempt to run high-performance state resolution in Rust via rezzy's lattice fold
     if room_version.state_res == StateResolutionVersions.V2:
         try:
-            from synapse.synapse_rust.state_res import resolve_v2_via_lattice_fold
+            import synapse.synapse_rust.state_res as rust_res
+
+            resolve_v2_via_lattice_fold = rust_res.resolve_v2_via_lattice_fold
 
             # Pre-fetch all reachable auth events to avoid any missing events in Rust
             while True:
