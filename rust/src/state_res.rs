@@ -20,7 +20,10 @@ use pythonize::depythonize;
 use rezzy::{resolve_lattice_fold, LeanEvent, SharedState, StateResVersion};
 use serde_json::Value;
 
-fn py_to_lean_event(py_ev: &Bound<'_, PyAny>) -> PyResult<LeanEvent<String, Value>> {
+fn py_to_lean_event(
+    py_ev: &Bound<'_, PyAny>,
+    power_levels: &Bound<'_, PyDict>,
+) -> PyResult<LeanEvent<String, Value>> {
     let event_id: String = py_ev.getattr("event_id")?.extract()?;
     let event_type: String = py_ev.getattr("type")?.extract()?;
     let state_key: Option<String> = py_ev.call_method0("get_state_key")?.extract()?;
@@ -34,10 +37,9 @@ fn py_to_lean_event(py_ev: &Bound<'_, PyAny>) -> PyResult<LeanEvent<String, Valu
     let py_content = py_ev.getattr("content")?;
     let content: Value = depythonize(&py_content)?;
 
-    let power_level = if event_type == "m.room.create" || event_type == "m.room.power_levels" {
-        100
-    } else {
-        0
+    let power_level: i64 = match power_levels.get_item(&event_id)? {
+        Some(val) => val.extract()?,
+        None => 0,
     };
 
     Ok(LeanEvent {
@@ -55,14 +57,13 @@ fn py_to_lean_event(py_ev: &Bound<'_, PyAny>) -> PyResult<LeanEvent<String, Valu
 }
 
 #[pyfunction]
-#[pyo3(
-    text_signature = "(unconflicted_state, conflicted_event_ids, event_map, /)"
-)]
+#[pyo3(text_signature = "(unconflicted_state, conflicted_event_ids, event_map, power_levels, /)")]
 pub fn resolve_v2_via_lattice_fold<'py>(
     py: Python<'py>,
     unconflicted_state: Bound<'py, PyDict>,
     conflicted_event_ids: Bound<'py, PyAny>,
     event_map: Bound<'py, PyDict>,
+    power_levels: Bound<'py, PyDict>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let version = StateResVersion::V2;
 
@@ -78,7 +79,7 @@ pub fn resolve_v2_via_lattice_fold<'py>(
     let mut parsed_events: HashMap<String, LeanEvent<String, Value>> = HashMap::new();
     for (k, v) in event_map.iter() {
         let event_id: String = k.extract()?;
-        let lean_ev = py_to_lean_event(&v)?;
+        let lean_ev = py_to_lean_event(&v, &power_levels)?;
         parsed_events.insert(event_id, lean_ev);
     }
 

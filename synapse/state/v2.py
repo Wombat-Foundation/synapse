@@ -192,10 +192,20 @@ async def resolve_events_with_store(
                 full_conflicted_set.update(fetched.keys())
 
             logger.info("Resolving state v2 via Rust rezzy lattice fold")
+            power_levels: dict[str, int] = {}
+            for eid in event_map:
+                power_levels[eid] = await _get_power_level_for_sender(
+                    room_id,
+                    eid,
+                    event_map,
+                    state_res_store,
+                )
+
             resolved_state_rust: StateMap[str] = resolve_v2_via_lattice_fold(
                 unconflicted_state,
                 list(full_conflicted_set),
                 event_map,
+                power_levels,
             )
             return resolved_state_rust
         except Exception as e:
