@@ -17,5 +17,4 @@ def resolve_v2_via_lattice_fold(
     unconflicted_state: dict[tuple[str, str], str],
     conflicted_event_ids: Iterable[str],
     event_map: dict[str, Any],
-    power_levels: dict[str, int],
 ) -> dict[tuple[str, str], str]: ...

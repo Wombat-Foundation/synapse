@@ -20,10 +20,7 @@ use pythonize::depythonize;
 use rezzy::{resolve_lattice_fold, LeanEvent, SharedState, StateResVersion};
 use serde_json::Value;
 
-fn py_to_lean_event(
-    py_ev: &Bound<'_, PyAny>,
-    power_levels: &Bound<'_, PyDict>,
-) -> PyResult<LeanEvent<String, Value>> {
+fn py_to_lean_event(py_ev: &Bound<'_, PyAny>) -> PyResult<LeanEvent<String, Value>> {
     let event_id: String = py_ev.getattr("event_id")?.extract()?;
     let event_type: String = py_ev.getattr("type")?.extract()?;
     let state_key: Option<String> = py_ev.call_method0("get_state_key")?.extract()?;
@@ -37,10 +34,7 @@ fn py_to_lean_event(
     let py_content = py_ev.getattr("content")?;
     let content: Value = depythonize(&py_content)?;
 
-    let power_level: i64 = match power_levels.get_item(&event_id)? {
-        Some(val) => val.extract()?,
-        None => 0,
-    };
+    let power_level: i64 = 0;
 
     let rejected_reason: Option<String> = py_ev.getattr("rejected_reason")?.extract()?;
     let rejected = rejected_reason.is_some();
@@ -67,13 +61,12 @@ fn py_to_lean_event(
 }
 
 #[pyfunction]
-#[pyo3(text_signature = "(unconflicted_state, conflicted_event_ids, event_map, power_levels, /)")]
+#[pyo3(text_signature = "(unconflicted_state, conflicted_event_ids, event_map, /)")]
 pub fn resolve_v2_via_lattice_fold<'py>(
     py: Python<'py>,
     unconflicted_state: Bound<'py, PyDict>,
     conflicted_event_ids: Bound<'py, PyAny>,
     event_map: Bound<'py, PyDict>,
-    power_levels: Bound<'py, PyDict>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let version = StateResVersion::V2;
 
@@ -87,11 +80,13 @@ pub fn resolve_v2_via_lattice_fold<'py>(
     let conflicted_ids: Vec<String> = conflicted_event_ids.extract()?;
 
     let mut parsed_events: HashMap<String, LeanEvent<String, Value>> = HashMap::new();
+    let start_conv = std::time::Instant::now();
     for (k, v) in event_map.iter() {
         let event_id: String = k.extract()?;
-        let lean_ev = py_to_lean_event(&v, &power_levels)?;
+        let lean_ev = py_to_lean_event(&v)?;
         parsed_events.insert(event_id, lean_ev);
     }
+    let conv_dur = start_conv.elapsed();
 
     let mut conflicted_events = HashMap::new();
     for id in conflicted_ids {
@@ -100,7 +95,11 @@ pub fn resolve_v2_via_lattice_fold<'py>(
         }
     }
 
+    let start_res = std::time::Instant::now();
     let resolved = resolve_lattice_fold(unconf_state, conflicted_events, &parsed_events, version);
+    let res_dur = start_res.elapsed();
+    
+    println!("Rust profile -> conversion: {:?}, resolution: {:?}", conv_dur, res_dur);
 
     let py_resolved = PyDict::new(py);
     for ((type_, state_key), event_id) in resolved {
