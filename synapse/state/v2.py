@@ -177,21 +177,18 @@ async def resolve_events_with_store(
             fetched = await state_res_store.get_events(
                 missing_auth_ids, allow_rejected=True
             )
+            for ev in fetched.values():
+                if ev.room_id != room_id:
+                    raise Exception(
+                        "Attempting to state-resolve for room %s with event %s which is in %s"
+                        % (
+                            room_id,
+                            ev.event_id,
+                            ev.room_id,
+                        )
+                    )
             event_map.update(fetched)
             full_conflicted_set.update(fetched.keys())
-
-        # Ensure all events are from the same room
-        for eid in full_conflicted_set:
-            ev = event_map.get(eid)
-            if ev and ev.room_id != room_id:
-                raise Exception(
-                    "Attempting to state-resolve for room %s with event %s which is in %s"
-                    % (
-                        room_id,
-                        ev.event_id,
-                        ev.room_id,
-                    )
-                )
 
         logger.info("Resolving state v2 via Rust rezzy lattice fold")
         resolved_state_rust: StateMap[str] = resolve_v2_via_lattice_fold(

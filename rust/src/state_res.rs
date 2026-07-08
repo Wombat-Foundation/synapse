@@ -34,18 +34,17 @@ fn py_to_lean_event(py_ev: &Bound<'_, PyAny>) -> PyResult<LeanEvent<String, Valu
     let py_content = py_ev.getattr("content")?;
     let content: Value = depythonize(&py_content)?;
 
-    let mut power_level = if event_type == "m.room.create" || event_type == "m.room.power_levels" {
+    let power_level = if event_type == "m.room.power_levels" {
+        content
+            .get("users")
+            .and_then(|u| u.get(&sender))
+            .and_then(|p| p.as_i64())
+            .unwrap_or(100)
+    } else if event_type == "m.room.create" {
         100
     } else {
         0
     };
-    if event_type == "m.room.power_levels" {
-        if let Some(users) = content.get("users").and_then(|u| u.as_object()) {
-            if let Some(pl) = users.get(&sender).and_then(|p| p.as_i64()) {
-                power_level = pl;
-            }
-        }
-    }
 
     Ok(LeanEvent {
         event_id,
@@ -73,7 +72,6 @@ pub fn resolve_v2_via_lattice_fold<'py>(
     state_res_version: i32,
 ) -> PyResult<Bound<'py, PyDict>> {
     let version = match state_res_version {
-        1 => StateResVersion::V1,
         2 => StateResVersion::V2,
         3 => StateResVersion::V2_1,
         _ => {
