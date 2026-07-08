@@ -167,9 +167,10 @@ async def resolve_events_with_store(
             resolve_v2_via_lattice_fold = rust_res.resolve_v2_via_lattice_fold
 
             # Pre-fetch all reachable auth events to avoid any missing events in Rust
+            unprocessed_ids = full_conflicted_set
             while True:
                 missing_auth_ids = set()
-                for eid in list(full_conflicted_set):
+                for eid in unprocessed_ids:
                     ev = event_map.get(eid)
                     if ev:
                         for aid in ev.auth_event_ids():
@@ -180,6 +181,12 @@ async def resolve_events_with_store(
                 fetched = await state_res_store.get_events(
                     missing_auth_ids, allow_rejected=True
                 )
+                still_missing = missing_auth_ids.difference(fetched.keys())
+                if still_missing:
+                    raise Exception(
+                        "Missing auth events required for Rust state res: %s"
+                        % (sorted(still_missing),)
+                    )
                 for ev in fetched.values():
                     if ev.room_id != room_id:
                         raise Exception(
@@ -191,7 +198,7 @@ async def resolve_events_with_store(
                             )
                         )
                 event_map.update(fetched)
-                full_conflicted_set.update(fetched.keys())
+                unprocessed_ids = fetched.keys()
 
             logger.info("Resolving state v2 via Rust rezzy lattice fold")
             power_levels: dict[str, int] = {}

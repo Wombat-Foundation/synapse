@@ -10,12 +10,12 @@
 # See the GNU Affero General Public License for more details:
 # <https://www.gnu.org/licenses/agpl-3.0.html>.
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from typing import Any
 
 def resolve_v2_via_lattice_fold(
-    unconflicted_state: Mapping[tuple[str, str], str],
+    unconflicted_state: dict[tuple[str, str], str],
     conflicted_event_ids: Iterable[str],
-    event_map: Mapping[str, Any],
-    power_levels: Mapping[str, int],
+    event_map: dict[str, Any],
+    power_levels: dict[str, int],
 ) -> dict[tuple[str, str], str]: ...
