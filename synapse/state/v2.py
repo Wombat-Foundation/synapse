@@ -193,6 +193,7 @@ async def resolve_events_with_store(
                     )
                 )
 
+        logger.info("Resolving state v2 via Rust rezzy lattice fold")
         resolved_state_rust: StateMap[str] = resolve_v2_via_lattice_fold(
             unconflicted_state,
             list(full_conflicted_set),
