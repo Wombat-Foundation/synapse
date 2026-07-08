@@ -98,8 +98,13 @@ pub fn resolve_v2_via_lattice_fold<'py>(
     let start_res = std::time::Instant::now();
     let resolved = resolve_lattice_fold(unconf_state, conflicted_events, &parsed_events, version);
     let res_dur = start_res.elapsed();
-    
-    println!("Rust profile -> conversion: {:?}, resolution: {:?}", conv_dur, res_dur);
+
+    eprintln!("rezzy resolution: conv={:?} res={:?}", conv_dur, res_dur);
+
+    eprintln!(
+        "Rust profile -> conversion: {:?}, resolution: {:?}",
+        conv_dur, res_dur
+    );
 
     let py_resolved = PyDict::new(py);
     for ((type_, state_key), event_id) in resolved {

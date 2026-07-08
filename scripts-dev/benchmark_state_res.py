@@ -168,7 +168,14 @@ async def main() -> None:
     N = args.events
 
     room_id = "!room:example.com"
-    real_version = RoomVersions.V6 if args.jsonl else RoomVersions.V2
+    real_version = RoomVersions.V2
+    if args.jsonl:
+        if "v11" in args.jsonl:
+            real_version = getattr(RoomVersions, "V11", RoomVersions.V10) # Fallback to V10 if V11 not found?
+        elif "v6" in args.jsonl:
+            real_version = RoomVersions.V6
+        else:
+            real_version = RoomVersions.V6
     room_version_rust = MockRoomVersion(real_version, StateResolutionVersions.V2)
     room_version_py = MockRoomVersion(real_version, None)
 
@@ -253,6 +260,7 @@ async def main() -> None:
                     elif len(state_sets) == 1:
                         state_before = dict(state_sets[0])
                     else:
+                        print(f"Resolving {len(state_sets)} states at {ev.event_id}")
                         state_before = dict(
                             await v2.resolve_events_with_store(
                                 cast(Any, clock),
