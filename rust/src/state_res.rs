@@ -1,0 +1,134 @@
+/*
+ * This file is licensed under the Affero General Public License (AGPL) version 3.
+ *
+ * Copyright (C) 2026 Element Creations Ltd.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as
+ * published by the Free Software Foundation, either version 3 of the
+ * License, or (at your option) any later version.
+ *
+ * See the GNU Affero General Public License for more details:
+ * <https://www.gnu.org/licenses/agpl-3.0.html>.
+ */
+
+use std::collections::HashMap;
+
+use pyo3::prelude::*;
+use pyo3::types::{PyAny, PyDict, PyTuple};
+use pythonize::depythonize;
+use rezzy::{resolve_lattice_fold, LeanEvent, SharedState, StateResVersion};
+use serde_json::Value;
+
+fn py_to_lean_event(py_ev: &Bound<'_, PyAny>) -> PyResult<LeanEvent<String, Value>> {
+    let event_id: String = py_ev.getattr("event_id")?.extract()?;
+    let event_type: String = py_ev.getattr("type")?.extract()?;
+    let state_key: Option<String> = py_ev.getattr("state_key")?.extract()?;
+    let sender: String = py_ev.getattr("sender")?.extract()?;
+    let origin_server_ts: u64 = py_ev.getattr("origin_server_ts")?.extract()?;
+    let depth: u64 = py_ev.getattr("depth")?.extract()?;
+
+    let prev_events: Vec<String> = py_ev.call_method0("prev_event_ids")?.extract()?;
+    let auth_events: Vec<String> = py_ev.call_method0("auth_event_ids")?.extract()?;
+
+    let py_content = py_ev.getattr("content")?;
+    let content: Value = depythonize(&py_content)?;
+
+    let mut power_level = if event_type == "m.room.create" || event_type == "m.room.power_levels" {
+        100
+    } else {
+        0
+    };
+    if event_type == "m.room.power_levels" {
+        if let Some(users) = content.get("users").and_then(|u| u.as_object()) {
+            if let Some(pl) = users.get(&sender).and_then(|p| p.as_i64()) {
+                power_level = pl;
+            }
+        }
+    }
+
+    Ok(LeanEvent {
+        event_id,
+        event_type,
+        state_key,
+        power_level,
+        origin_server_ts,
+        sender,
+        content,
+        prev_events,
+        auth_events,
+        depth,
+    })
+}
+
+#[pyfunction]
+#[pyo3(
+    text_signature = "(unconflicted_state, conflicted_event_ids, event_map, state_res_version, /)"
+)]
+pub fn resolve_v2_via_lattice_fold<'py>(
+    py: Python<'py>,
+    unconflicted_state: Bound<'py, PyDict>,
+    conflicted_event_ids: Bound<'py, PyAny>,
+    event_map: Bound<'py, PyDict>,
+    state_res_version: i32,
+) -> PyResult<Bound<'py, PyDict>> {
+    let version = match state_res_version {
+        1 => StateResVersion::V1,
+        2 => StateResVersion::V2,
+        3 => StateResVersion::V2_1,
+        _ => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Unsupported state resolution version: {}",
+                state_res_version
+            )))
+        }
+    };
+
+    let mut unconf_state = SharedState::new();
+    for (k, v) in unconflicted_state.iter() {
+        let key: (String, String) = k.extract()?;
+        let val: String = v.extract()?;
+        unconf_state.insert(key, val);
+    }
+
+    let conflicted_ids: Vec<String> = conflicted_event_ids.extract()?;
+
+    let mut parsed_events: HashMap<String, LeanEvent<String, Value>> = HashMap::new();
+    for (k, v) in event_map.iter() {
+        let event_id: String = k.extract()?;
+        let lean_ev = py_to_lean_event(&v)?;
+        parsed_events.insert(event_id, lean_ev);
+    }
+
+    let mut conflicted_events = HashMap::new();
+    for id in conflicted_ids {
+        if let Some(ev) = parsed_events.get(&id) {
+            conflicted_events.insert(id.clone(), ev.clone());
+        }
+    }
+
+    let resolved = resolve_lattice_fold(unconf_state, conflicted_events, &parsed_events, version);
+
+    let py_resolved = PyDict::new(py);
+    for ((type_, state_key), event_id) in resolved {
+        let py_key = PyTuple::new(py, &[type_, state_key])?;
+        py_resolved.set_item(py_key, event_id)?;
+    }
+
+    Ok(py_resolved)
+}
+
+pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    let child_module = PyModule::new(py, "state_res")?;
+    child_module.add_function(wrap_pyfunction!(
+        resolve_v2_via_lattice_fold,
+        &child_module
+    )?)?;
+    m.add_submodule(&child_module)?;
+
+    py.import("sys")?
+        .getattr("modules")?
+        .set_item("synapse.synapse_rust.state_res", child_module)?;
+
+    Ok(())
+}
