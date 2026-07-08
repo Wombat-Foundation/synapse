@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 
 try:
-    import tomllib
+    import tomllib  # type: ignore[import-not-found]
 except ModuleNotFoundError:
     import tomli as tomllib
 
