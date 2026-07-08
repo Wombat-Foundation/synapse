@@ -23,7 +23,7 @@ use serde_json::Value;
 fn py_to_lean_event(py_ev: &Bound<'_, PyAny>) -> PyResult<LeanEvent<String, Value>> {
     let event_id: String = py_ev.getattr("event_id")?.extract()?;
     let event_type: String = py_ev.getattr("type")?.extract()?;
-    let state_key: Option<String> = py_ev.getattr("state_key")?.extract()?;
+    let state_key: Option<String> = py_ev.call_method0("get_state_key")?.extract()?;
     let sender: String = py_ev.getattr("sender")?.extract()?;
     let origin_server_ts: u64 = py_ev.getattr("origin_server_ts")?.extract()?;
     let depth: u64 = py_ev.getattr("depth")?.extract()?;
