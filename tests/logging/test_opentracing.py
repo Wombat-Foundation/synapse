@@ -170,7 +170,9 @@ class LogContextScopeManagerTestCase(TestCase):
     def test_overlapping_spans(self) -> None:
         """Overlapping spans which are not neatly nested should work"""
         reactor = MemoryReactorClock()
-        clock = cast(Any, Clock)(reactor, server_name="test_server")
+        clock = Clock(  # type: ignore[multiple-internal-clocks]
+            cast(Any, reactor), server_name="test_server"
+        )
 
         scopes = []
 
@@ -339,7 +341,7 @@ class LogContextScopeManagerTestCase(TestCase):
                 # so that the test can complete and we see the underlying error.
                 callback_finished = True
 
-        cast(Any, run_as_background_process)(
+        run_as_background_process(  # type: ignore[untracked-background-process]
             desc="some-bg-task",
             server_name="test_server",
             func=bg_task,
@@ -405,7 +407,7 @@ class LogContextScopeManagerTestCase(TestCase):
                 "some-request",
                 tracer=self._tracer,
             ):
-                cast(Any, run_as_background_process)(
+                run_as_background_process(  # type: ignore[untracked-background-process]
                     desc="some-bg-task",
                     server_name="test_server",
                     func=bg_task,

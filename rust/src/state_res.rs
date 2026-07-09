@@ -108,7 +108,7 @@ fn resolver_data_to_lean_event(data: EventResolverData) -> LeanEvent<String, Val
         auth_events: data.auth_events,
         depth: data.depth,
         rejected: data.rejected,
-        soft_fail: false,
+        soft_fail: data.soft_failed,
     }
 }
 
@@ -123,6 +123,10 @@ fn py_to_lean_event(py_ev: &Bound<'_, PyAny>) -> PyResult<LeanEvent<String, Valu
     let prev_events: Vec<String> = py_ev.call_method0("prev_event_ids")?.extract()?;
     let auth_events: Vec<String> = py_ev.call_method0("auth_event_ids")?.extract()?;
     let rejected_reason: Option<String> = py_ev.getattr("rejected_reason")?.extract()?;
+    let soft_failed: bool = py_ev
+        .getattr("internal_metadata")?
+        .call_method0("is_soft_failed")?
+        .extract()?;
 
     let py_content = py_ev.getattr("content")?;
     let content: Value = depythonize(&py_content)?;
@@ -141,7 +145,7 @@ fn py_to_lean_event(py_ev: &Bound<'_, PyAny>) -> PyResult<LeanEvent<String, Valu
         auth_events,
         depth,
         rejected: rejected_reason.is_some(),
-        soft_fail: false,
+        soft_fail: soft_failed,
     })
 }
 

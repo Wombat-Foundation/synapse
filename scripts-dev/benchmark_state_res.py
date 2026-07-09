@@ -21,10 +21,11 @@ import pstats
 import re
 import sys
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from textwrap import dedent
-from typing import Any, Collection, Iterable, cast
+from typing import Any, Collection, Iterable, Iterator, cast
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -36,11 +37,26 @@ import synapse.state.v2 as v2  # noqa: E402
 from synapse.api.room_versions import (  # noqa: E402
     RoomVersion,
     RoomVersions,
-    StateResolutionVersions,
 )
 from synapse.events import EventBase, make_event_from_dict  # noqa: E402
 from synapse.state import StateDifference  # noqa: E402
 from synapse.util.duration import Duration  # noqa: E402
+
+
+@contextmanager
+def _disable_rust_lattice_fold_resolver() -> Iterator[None]:
+    import synapse.synapse_rust.state_res as rust_res
+
+    original = rust_res.resolve_v2_via_lattice_fold
+
+    def disabled_resolver(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("Rust lattice-fold state resolver disabled for benchmark")
+
+    cast(Any, rust_res).resolve_v2_via_lattice_fold = disabled_resolver
+    try:
+        yield
+    finally:
+        cast(Any, rust_res).resolve_v2_via_lattice_fold = original
 
 
 # Mock Clock
@@ -345,8 +361,8 @@ async def main() -> None:
             real_version = RoomVersions.V6
         else:
             real_version = RoomVersions.V6
-    room_version_rust = MockRoomVersion(real_version, StateResolutionVersions.V2)
-    room_version_py = MockRoomVersion(real_version, None)
+    room_version_rust = MockRoomVersion(real_version, real_version.state_res)
+    room_version_py = MockRoomVersion(real_version, real_version.state_res)
 
     # All MockEvent instances will share room_version_rust initially
     MockEvent.room_version = room_version_rust
@@ -472,9 +488,10 @@ async def main() -> None:
 
         print("Simulating resolution using Python fallback...")
         try:
-            stats_py, res_py = await run_profiled_simulation(
-                room_version_py, "cProfile: Python run"
-            )
+            with _disable_rust_lattice_fold_resolver():
+                stats_py, res_py = await run_profiled_simulation(
+                    room_version_py, "cProfile: Python run"
+                )
         except Exception as e:
             print(
                 "Python fallback benchmark failed for this DAG. "
@@ -673,8 +690,12 @@ async def main() -> None:
         )
 
         # 2. Benchmark Python (fallback)
-        # Configure MockEvent.room_version to use the Python-only mock room version
-        stats_py, res_py = await run_resolution(room_version_py, "cProfile: Python run")
+        # Disable only the Rust lattice-fold resolver while keeping the room
+        # version's state resolution algorithm unchanged.
+        with _disable_rust_lattice_fold_resolver():
+            stats_py, res_py = await run_resolution(
+                room_version_py, "cProfile: Python run"
+            )
 
         # Restore
         MockEvent.room_version = room_version_rust

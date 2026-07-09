@@ -106,6 +106,7 @@ pub(crate) struct EventResolverData {
     pub(crate) auth_events: Vec<String>,
     pub(crate) content: Value,
     pub(crate) rejected: bool,
+    pub(crate) soft_failed: bool,
 }
 
 /// Called when registering modules with python.
@@ -649,6 +650,7 @@ impl Event {
             auth_events: self.auth_event_ids()?,
             content,
             rejected: self.rejected_reason.is_some(),
+            soft_failed: self.internal_metadata.is_soft_failed()?,
         })
     }
 }
