@@ -20,6 +20,25 @@ use pythonize::depythonize;
 use rezzy::{resolve_lattice_fold, LeanEvent, SharedState, StateResVersion};
 use serde_json::Value;
 
+use crate::events::{Event, EventResolverData};
+
+fn resolver_data_to_lean_event(data: EventResolverData) -> LeanEvent<String, Value> {
+    LeanEvent {
+        event_id: data.event_id,
+        event_type: data.event_type,
+        state_key: data.state_key,
+        power_level: 0,
+        origin_server_ts: data.origin_server_ts,
+        sender: data.sender,
+        content: data.content,
+        prev_events: data.prev_events,
+        auth_events: data.auth_events,
+        depth: data.depth,
+        rejected: data.rejected,
+        soft_fail: data.soft_fail,
+    }
+}
+
 fn py_to_lean_event(py_ev: &Bound<'_, PyAny>) -> PyResult<LeanEvent<String, Value>> {
     let event_id: String = py_ev.getattr("event_id")?.extract()?;
     let event_type: String = py_ev.getattr("type")?.extract()?;
@@ -83,7 +102,11 @@ pub fn resolve_v2_via_lattice_fold<'py>(
     let start_conv = std::time::Instant::now();
     for (k, v) in event_map.iter() {
         let event_id: String = k.extract()?;
-        let lean_ev = py_to_lean_event(&v)?;
+        let lean_ev = if let Ok(event) = v.extract::<PyRef<Event>>() {
+            resolver_data_to_lean_event(event.resolver_data()?)
+        } else {
+            py_to_lean_event(&v)?
+        };
         parsed_events.insert(event_id, lean_ev);
     }
     let conv_dur = start_conv.elapsed();

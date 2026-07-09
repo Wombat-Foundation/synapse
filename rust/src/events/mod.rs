@@ -58,6 +58,7 @@ use pyo3::{
     wrap_pyfunction, Bound, IntoPyObject, PyAny, PyResult, Python,
 };
 use pythonize::{depythonize, pythonize};
+use serde_json::Value;
 
 use crate::events::{
     constants::event_type::M_ROOM_MEMBER,
@@ -92,6 +93,21 @@ pub mod unsigned;
 pub mod utils;
 
 use json_object::JsonObject;
+
+#[derive(Clone)]
+pub(crate) struct EventResolverData {
+    pub(crate) event_id: String,
+    pub(crate) event_type: String,
+    pub(crate) state_key: Option<String>,
+    pub(crate) sender: String,
+    pub(crate) origin_server_ts: u64,
+    pub(crate) depth: u64,
+    pub(crate) prev_events: Vec<String>,
+    pub(crate) auth_events: Vec<String>,
+    pub(crate) content: Value,
+    pub(crate) rejected: bool,
+    pub(crate) soft_fail: bool,
+}
 
 /// Called when registering modules with python.
 pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -604,6 +620,38 @@ impl Event {
         value
             .map(|v| pythonize(py, v).map_err(Into::into))
             .transpose()
+    }
+}
+
+impl Event {
+    pub(crate) fn resolver_data(&self) -> PyResult<EventResolverData> {
+        let origin_server_ts = u64::try_from(self.origin_server_ts()).map_err(|_| {
+            PyValueError::new_err(format!(
+                "event {} has a negative origin_server_ts",
+                self.event_id
+            ))
+        })?;
+        let depth = u64::try_from(self.depth()).map_err(|_| {
+            PyValueError::new_err(format!("event {} has a negative depth", self.event_id))
+        })?;
+        let content =
+            serde_json::to_value(&self.parsed_event.common_fields.content).map_err(|err| {
+                PyValueError::new_err(format!("Failed to serialize event content: {err}"))
+            })?;
+
+        Ok(EventResolverData {
+            event_id: self.event_id.to_string(),
+            event_type: self.r#type().to_string(),
+            state_key: self.get_state_key().map(str::to_owned),
+            sender: self.sender().to_string(),
+            origin_server_ts,
+            depth,
+            prev_events: self.prev_event_ids(),
+            auth_events: self.auth_event_ids()?,
+            content,
+            rejected: self.rejected_reason.is_some(),
+            soft_fail: self.internal_metadata.is_soft_failed()?,
+        })
     }
 }
 
