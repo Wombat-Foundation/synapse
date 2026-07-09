@@ -582,7 +582,7 @@ impl EventInternalMetadata {
         Ok(self.read_inner()?.need_to_check_redaction())
     }
 
-    pub(crate) fn is_soft_failed(&self) -> PyResult<bool> {
+    fn is_soft_failed(&self) -> PyResult<bool> {
         Ok(self.read_inner()?.is_soft_failed())
     }
 

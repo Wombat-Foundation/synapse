@@ -389,6 +389,8 @@ async def main() -> None:
             store.auth_chains = auth_chains  # attach precomputed chains
 
             clock = MockClock()
+            if not events_list:
+                raise ValueError("JSONL DAG contains no events")
             room_id = events_list[0].room_id
 
             # Map from event_id to the state *after* that event
