@@ -1,0 +1,13 @@
+from __future__ import annotations
+
+from typing import Any
+
+from .config import Span
+
+class BaseReporter:
+    def set_process(self, *args: Any, **kwargs: Any) -> None: ...
+    def report_span(self, span: Any) -> None: ...
+
+class InMemoryReporter(BaseReporter):
+    def __init__(self) -> None: ...
+    def get_spans(self) -> list[Span]: ...
