@@ -31,7 +31,8 @@ pub fn get_auth_chain_difference_from_event_graph<'py>(
     state_sets: Bound<'py, PyAny>,
     event_map: Bound<'py, PyDict>,
 ) -> PyResult<Bound<'py, PySet>> {
-    let mut auth_graph_events: HashMap<String, LeanEvent<String, ()>> = HashMap::new();
+    let mut auth_graph_events: HashMap<String, LeanEvent<String, ()>> =
+        HashMap::with_capacity(event_map.len());
     for (k, v) in event_map.iter() {
         let event_id: String = k.extract()?;
         let auth_ids: Vec<String> = if let Ok(event) = v.extract::<PyRef<Event>>() {
@@ -60,33 +61,33 @@ pub fn get_auth_chain_difference_from_event_graph<'py>(
     }
     let auth_graph = AuthGraph::build(&auth_graph_events);
 
-    let mut state_sets_ids: Vec<Vec<String>> = Vec::new();
+    let mut union: Option<HashSet<String>> = None;
+    let mut intersection: HashSet<String> = HashSet::new();
+
     for state_set in state_sets.try_iter()? {
         let state_set = state_set?;
         let values = state_set.call_method0("values")?;
-        state_sets_ids.push(values.extract()?);
+        let state_set_ids: Vec<String> = values.extract()?;
+        let closure: HashSet<String> = auth_graph
+            .auth_difference(&[], &state_set_ids)
+            .into_iter()
+            .collect();
+
+        match &mut union {
+            None => {
+                intersection = closure.clone();
+                union = Some(closure);
+            }
+            Some(union) => {
+                union.extend(closure.iter().cloned());
+                intersection = intersection.intersection(&closure).cloned().collect();
+            }
+        }
     }
 
-    let mut state_set_closures: Vec<HashSet<String>> = Vec::new();
-    for state_set in state_sets_ids {
-        state_set_closures.push(
-            auth_graph
-                .auth_difference(&[], &state_set)
-                .into_iter()
-                .collect(),
-        );
-    }
-
-    if state_set_closures.is_empty() {
+    let Some(union) = union else {
         return PySet::empty(py);
-    }
-
-    let mut union = state_set_closures[0].clone();
-    let mut intersection = state_set_closures[0].clone();
-    for closure in state_set_closures.iter().skip(1) {
-        union.extend(closure.iter().cloned());
-        intersection = intersection.intersection(closure).cloned().collect();
-    }
+    };
 
     let result: HashSet<String> = union.difference(&intersection).cloned().collect();
     PySet::new(py, result)
@@ -160,7 +161,8 @@ pub fn resolve_v2_via_lattice_fold<'py>(
 
     let conflicted_ids: Vec<String> = conflicted_event_ids.extract()?;
 
-    let mut parsed_events: HashMap<String, LeanEvent<String, Value>> = HashMap::new();
+    let mut parsed_events: HashMap<String, LeanEvent<String, Value>> =
+        HashMap::with_capacity(event_map.len());
     let start_conv = std::time::Instant::now();
     for (k, v) in event_map.iter() {
         let event_id: String = k.extract()?;
@@ -173,7 +175,7 @@ pub fn resolve_v2_via_lattice_fold<'py>(
     }
     let conv_dur = start_conv.elapsed();
 
-    let mut conflicted_events = HashMap::new();
+    let mut conflicted_events = HashMap::with_capacity(conflicted_ids.len());
     for id in conflicted_ids {
         if let Some(ev) = parsed_events.get(&id) {
             conflicted_events.insert(id.clone(), ev.clone());
