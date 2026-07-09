@@ -35,7 +35,8 @@ pub fn get_auth_chain_difference_from_event_graph<'py>(
     for (k, v) in event_map.iter() {
         let event_id: String = k.extract()?;
         let auth_ids: Vec<String> = if let Ok(event) = v.extract::<PyRef<Event>>() {
-            event.auth_event_ids()?
+            let data = event.resolver_data()?;
+            data.auth_events
         } else {
             v.call_method0("auth_event_ids")?.extract()?
         };
