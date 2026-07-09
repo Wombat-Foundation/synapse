@@ -453,51 +453,49 @@ async def main() -> None:
         if not args.profile:
             return await run_simulation(room_version_to_use)
 
-            profiler = cProfile.Profile()
-            profiler.enable()
-            try:
-                result = await run_simulation(room_version_to_use)
-            finally:
-                profiler.disable()
-            _print_profile(profiler, title, args.profile_limit)
-            return result
-
-        print("Simulating resolution using Rust (rezzy)...")
-        stats_rust, res_rust = await run_profiled_simulation(
-            room_version_rust, "cProfile: Rust run"
-        )
-
-        print("Simulating resolution using Python fallback...")
+        profiler = cProfile.Profile()
+        profiler.enable()
         try:
-            stats_py, res_py = await run_profiled_simulation(
-                room_version_py, "cProfile: Python run"
-            )
-        except Exception as e:
-            print(
-                "Python fallback benchmark failed for this DAG. "
-                f"The Rust run completed, but the Python path raised: {type(e).__name__}: {e}"
-            )
-            return
+            result = await run_simulation(room_version_to_use)
+        finally:
+            profiler.disable()
+        _print_profile(profiler, title, args.profile_limit)
+        return result
 
-        # Restore
-        MockEvent.room_version = room_version_rust
+    print("Simulating resolution using Rust (rezzy)...")
+    stats_rust, res_rust = await run_profiled_simulation(
+        room_version_rust, "cProfile: Rust run"
+    )
 
-        assert res_rust == res_py, (
-            "Error: Resolved states differ between Rust and Python!"
+    print("Simulating resolution using Python fallback...")
+    try:
+        stats_py, res_py = await run_profiled_simulation(
+            room_version_py, "cProfile: Python run"
         )
-
-        _print_results_table(stats_py, stats_rust, "Simulation Results:")
-        print("\nStage breakdown:")
+    except Exception as e:
         print(
-            f"  - Python total: {stats_py.total_s:.5f}s, bookkeeping: {stats_py.bookkeeping_s:.5f}s, resolver: {stats_py.resolve_s:.5f}s, merge points: {stats_py.merge_points}"
-        )
-        print(
-            f"  - Rust total:   {stats_rust.total_s:.5f}s, bookkeeping: {stats_rust.bookkeeping_s:.5f}s, resolver: {stats_rust.resolve_s:.5f}s, merge points: {stats_rust.merge_points}"
+            "Python fallback benchmark failed for this DAG. "
+            f"The Rust run completed, but the Python path raised: {type(e).__name__}: {e}"
         )
         return
 
+    # Restore
+    MockEvent.room_version = room_version_rust
+
+    assert res_rust == res_py, "Error: Resolved states differ between Rust and Python!"
+
+    _print_results_table(stats_py, stats_rust, "Simulation Results:")
+    print("\nStage breakdown:")
+    print(
+        f"  - Python total: {stats_py.total_s:.5f}s, bookkeeping: {stats_py.bookkeeping_s:.5f}s, resolver: {stats_py.resolve_s:.5f}s, merge points: {stats_py.merge_points}"
+    )
+    print(
+        f"  - Rust total:   {stats_rust.total_s:.5f}s, bookkeeping: {stats_rust.bookkeeping_s:.5f}s, resolver: {stats_rust.resolve_s:.5f}s, merge points: {stats_rust.merge_points}"
+    )
+    return
+
     # Baseline Events
-    bench_event_map: dict[str, EventBase] = {}
+    bench_event_map: dict[str, EventBase] = {}  # type: ignore[unreachable]
 
     # 1. CREATE
     create = _make_benchmark_event(
