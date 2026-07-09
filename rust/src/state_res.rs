@@ -108,7 +108,7 @@ fn resolver_data_to_lean_event(data: EventResolverData) -> LeanEvent<String, Val
         auth_events: data.auth_events,
         depth: data.depth,
         rejected: data.rejected,
-        soft_fail: data.soft_fail,
+        soft_fail: false,
     }
 }
 
@@ -141,10 +141,7 @@ fn py_to_lean_event(py_ev: &Bound<'_, PyAny>) -> PyResult<LeanEvent<String, Valu
         auth_events,
         depth,
         rejected: rejected_reason.is_some(),
-        soft_fail: py_ev
-            .getattr("internal_metadata")?
-            .call_method0("is_soft_failed")?
-            .extract()?,
+        soft_fail: false,
     })
 }
 
@@ -169,7 +166,6 @@ pub fn resolve_v2_via_lattice_fold<'py>(
 
     let mut parsed_events: HashMap<String, LeanEvent<String, Value>> =
         HashMap::with_capacity(event_map.len());
-    let start_conv = std::time::Instant::now();
     for (k, v) in event_map.iter() {
         let event_id: String = k.extract()?;
         let lean_ev = if let Ok(event) = v.extract::<PyRef<Event>>() {
@@ -179,7 +175,6 @@ pub fn resolve_v2_via_lattice_fold<'py>(
         };
         parsed_events.insert(event_id, lean_ev);
     }
-    let conv_dur = start_conv.elapsed();
 
     let mut conflicted_events = HashMap::with_capacity(conflicted_ids.len());
     for id in conflicted_ids {
@@ -188,16 +183,7 @@ pub fn resolve_v2_via_lattice_fold<'py>(
         }
     }
 
-    let start_res = std::time::Instant::now();
     let resolved = resolve_lattice_fold(unconf_state, conflicted_events, &parsed_events, version);
-    let res_dur = start_res.elapsed();
-
-    eprintln!("rezzy resolution: conv={:?} res={:?}", conv_dur, res_dur);
-
-    eprintln!(
-        "Rust profile -> conversion: {:?}, resolution: {:?}",
-        conv_dur, res_dur
-    );
 
     let py_resolved = PyDict::new(py);
     for ((type_, state_key), event_id) in resolved {

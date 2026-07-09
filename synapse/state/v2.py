@@ -180,7 +180,7 @@ async def resolve_events_with_store(
 
             resolve_v2_via_lattice_fold = rust_res.resolve_v2_via_lattice_fold
 
-            logger.info("Resolving state v2 via Rust rezzy lattice fold")
+            logger.debug("Resolving state v2 via Rust rezzy lattice fold")
 
             resolved_state_rust: StateMap[str] = resolve_v2_via_lattice_fold(
                 dict(unconflicted_state),

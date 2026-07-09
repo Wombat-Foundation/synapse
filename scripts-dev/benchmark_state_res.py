@@ -23,6 +23,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from textwrap import dedent
 from typing import Any, Collection, Iterable, cast
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -121,17 +122,21 @@ class MockStateResolutionStore:
     async def get_events(
         self, event_ids: Collection[str], allow_rejected: bool = False
     ) -> dict[str, EventBase]:
+        missing = [eid for eid in event_ids if eid not in self.event_map]
+        if missing:
+            raise KeyError(f"Missing benchmark events: {missing}")
+
         return cast(
             dict[str, EventBase],
-            {eid: self.event_map[eid] for eid in event_ids if eid in self.event_map},
+            {eid: self.event_map[eid] for eid in event_ids},
         )
 
     def _get_auth_chain(self, event_ids: Iterable[str]) -> list[str]:
-        if self.auth_chains:
+        event_ids = list(event_ids)
+        if self.auth_chains and all(eid in self.auth_chains for eid in event_ids):
             result = set()
             for eid in event_ids:
-                if eid in self.auth_chains:
-                    result.update(self.auth_chains[eid])
+                result.update(self.auth_chains[eid])
             return list(result)
 
         result = set()
@@ -221,15 +226,17 @@ def _print_results_table(stats_py: RunStats, stats_rust: RunStats, title: str) -
     speedup_width = max(len("Speedup"), len(speedup_py), len(speedup_rust))
 
     print(
-        f"""
-{title}
-+--------------------+---------------+---------------+{"-" * (speedup_width + 2)}+
-| {"Implementation":<18} | {"Duration (s)":<13} | {"Resolver (s)":<13} | {"Speedup":<{speedup_width}} |
-+--------------------+---------------+---------------+{"-" * (speedup_width + 2)}+
-| {"Python V2":<18} | {stats_py.total_s:<13.5f} | {stats_py.resolve_s:<13.5f} | {speedup_py:>{speedup_width}} |
-| {"Rust (rezzy)":<18} | {stats_rust.total_s:<13.5f} | {stats_rust.resolve_s:<13.5f} | {speedup_rust:<{speedup_width}} |
-+--------------------+---------------+---------------+{"-" * (speedup_width + 2)}+
-""".strip()
+        dedent(
+            f"""
+            {title}
+            +--------------------+---------------+---------------+{"-" * (speedup_width + 2)}+
+            | {"Implementation":<18} | {"Duration (s)":<13} | {"Resolver (s)":<13} | {"Speedup":<{speedup_width}} |
+            +--------------------+---------------+---------------+{"-" * (speedup_width + 2)}+
+            | {"Python V2":<18} | {stats_py.total_s:<13.5f} | {stats_py.resolve_s:<13.5f} | {speedup_py:>{speedup_width}} |
+            | {"Rust (rezzy)":<18} | {stats_rust.total_s:<13.5f} | {stats_rust.resolve_s:<13.5f} | {speedup_rust:>{speedup_width}} |
+            +--------------------+---------------+---------------+{"-" * (speedup_width + 2)}+
+            """
+        ).rstrip()
     )
 
 
@@ -286,11 +293,6 @@ def _load_jsonl_events(path: str) -> tuple[dict[str, Any], list[MockEvent]]:
     return event_map, events_list
 
 
-def _load_legacy_jsonl_events(path: str) -> tuple[dict[str, Any], list[MockEvent]]:
-    """Backward-compatible loader for older JSONL dumps with explicit event IDs."""
-    return _load_jsonl_events(path)
-
-
 async def main() -> None:
     import logging
 
@@ -341,6 +343,7 @@ async def main() -> None:
         else:
             real_version = RoomVersions.V6
     room_version_rust = MockRoomVersion(real_version, StateResolutionVersions.V2)
+    room_version_py = MockRoomVersion(real_version, None)
 
     # All MockEvent instances will share room_version_rust initially
     MockEvent.room_version = room_version_rust
@@ -360,123 +363,100 @@ async def main() -> None:
                     chain.update(auth_chains[aid])
             auth_chains[ev.event_id] = chain
 
-        async def run_simulation(
-            room_version_to_use: MockRoomVersion,
-            disable_rust: bool = False,
-        ) -> tuple[RunStats, dict]:
-            # Set the room version for events
-            MockEvent.room_version = room_version_to_use
+    async def run_simulation(
+        room_version_to_use: MockRoomVersion,
+    ) -> tuple[RunStats, dict]:
+        # Set the room version for events
+        MockEvent.room_version = room_version_to_use
 
-            rust_res_module: Any = None
-            rust_resolve_fn: Any = None
-            if disable_rust:
-                try:
-                    import synapse.synapse_rust.state_res as rust_res
+        # Initialize store
+        store = MockStateResolutionStore(event_map)
+        store.auth_chains = auth_chains  # attach precomputed chains
 
-                    rust_res_module = rust_res
-                    rust_resolve_fn = cast(Any, rust_res.resolve_v2_via_lattice_fold)
+        clock = MockClock()
+        if not events_list:
+            raise ValueError("JSONL DAG contains no events")
+        room_id = events_list[0].room_id
 
-                    def _disabled_rust(*args: Any, **kwargs: Any) -> None:
-                        raise RuntimeError("Rust resolver disabled for Python baseline")
+        # Map from event_id to the state *after* that event
+        event_states: dict[str, dict[tuple[str, str], str]] = {}
+        start_time = time.perf_counter()
+        bookkeeping_s = 0.0
+        resolve_s = 0.0
+        merge_points = 0
+        try:
+            # Iterate through events and construct/resolve state
+            for ev in events_list:
+                loop_start = time.perf_counter()
+                prev_ids = ev.prev_event_ids()
 
-                    cast(Any, rust_res).resolve_v2_via_lattice_fold = _disabled_rust
-                except Exception:
-                    rust_res_module = None
-                    rust_resolve_fn = None
+                # Compute state before this event
+                if not prev_ids:
+                    state_before: dict[tuple[str, str], str] = {}
+                elif len(prev_ids) == 1:
+                    prev_id = prev_ids[0]
+                    state_before = dict(event_states.get(prev_id, {}))
+                else:
+                    # Merge point! We must resolve the states after the prev events
+                    state_sets = []
+                    for pid in prev_ids:
+                        if pid in event_states:
+                            state_sets.append(event_states[pid])
 
-            # Initialize store
-            store = MockStateResolutionStore(event_map)
-            store.auth_chains = auth_chains  # attach precomputed chains
-
-            clock = MockClock()
-            if not events_list:
-                raise ValueError("JSONL DAG contains no events")
-            room_id = events_list[0].room_id
-
-            # Map from event_id to the state *after* that event
-            event_states: dict[str, dict[tuple[str, str], str]] = {}
-            start_time = time.perf_counter()
-            bookkeeping_s = 0.0
-            resolve_s = 0.0
-            merge_points = 0
-
-            try:
-                # Iterate through events and construct/resolve state
-                for ev in events_list:
-                    loop_start = time.perf_counter()
-                    prev_ids = ev.prev_event_ids()
-
-                    # Compute state before this event
-                    if not prev_ids:
-                        state_before: dict[tuple[str, str], str] = {}
-                    elif len(prev_ids) == 1:
-                        prev_id = prev_ids[0]
-                        state_before = dict(event_states.get(prev_id, {}))
+                    if not state_sets:
+                        state_before = {}
+                    elif len(state_sets) == 1:
+                        state_before = dict(state_sets[0])
                     else:
-                        # Merge point! We must resolve the states after the prev events
-                        state_sets = []
-                        for pid in prev_ids:
-                            if pid in event_states:
-                                state_sets.append(event_states[pid])
-
-                        if not state_sets:
-                            state_before = {}
-                        elif len(state_sets) == 1:
-                            state_before = dict(state_sets[0])
-                        else:
-                            merge_points += 1
-                            print(
-                                f"Resolving {len(state_sets)} states at {ev.event_id}"
+                        merge_points += 1
+                        print(f"Resolving {len(state_sets)} states at {ev.event_id}")
+                        resolve_start = time.perf_counter()
+                        state_before = dict(
+                            await v2.resolve_events_with_store(
+                                cast(Any, clock),
+                                room_id,
+                                cast(RoomVersion, room_version_to_use),
+                                state_sets,
+                                None,
+                                cast(Any, store),
                             )
-                            resolve_start = time.perf_counter()
-                            state_before = dict(
-                                await v2.resolve_events_with_store(
-                                    cast(Any, clock),
-                                    room_id,
-                                    cast(RoomVersion, room_version_to_use),
-                                    state_sets,
-                                    None,
-                                    cast(Any, store),
-                                )
-                            )
-                            resolve_s += time.perf_counter() - resolve_start
+                        )
+                        resolve_s += time.perf_counter() - resolve_start
 
-                    # Compute state after this event
-                    state_after = dict(state_before)
-                    if ev.state_key is not None:
-                        state_after[(ev.type, ev.state_key)] = ev.event_id
+                # Compute state after this event
+                state_after = dict(state_before)
+                if ev.state_key is not None:
+                    state_after[(ev.type, ev.state_key)] = ev.event_id
 
-                    event_states[ev.event_id] = state_after
-                    bookkeeping_s += time.perf_counter() - loop_start
+                event_states[ev.event_id] = state_after
+                bookkeeping_s += time.perf_counter() - loop_start
 
-                duration = time.perf_counter() - start_time
-                # Get state of the last event
-                final_state = event_states[events_list[-1].event_id]
-                return (
-                    RunStats(
-                        total_s=duration,
-                        bookkeeping_s=bookkeeping_s - resolve_s,
-                        resolve_s=resolve_s,
-                        merge_points=merge_points,
-                    ),
-                    final_state,
-                )
-            finally:
-                if rust_res_module is not None and rust_resolve_fn is not None:
-                    rust_res_module.resolve_v2_via_lattice_fold = rust_resolve_fn
+            duration = time.perf_counter() - start_time
+            # Get state of the last event
+            final_state = event_states[events_list[-1].event_id]
+            return (
+                RunStats(
+                    total_s=duration,
+                    bookkeeping_s=bookkeeping_s - resolve_s,
+                    resolve_s=resolve_s,
+                    merge_points=merge_points,
+                ),
+                final_state,
+            )
+        finally:
+            pass
 
-        async def run_profiled_simulation(
-            room_version_to_use: MockRoomVersion,
-            title: str,
-            disable_rust: bool = False,
-        ) -> tuple[RunStats, dict]:
-            if not args.profile:
-                return await run_simulation(room_version_to_use, disable_rust)
+    async def run_profiled_simulation(
+        room_version_to_use: MockRoomVersion,
+        title: str,
+    ) -> tuple[RunStats, dict]:
+        if not args.profile:
+            return await run_simulation(room_version_to_use)
 
             profiler = cProfile.Profile()
             profiler.enable()
             try:
-                result = await run_simulation(room_version_to_use, disable_rust)
+                result = await run_simulation(room_version_to_use)
             finally:
                 profiler.disable()
             _print_profile(profiler, title, args.profile_limit)
@@ -490,7 +470,7 @@ async def main() -> None:
         print("Simulating resolution using Python fallback...")
         try:
             stats_py, res_py = await run_profiled_simulation(
-                room_version_rust, "cProfile: Python run", disable_rust=True
+                room_version_py, "cProfile: Python run"
             )
         except Exception as e:
             print(
@@ -506,7 +486,7 @@ async def main() -> None:
             "Error: Resolved states differ between Rust and Python!"
         )
 
-        _print_results_table(stats_py, stats_rust, "\nSimulation Results:")
+        _print_results_table(stats_py, stats_rust, "Simulation Results:")
         print("\nStage breakdown:")
         print(
             f"  - Python total: {stats_py.total_s:.5f}s, bookkeeping: {stats_py.bookkeeping_s:.5f}s, resolver: {stats_py.resolve_s:.5f}s, merge points: {stats_py.merge_points}"
@@ -638,26 +618,8 @@ async def main() -> None:
     async def run_resolution(
         room_version_to_use: MockRoomVersion,
         title: str,
-        disable_rust: bool = False,
     ) -> tuple[RunStats, dict]:
         MockEvent.room_version = room_version_to_use
-
-        rust_res_module: Any = None
-        rust_resolve_fn: Any = None
-        if disable_rust:
-            try:
-                import synapse.synapse_rust.state_res as rust_res
-
-                rust_res_module = rust_res
-                rust_resolve_fn = cast(Any, rust_res.resolve_v2_via_lattice_fold)
-
-                def _disabled_rust(*args: Any, **kwargs: Any) -> None:
-                    raise RuntimeError("Rust resolver disabled for Python baseline")
-
-                cast(Any, rust_res).resolve_v2_via_lattice_fold = _disabled_rust
-            except Exception:
-                rust_res_module = None
-                rust_resolve_fn = None
 
         profiler = cProfile.Profile() if args.profile else None
         if profiler is not None:
@@ -680,8 +642,6 @@ async def main() -> None:
             if profiler is not None:
                 profiler.disable()
                 _print_profile(profiler, title, args.profile_limit)
-            if rust_res_module is not None and rust_resolve_fn is not None:
-                rust_res_module.resolve_v2_via_lattice_fold = rust_resolve_fn
 
         return (
             RunStats(
@@ -708,16 +668,14 @@ async def main() -> None:
 
     # 2. Benchmark Python (fallback)
     # Configure MockEvent.room_version to use the Python-only mock room version
-    stats_py, res_py = await run_resolution(
-        room_version_rust, "cProfile: Python run", disable_rust=True
-    )
+    stats_py, res_py = await run_resolution(room_version_py, "cProfile: Python run")
 
     # Restore
     MockEvent.room_version = room_version_rust
 
     assert res_rust == res_py, "Error: Resolved states differ between Rust and Python!"
 
-    _print_results_table(stats_py, stats_rust, "\nBenchmark Results:")
+    _print_results_table(stats_py, stats_rust, "Benchmark Results:")
     print("\nStage breakdown:")
     print(
         f"  - Python total: {stats_py.total_s:.5f}s, resolver: {stats_py.resolve_s:.5f}s, merge points: {stats_py.merge_points}"
