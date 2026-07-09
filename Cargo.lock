@@ -1620,7 +1620,7 @@ dependencies = [
 [[package]]
 name = "rezzy"
 version = "0.5.1"
-source = "git+https://github.com/gamesguru/rezzy.git?branch=dev#bfb121ec7e22b752d4b02d34803e46fbbdf28b1c"
+source = "git+https://github.com/gamesguru/rezzy.git?branch=dev#3fd53ca7a0eefac1dd42cc30f3022862706ce7de"
 dependencies = [
  "blake2",
  "hashbrown 0.15.4",
