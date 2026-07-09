@@ -215,6 +215,24 @@ def _print_profile(profile: cProfile.Profile, title: str, limit: int) -> None:
     print(stream.getvalue().rstrip())
 
 
+def _print_results_table(stats_py: RunStats, stats_rust: RunStats, title: str) -> None:
+    speedup_py = "1.0x (Baseline)"
+    speedup_rust = f"{stats_py.total_s / stats_rust.total_s:.1f}x"
+    speedup_width = max(len("Speedup"), len(speedup_py), len(speedup_rust))
+
+    print(
+        f"""
+{title}
++--------------------+---------------+---------------+{"-" * (speedup_width + 2)}+
+| {"Implementation":<18} | {"Duration (s)":<13} | {"Resolver (s)":<13} | {"Speedup":<{speedup_width}} |
++--------------------+---------------+---------------+{"-" * (speedup_width + 2)}+
+| {"Python V2":<18} | {stats_py.total_s:<13.5f} | {stats_py.resolve_s:<13.5f} | {speedup_py:>{speedup_width}} |
+| {"Rust (rezzy)":<18} | {stats_rust.total_s:<13.5f} | {stats_rust.resolve_s:<13.5f} | {speedup_rust:<{speedup_width}} |
++--------------------+---------------+---------------+{"-" * (speedup_width + 2)}+
+""".strip()
+    )
+
+
 def _load_jsonl_events(path: str) -> tuple[dict[str, Any], list[MockEvent]]:
     print(f"Loading DAG from {path}...")
     event_map: dict[str, Any] = {}
@@ -486,19 +504,7 @@ async def main() -> None:
             "Error: Resolved states differ between Rust and Python!"
         )
 
-        print("\nSimulation Results:")
-        print("+" + "-" * 20 + "+" + "-" * 15 + "+" + "-" * 15 + "+" + "-" * 15 + "+")
-        print(
-            f"| {'Implementation':<18} | {'Duration (s)':<13} | {'Resolve (s)':<13} | {'Speedup':<13} |"
-        )
-        print("+" + "-" * 20 + "+" + "-" * 15 + "+" + "-" * 15 + "+" + "-" * 15 + "+")
-        print(
-            f"| {'Python V2':<18} | {stats_py.total_s:<13.5f} | {stats_py.resolve_s:<13.5f} | {'1.0x (Baseline)':<13} |"
-        )
-        print(
-            f"| {'Rust (rezzy)':<18} | {stats_rust.total_s:<13.5f} | {stats_rust.resolve_s:<13.5f} | {stats_py.total_s / stats_rust.total_s:<12.1f}x |"
-        )
-        print("+" + "-" * 20 + "+" + "-" * 15 + "+" + "-" * 15 + "+" + "-" * 15 + "+")
+        _print_results_table(stats_py, stats_rust, "\nSimulation Results:")
         print("\nStage breakdown:")
         print(
             f"  - Python total: {stats_py.total_s:.5f}s, bookkeeping: {stats_py.bookkeeping_s:.5f}s, resolver: {stats_py.resolve_s:.5f}s, merge points: {stats_py.merge_points}"
@@ -709,19 +715,7 @@ async def main() -> None:
 
     assert res_rust == res_py, "Error: Resolved states differ between Rust and Python!"
 
-    print("\nBenchmark Results:")
-    print("+" + "-" * 20 + "+" + "-" * 15 + "+" + "-" * 15 + "+" + "-" * 15 + "+")
-    print(
-        f"| {'Implementation':<18} | {'Duration (s)':<13} | {'Resolver (s)':<13} | {'Speedup':<13} |"
-    )
-    print("+" + "-" * 20 + "+" + "-" * 15 + "+" + "-" * 15 + "+" + "-" * 15 + "+")
-    print(
-        f"| {'Python V2':<18} | {stats_py.total_s:<13.5f} | {stats_py.resolve_s:<13.5f} | {'1.0x (Baseline)':<13} |"
-    )
-    print(
-        f"| {'Rust (rezzy)':<18} | {stats_rust.total_s:<13.5f} | {stats_rust.resolve_s:<13.5f} | {stats_py.total_s / stats_rust.total_s:<12.1f}x |"
-    )
-    print("+" + "-" * 20 + "+" + "-" * 15 + "+" + "-" * 15 + "+" + "-" * 15 + "+")
+    _print_results_table(stats_py, stats_rust, "\nBenchmark Results:")
     print("\nStage breakdown:")
     print(
         f"  - Python total: {stats_py.total_s:.5f}s, resolver: {stats_py.resolve_s:.5f}s, merge points: {stats_py.merge_points}"
