@@ -40,6 +40,7 @@ from synapse.api.room_versions import RoomVersion, StateResolutionVersions
 from synapse.events import EventBase, is_creator
 from synapse.storage.databases.main.event_federation import StateDifference
 from synapse.types import MutableStateMap, StateMap, StrCollection
+from synapse.util.async_helpers import yieldable_gather_results
 from synapse.util.duration import Duration
 
 logger = logging.getLogger(__name__)
@@ -141,11 +142,23 @@ async def resolve_events_with_store(
         )
     )
 
-    events = await state_res_store.get_events(
-        [eid for eid in full_conflicted_set if eid not in event_map],
-        allow_rejected=True,
-    )
-    event_map.update(events)
+    # Prefetch the conflicted set and its auth chain concurrently so later
+    # auth checks can stay on the in-memory fast path.
+    to_fetch = {eid for eid in full_conflicted_set if eid not in event_map}
+    to_fetch.update(eid for eid in unconflicted_state.values() if eid not in event_map)
+
+    while to_fetch:
+        fetched = await state_res_store.get_events(list(to_fetch), allow_rejected=True)
+        event_map.update(fetched)
+
+        new_to_fetch = set()
+        for eid in to_fetch:
+            ev = event_map.get(eid)
+            if ev:
+                for aid in ev.auth_event_ids():
+                    if aid not in event_map:
+                        new_to_fetch.add(aid)
+        to_fetch = new_to_fetch
 
     # everything in the event map should be in the right room
     for event in event_map.values():
@@ -719,9 +732,11 @@ async def _iterative_auth_checks(
 
         auth_events = {}
         for aid in event.auth_event_ids():
-            ev = await _get_event(
-                room_id, aid, event_map, state_res_store, allow_none=True
-            )
+            ev = event_map.get(aid)
+            if not ev:
+                ev = await _get_event(
+                    room_id, aid, event_map, state_res_store, allow_none=True
+                )
 
             if not ev:
                 logger.warning(
@@ -734,7 +749,9 @@ async def _iterative_auth_checks(
         for key in event_auth.auth_types_for_event(room_version, event):
             if key in resolved_state:
                 ev_id = resolved_state[key]
-                ev = await _get_event(room_id, ev_id, event_map, state_res_store)
+                ev = event_map.get(ev_id)
+                if not ev:
+                    ev = await _get_event(room_id, ev_id, event_map, state_res_store)
 
                 if ev.rejected_reason is None:
                     auth_events[key] = event_map[ev_id]
@@ -827,16 +844,14 @@ async def _mainline_sort(
     event_ids = list(event_ids)
 
     order_map = {}
-    for idx, ev_id in enumerate(event_ids, start=1):
+
+    async def get_depth(ev_id: str) -> None:
         depth = await _get_mainline_depth_for_event(
             clock, event_map[ev_id], mainline_map, event_map, state_res_store
         )
         order_map[ev_id] = (depth, event_map[ev_id].origin_server_ts, ev_id)
 
-        # We await occasionally when we're working with large data sets to
-        # ensure that we don't block the reactor loop for too long.
-        if idx % _AWAIT_AFTER_ITERATIONS == 0:
-            await clock.sleep(Duration(seconds=0))
+    await yieldable_gather_results(get_depth, event_ids)
 
     event_ids.sort(key=lambda ev_id: order_map[ev_id])
 
