@@ -37,7 +37,7 @@ from synapse.api.room_versions import (  # noqa: E402
     RoomVersions,
     StateResolutionVersions,
 )
-from synapse.events import EventBase  # noqa: E402
+from synapse.events import EventBase, make_event_from_dict  # noqa: E402
 from synapse.state import StateDifference  # noqa: E402
 from synapse.util.duration import Duration  # noqa: E402
 
@@ -159,6 +159,43 @@ class MockStateResolutionStore:
             auth_difference=set().union(*chains) - common,
             conflicted_subgraph=None,
         )
+
+
+def _make_benchmark_event(
+    *,
+    room_version: RoomVersion,
+    event_id: str,
+    sender: str,
+    event_type: str,
+    state_key: str | None,
+    content: dict[str, Any],
+    origin_server_ts: int,
+    depth: int,
+    auth_event_ids: list[str] | None = None,
+    prev_event_ids: list[str] | None = None,
+    room_id: str = "!room:example.com",
+) -> EventBase:
+    reference_hashes = {"sha256": "benchmark"}
+    event_dict: dict[str, Any] = {
+        "room_id": room_id,
+        "type": event_type,
+        "sender": sender,
+        "content": content,
+        "depth": depth,
+        "origin_server_ts": origin_server_ts,
+        "hashes": {"sha256": "aGVsbG8="},
+        "signatures": {},
+        "auth_events": [
+            (event_id, reference_hashes) for event_id in (auth_event_ids or [])
+        ],
+        "prev_events": [
+            (event_id, reference_hashes) for event_id in (prev_event_ids or [])
+        ],
+        "event_id": event_id,
+    }
+    if state_key is not None:
+        event_dict["state_key"] = state_key
+    return make_event_from_dict(event_dict, room_version=room_version)
 
 
 @dataclass(slots=True)
@@ -472,53 +509,61 @@ async def main() -> None:
         return
 
     # Baseline Events
-    event_map = {}
+    bench_event_map: dict[str, EventBase] = {}
 
     # 1. CREATE
-    create = MockEvent(
-        "$CREATE",
-        "@alice:example.com",
-        "m.room.create",
-        "",
-        {"creator": "@alice:example.com"},
-        1000,
+    create = _make_benchmark_event(
+        room_version=real_version,
+        event_id="$CREATE",
+        sender="@alice:example.com",
+        event_type="m.room.create",
+        state_key="",
+        content={"creator": "@alice:example.com"},
+        origin_server_ts=1000,
+        depth=1,
     )
-    event_map[create.event_id] = create
+    bench_event_map[create.event_id] = create
 
     # 2. MEMBERS
-    alice_join = MockEvent(
-        "$IMA",
-        "@alice:example.com",
-        "m.room.member",
-        "@alice:example.com",
-        {"membership": "join"},
-        1001,
+    alice_join = _make_benchmark_event(
+        room_version=real_version,
+        event_id="$IMA",
+        sender="@alice:example.com",
+        event_type="m.room.member",
+        state_key="@alice:example.com",
+        content={"membership": "join"},
+        origin_server_ts=1001,
+        depth=2,
+        auth_event_ids=[create.event_id],
     )
-    alice_join._auth_event_ids = [create.event_id]
-    event_map[alice_join.event_id] = alice_join
+    bench_event_map[alice_join.event_id] = alice_join
 
-    pl = MockEvent(
-        "$IPOWER",
-        "@alice:example.com",
-        "m.room.power_levels",
-        "",
-        {"users": {"@alice:example.com": 100}, "users_default": 0},
-        1002,
+    pl = _make_benchmark_event(
+        room_version=real_version,
+        event_id="$IPOWER",
+        sender="@alice:example.com",
+        event_type="m.room.power_levels",
+        state_key="",
+        content={"users": {"@alice:example.com": 100}, "users_default": 0},
+        origin_server_ts=1002,
+        depth=3,
+        auth_event_ids=[create.event_id, alice_join.event_id],
     )
-    pl._auth_event_ids = [create.event_id, alice_join.event_id]
-    event_map[pl.event_id] = pl
+    bench_event_map[pl.event_id] = pl
 
     # Join rules
-    jr = MockEvent(
-        "$IJR",
-        "@alice:example.com",
-        "m.room.join_rules",
-        "",
-        {"join_rule": "public"},
-        1003,
+    jr = _make_benchmark_event(
+        room_version=real_version,
+        event_id="$IJR",
+        sender="@alice:example.com",
+        event_type="m.room.join_rules",
+        state_key="",
+        content={"join_rule": "public"},
+        origin_server_ts=1003,
+        depth=4,
+        auth_event_ids=[create.event_id, alice_join.event_id, pl.event_id],
     )
-    jr._auth_event_ids = [create.event_id, alice_join.event_id, pl.event_id]
-    event_map[jr.event_id] = jr
+    bench_event_map[jr.event_id] = jr
 
     baseline_state = {
         ("m.room.create", ""): create.event_id,
@@ -533,16 +578,18 @@ async def main() -> None:
     for p in range(P):
         sender = f"@user_{p}:example.com"
         # Join user to the room first
-        join_ev = MockEvent(
-            f"$JOIN_{p}",
-            sender,
-            "m.room.member",
-            sender,
-            {"membership": "join"},
-            2000 + p,
+        join_ev = _make_benchmark_event(
+            room_version=real_version,
+            event_id=f"$JOIN_{p}",
+            sender=sender,
+            event_type="m.room.member",
+            state_key=sender,
+            content={"membership": "join"},
+            origin_server_ts=2000 + p,
+            depth=5 + p,
+            auth_event_ids=[create.event_id, jr.event_id, pl.event_id],
         )
-        join_ev._auth_event_ids = [create.event_id, jr.event_id, pl.event_id]
-        event_map[join_ev.event_id] = join_ev
+        bench_event_map[join_ev.event_id] = join_ev
 
         part_state = dict(baseline_state)
         part_state[("m.room.member", sender)] = join_ev.event_id
@@ -551,31 +598,33 @@ async def main() -> None:
         for i in range(N):
             # Each event changes a topic or custom type to create conflicts
             ev_id = f"$EV_{p}_{i}"
-            ev = MockEvent(
-                ev_id,
-                sender,
-                f"org.example.test_{i}",
-                f"state_key_{i}",
-                {"value": f"val_{p}_{i}"},
-                3000 + p * N + i,
+            bench_ev: EventBase = _make_benchmark_event(
+                room_version=real_version,
+                event_id=ev_id,
+                sender=sender,
+                event_type=f"org.example.test_{i}",
+                state_key=f"state_key_{i}",
+                content={"value": f"val_{p}_{i}"},
+                origin_server_ts=3000 + p * N + i,
+                depth=6 + p * N + i,
+                auth_event_ids=[create.event_id, join_ev.event_id, pl.event_id],
+                prev_event_ids=[prev_id],
             )
-            ev._auth_event_ids = [create.event_id, join_ev.event_id, pl.event_id]
-            ev._prev_event_ids = [prev_id]
-            event_map[ev_id] = ev
+            bench_event_map[ev_id] = bench_ev
 
-            assert ev.state_key is not None
-            part_state[(ev.type, ev.state_key)] = ev_id
+            assert bench_ev.state_key is not None
+            part_state[(bench_ev.type, bench_ev.state_key)] = ev_id
             prev_id = ev_id
 
         state_sets.append(part_state)
 
     clock = MockClock()
-    store = MockStateResolutionStore(event_map)
+    store = MockStateResolutionStore(bench_event_map)
 
     print("Benchmark Configuration:")
     print(f"  - Partitions: {P}")
     print(f"  - Conflicting events per partition: {N}")
-    print(f"  - Total events in map: {len(event_map)}")
+    print(f"  - Total events in map: {len(bench_event_map)}")
     print("  - Warm-up resolution...")
 
     async def run_resolution(
@@ -614,7 +663,7 @@ async def main() -> None:
                     room_id,
                     cast(RoomVersion, room_version_to_use),
                     state_sets,
-                    cast(dict[str, EventBase], event_map),
+                    bench_event_map,
                     cast(Any, store),
                 )
             )
@@ -642,7 +691,7 @@ async def main() -> None:
         room_id,
         cast(RoomVersion, room_version_rust),
         state_sets,
-        cast(dict[str, EventBase], event_map),
+        bench_event_map,
         cast(Any, store),
     )
 
