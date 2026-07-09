@@ -13,6 +13,10 @@
 from collections.abc import Iterable
 from typing import Any
 
+def get_auth_chain_difference_from_event_graph(
+    state_sets: Iterable[Any],
+    event_map: dict[str, Any],
+) -> set[str]: ...
 def resolve_v2_via_lattice_fold(
     unconflicted_state: dict[tuple[str, str], str],
     conflicted_event_ids: Iterable[str],

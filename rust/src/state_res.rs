@@ -103,8 +103,8 @@ fn resolver_data_to_lean_event(data: EventResolverData) -> LeanEvent<String, Val
         prev_events: data.prev_events,
         auth_events: data.auth_events,
         depth: data.depth,
-        rejected: data.rejected,
-        soft_fail: data.soft_fail,
+        rejected: false,
+        soft_fail: false,
     }
 }
 
@@ -124,14 +124,6 @@ fn py_to_lean_event(py_ev: &Bound<'_, PyAny>) -> PyResult<LeanEvent<String, Valu
 
     let power_level: i64 = 0;
 
-    let rejected_reason: Option<String> = py_ev.getattr("rejected_reason")?.extract()?;
-    let rejected = rejected_reason.is_some();
-
-    let internal_metadata = py_ev.getattr("internal_metadata")?;
-    let soft_fail: bool = internal_metadata
-        .call_method0("is_soft_failed")?
-        .extract()?;
-
     Ok(LeanEvent {
         event_id,
         event_type,
@@ -143,8 +135,8 @@ fn py_to_lean_event(py_ev: &Bound<'_, PyAny>) -> PyResult<LeanEvent<String, Valu
         prev_events,
         auth_events,
         depth,
-        rejected,
-        soft_fail,
+        rejected: false,
+        soft_fail: false,
     })
 }
 
@@ -209,6 +201,10 @@ pub fn resolve_v2_via_lattice_fold<'py>(
 
 pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     let child_module = PyModule::new(py, "state_res")?;
+    child_module.add_function(wrap_pyfunction!(
+        get_auth_chain_difference_from_event_graph,
+        &child_module
+    )?)?;
     child_module.add_function(wrap_pyfunction!(
         resolve_v2_via_lattice_fold,
         &child_module
