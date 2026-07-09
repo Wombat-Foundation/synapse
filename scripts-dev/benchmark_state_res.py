@@ -15,6 +15,7 @@
 import argparse
 import asyncio
 import cProfile
+import hashlib
 import io
 import json
 import pstats
@@ -25,7 +26,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from textwrap import dedent
-from typing import Any, Collection, Iterable, Iterator, cast
+from typing import Any, Collection, Iterable, Iterator, Mapping, cast
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -43,20 +44,34 @@ from synapse.state import StateDifference  # noqa: E402
 from synapse.util.duration import Duration  # noqa: E402
 
 
+class _RustResolverDisabledForBenchmark(RuntimeError):
+    pass
+
+
 @contextmanager
 def _disable_rust_lattice_fold_resolver() -> Iterator[None]:
     import synapse.synapse_rust.state_res as rust_res
 
     original = rust_res.resolve_v2_via_lattice_fold
+    original_logger_exception = v2.logger.exception
 
     def disabled_resolver(*args: Any, **kwargs: Any) -> Any:
-        raise RuntimeError("Rust lattice-fold state resolver disabled for benchmark")
+        raise _RustResolverDisabledForBenchmark(
+            "Rust lattice-fold state resolver disabled for benchmark"
+        )
+
+    def logger_exception(message: object, *args: Any, **kwargs: Any) -> None:
+        if isinstance(kwargs.get("exc_info"), _RustResolverDisabledForBenchmark):
+            return
+        original_logger_exception(message, *args, **kwargs)
 
     cast(Any, rust_res).resolve_v2_via_lattice_fold = disabled_resolver
+    cast(Any, v2.logger).exception = logger_exception
     try:
         yield
     finally:
         cast(Any, rust_res).resolve_v2_via_lattice_fold = original
+        cast(Any, v2.logger).exception = original_logger_exception
 
 
 # Mock Clock
@@ -236,24 +251,57 @@ def _print_profile(profile: cProfile.Profile, title: str, limit: int) -> None:
     print(stream.getvalue().rstrip())
 
 
-def _print_results_table(stats_py: RunStats, stats_rust: RunStats, title: str) -> None:
+def _resolved_state_checksum(state: Mapping[tuple[str, str], str]) -> str:
+    encoded_state = json.dumps(
+        [
+            [event_type, state_key, event_id]
+            for (event_type, state_key), event_id in sorted(state.items())
+        ],
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(encoded_state.encode()).hexdigest()
+
+
+def _print_results_table(
+    stats_py: RunStats,
+    stats_rust: RunStats,
+    checksum_py: str,
+    checksum_rust: str,
+    title: str,
+) -> None:
     speedup_py = "1.0x (Baseline)"
     speedup_rust = f"{stats_py.total_s / stats_rust.total_s:.1f}x"
     speedup_width = max(len("Speedup"), len(speedup_py), len(speedup_rust))
+    checksum_width = len(checksum_py)
 
     print(
         dedent(
             f"""
             {title}
-            +--------------------+---------------+---------------+{"-" * (speedup_width + 2)}+
-            | {"Implementation":<18} | {"Duration (s)":<13} | {"Resolver (s)":<13} | {"Speedup":<{speedup_width}} |
-            +--------------------+---------------+---------------+{"-" * (speedup_width + 2)}+
-            | {"Python V2":<18} | {stats_py.total_s:<13.5f} | {stats_py.resolve_s:<13.5f} | {speedup_py:>{speedup_width}} |
-            | {"Rust (rezzy)":<18} | {stats_rust.total_s:<13.5f} | {stats_rust.resolve_s:<13.5f} | {speedup_rust:>{speedup_width}} |
-            +--------------------+---------------+---------------+{"-" * (speedup_width + 2)}+
+            +--------------------+---------------+{"-" * (speedup_width + 2)}+{"-" * (checksum_width + 2)}+
+            | {"Implementation":<18} | {"Duration (s)":<13} | {"Speedup":<{speedup_width}} | {"State SHA-256":<{checksum_width}} |
+            +--------------------+---------------+{"-" * (speedup_width + 2)}+{"-" * (checksum_width + 2)}+
+            | {"Python V2":<18} | {stats_py.total_s:<13.5f} | {speedup_py:<{speedup_width}} | {checksum_py:<{checksum_width}} |
+            | {"Rust (rezzy)":<18} | {stats_rust.total_s:<13.5f} | {speedup_rust:<{speedup_width}} | {checksum_rust:<{checksum_width}} |
+            +--------------------+---------------+{"-" * (speedup_width + 2)}+{"-" * (checksum_width + 2)}+
             """
         ).rstrip()
     )
+
+
+def _print_stage_breakdown(stats_py: RunStats, stats_rust: RunStats) -> None:
+    def format_stage(label: str, stats: RunStats) -> str:
+        parts = [f"{label:<6} total: {stats.total_s:.5f}s"]
+        if stats.bookkeeping_s:
+            parts.append(f"bookkeeping: {stats.bookkeeping_s:.5f}s")
+        if stats.resolve_s != stats.total_s:
+            parts.append(f"resolver: {stats.resolve_s:.5f}s")
+        parts.append(f"merge points: {stats.merge_points}")
+        return "  - " + ", ".join(parts)
+
+    print("\nStage breakdown:")
+    print(format_stage("Python", stats_py))
+    print(format_stage("Rust", stats_rust))
 
 
 def _load_jsonl_events(path: str) -> tuple[dict[str, Any], list[MockEvent]]:
@@ -506,14 +554,14 @@ async def main() -> None:
             "Error: Resolved states differ between Rust and Python!"
         )
 
-        _print_results_table(stats_py, stats_rust, "Simulation Results:")
-        print("\nStage breakdown:")
-        print(
-            f"  - Python total: {stats_py.total_s:.5f}s, bookkeeping: {stats_py.bookkeeping_s:.5f}s, resolver: {stats_py.resolve_s:.5f}s, merge points: {stats_py.merge_points}"
+        _print_results_table(
+            stats_py,
+            stats_rust,
+            _resolved_state_checksum(res_py),
+            _resolved_state_checksum(res_rust),
+            "Simulation Results:",
         )
-        print(
-            f"  - Rust total:   {stats_rust.total_s:.5f}s, bookkeeping: {stats_rust.bookkeeping_s:.5f}s, resolver: {stats_rust.resolve_s:.5f}s, merge points: {stats_rust.merge_points}"
-        )
+        _print_stage_breakdown(stats_py, stats_rust)
         return
 
     if not args.jsonl:
@@ -704,14 +752,14 @@ async def main() -> None:
             "Error: Resolved states differ between Rust and Python!"
         )
 
-        _print_results_table(stats_py, stats_rust, "Benchmark Results:")
-        print("\nStage breakdown:")
-        print(
-            f"  - Python total: {stats_py.total_s:.5f}s, resolver: {stats_py.resolve_s:.5f}s, merge points: {stats_py.merge_points}"
+        _print_results_table(
+            stats_py,
+            stats_rust,
+            _resolved_state_checksum(res_py),
+            _resolved_state_checksum(res_rust),
+            "Benchmark Results:",
         )
-        print(
-            f"  - Rust total:   {stats_rust.total_s:.5f}s, resolver: {stats_rust.resolve_s:.5f}s, merge points: {stats_rust.merge_points}"
-        )
+        _print_stage_breakdown(stats_py, stats_rust)
 
 
 if __name__ == "__main__":
