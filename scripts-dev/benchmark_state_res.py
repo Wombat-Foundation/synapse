@@ -333,6 +333,9 @@ async def main() -> None:
 
     room_id = "!room:example.com"
     real_version = RoomVersions.V2
+    event_map: dict[str, Any] = {}
+    events_list: list[MockEvent] = []
+    auth_chains: dict[str, set[str]] = {}
     if args.jsonl:
         if "v11" in args.jsonl:
             real_version = getattr(
@@ -355,7 +358,6 @@ async def main() -> None:
         events_list.sort(key=lambda e: (e.depth, e.origin_server_ts))
 
         # Precompute auth chains for all events
-        auth_chains: dict[str, set[str]] = {}
         for ev in events_list:
             chain = {ev.event_id}
             for aid in ev.auth_event_ids():
@@ -462,225 +464,233 @@ async def main() -> None:
         _print_profile(profiler, title, args.profile_limit)
         return result
 
-    print("Simulating resolution using Rust (rezzy)...")
-    stats_rust, res_rust = await run_profiled_simulation(
-        room_version_rust, "cProfile: Rust run"
-    )
-
-    print("Simulating resolution using Python fallback...")
-    try:
-        stats_py, res_py = await run_profiled_simulation(
-            room_version_py, "cProfile: Python run"
+    if args.jsonl:
+        print("Simulating resolution using Rust (rezzy)...")
+        stats_rust, res_rust = await run_profiled_simulation(
+            room_version_rust, "cProfile: Rust run"
         )
-    except Exception as e:
+
+        print("Simulating resolution using Python fallback...")
+        try:
+            stats_py, res_py = await run_profiled_simulation(
+                room_version_py, "cProfile: Python run"
+            )
+        except Exception as e:
+            print(
+                "Python fallback benchmark failed for this DAG. "
+                f"The Rust run completed, but the Python path raised: {type(e).__name__}: {e}"
+            )
+            return
+
+        # Restore
+        MockEvent.room_version = room_version_rust
+
+        assert res_rust == res_py, (
+            "Error: Resolved states differ between Rust and Python!"
+        )
+
+        _print_results_table(stats_py, stats_rust, "Simulation Results:")
+        print("\nStage breakdown:")
         print(
-            "Python fallback benchmark failed for this DAG. "
-            f"The Rust run completed, but the Python path raised: {type(e).__name__}: {e}"
+            f"  - Python total: {stats_py.total_s:.5f}s, bookkeeping: {stats_py.bookkeeping_s:.5f}s, resolver: {stats_py.resolve_s:.5f}s, merge points: {stats_py.merge_points}"
+        )
+        print(
+            f"  - Rust total:   {stats_rust.total_s:.5f}s, bookkeeping: {stats_rust.bookkeeping_s:.5f}s, resolver: {stats_rust.resolve_s:.5f}s, merge points: {stats_rust.merge_points}"
         )
         return
 
-    # Restore
-    MockEvent.room_version = room_version_rust
+    if not args.jsonl:
+        # Baseline Events
+        bench_event_map: dict[str, EventBase] = {}
 
-    assert res_rust == res_py, "Error: Resolved states differ between Rust and Python!"
-
-    _print_results_table(stats_py, stats_rust, "Simulation Results:")
-    print("\nStage breakdown:")
-    print(
-        f"  - Python total: {stats_py.total_s:.5f}s, bookkeeping: {stats_py.bookkeeping_s:.5f}s, resolver: {stats_py.resolve_s:.5f}s, merge points: {stats_py.merge_points}"
-    )
-    print(
-        f"  - Rust total:   {stats_rust.total_s:.5f}s, bookkeeping: {stats_rust.bookkeeping_s:.5f}s, resolver: {stats_rust.resolve_s:.5f}s, merge points: {stats_rust.merge_points}"
-    )
-    return
-
-    # Baseline Events
-    bench_event_map: dict[str, EventBase] = {}  # type: ignore[unreachable]
-
-    # 1. CREATE
-    create = _make_benchmark_event(
-        room_version=real_version,
-        event_id="$CREATE",
-        sender="@alice:example.com",
-        event_type="m.room.create",
-        state_key="",
-        content={"creator": "@alice:example.com"},
-        origin_server_ts=1000,
-        depth=1,
-    )
-    bench_event_map[create.event_id] = create
-
-    # 2. MEMBERS
-    alice_join = _make_benchmark_event(
-        room_version=real_version,
-        event_id="$IMA",
-        sender="@alice:example.com",
-        event_type="m.room.member",
-        state_key="@alice:example.com",
-        content={"membership": "join"},
-        origin_server_ts=1001,
-        depth=2,
-        auth_event_ids=[create.event_id],
-    )
-    bench_event_map[alice_join.event_id] = alice_join
-
-    pl = _make_benchmark_event(
-        room_version=real_version,
-        event_id="$IPOWER",
-        sender="@alice:example.com",
-        event_type="m.room.power_levels",
-        state_key="",
-        content={"users": {"@alice:example.com": 100}, "users_default": 0},
-        origin_server_ts=1002,
-        depth=3,
-        auth_event_ids=[create.event_id, alice_join.event_id],
-    )
-    bench_event_map[pl.event_id] = pl
-
-    # Join rules
-    jr = _make_benchmark_event(
-        room_version=real_version,
-        event_id="$IJR",
-        sender="@alice:example.com",
-        event_type="m.room.join_rules",
-        state_key="",
-        content={"join_rule": "public"},
-        origin_server_ts=1003,
-        depth=4,
-        auth_event_ids=[create.event_id, alice_join.event_id, pl.event_id],
-    )
-    bench_event_map[jr.event_id] = jr
-
-    baseline_state = {
-        ("m.room.create", ""): create.event_id,
-        ("m.room.member", "@alice:example.com"): alice_join.event_id,
-        ("m.room.power_levels", ""): pl.event_id,
-        ("m.room.join_rules", ""): jr.event_id,
-    }
-
-    # Generate P parallel partitions, each with N conflicting events
-    state_sets: list[dict[tuple[str, str], str]] = []
-
-    for p in range(P):
-        sender = f"@user_{p}:example.com"
-        # Join user to the room first
-        join_ev = _make_benchmark_event(
+        # 1. CREATE
+        create = _make_benchmark_event(
             room_version=real_version,
-            event_id=f"$JOIN_{p}",
-            sender=sender,
+            event_id="$CREATE",
+            sender="@alice:example.com",
+            event_type="m.room.create",
+            state_key="",
+            content={"creator": "@alice:example.com"},
+            origin_server_ts=1000,
+            depth=1,
+        )
+        bench_event_map[create.event_id] = create
+
+        # 2. MEMBERS
+        alice_join = _make_benchmark_event(
+            room_version=real_version,
+            event_id="$IMA",
+            sender="@alice:example.com",
             event_type="m.room.member",
-            state_key=sender,
+            state_key="@alice:example.com",
             content={"membership": "join"},
-            origin_server_ts=2000 + p,
-            depth=5 + p,
-            auth_event_ids=[create.event_id, jr.event_id, pl.event_id],
+            origin_server_ts=1001,
+            depth=2,
+            auth_event_ids=[create.event_id],
         )
-        bench_event_map[join_ev.event_id] = join_ev
+        bench_event_map[alice_join.event_id] = alice_join
 
-        part_state = dict(baseline_state)
-        part_state[("m.room.member", sender)] = join_ev.event_id
+        pl = _make_benchmark_event(
+            room_version=real_version,
+            event_id="$IPOWER",
+            sender="@alice:example.com",
+            event_type="m.room.power_levels",
+            state_key="",
+            content={"users": {"@alice:example.com": 100}, "users_default": 0},
+            origin_server_ts=1002,
+            depth=3,
+            auth_event_ids=[create.event_id, alice_join.event_id],
+        )
+        bench_event_map[pl.event_id] = pl
 
-        prev_id = join_ev.event_id
-        for i in range(N):
-            # Each event changes a topic or custom type to create conflicts
-            ev_id = f"$EV_{p}_{i}"
-            bench_ev: EventBase = _make_benchmark_event(
+        # Join rules
+        jr = _make_benchmark_event(
+            room_version=real_version,
+            event_id="$IJR",
+            sender="@alice:example.com",
+            event_type="m.room.join_rules",
+            state_key="",
+            content={"join_rule": "public"},
+            origin_server_ts=1003,
+            depth=4,
+            auth_event_ids=[create.event_id, alice_join.event_id, pl.event_id],
+        )
+        bench_event_map[jr.event_id] = jr
+
+        baseline_state = {
+            ("m.room.create", ""): create.event_id,
+            ("m.room.member", "@alice:example.com"): alice_join.event_id,
+            ("m.room.power_levels", ""): pl.event_id,
+            ("m.room.join_rules", ""): jr.event_id,
+        }
+
+        # Generate P parallel partitions, each with N conflicting events
+        state_sets: list[dict[tuple[str, str], str]] = []
+
+        for p in range(P):
+            sender = f"@user_{p}:example.com"
+            # Join user to the room first
+            join_ev = _make_benchmark_event(
                 room_version=real_version,
-                event_id=ev_id,
+                event_id=f"$JOIN_{p}",
                 sender=sender,
-                event_type=f"org.example.test_{i}",
-                state_key=f"state_key_{i}",
-                content={"value": f"val_{p}_{i}"},
-                origin_server_ts=3000 + p * N + i,
-                depth=6 + p * N + i,
-                auth_event_ids=[create.event_id, join_ev.event_id, pl.event_id],
-                prev_event_ids=[prev_id],
+                event_type="m.room.member",
+                state_key=sender,
+                content={"membership": "join"},
+                origin_server_ts=2000 + p,
+                depth=5 + p,
+                auth_event_ids=[create.event_id, jr.event_id, pl.event_id],
             )
-            bench_event_map[ev_id] = bench_ev
+            bench_event_map[join_ev.event_id] = join_ev
 
-            assert bench_ev.state_key is not None
-            part_state[(bench_ev.type, bench_ev.state_key)] = ev_id
-            prev_id = ev_id
+            part_state = dict(baseline_state)
+            part_state[("m.room.member", sender)] = join_ev.event_id
 
-        state_sets.append(part_state)
-
-    clock = MockClock()
-    store = MockStateResolutionStore(bench_event_map)
-
-    print("Benchmark Configuration:")
-    print(f"  - Partitions: {P}")
-    print(f"  - Conflicting events per partition: {N}")
-    print(f"  - Total events in map: {len(bench_event_map)}")
-    print("  - Warm-up resolution...")
-
-    async def run_resolution(
-        room_version_to_use: MockRoomVersion,
-        title: str,
-    ) -> tuple[RunStats, dict]:
-        MockEvent.room_version = room_version_to_use
-
-        profiler = cProfile.Profile() if args.profile else None
-        if profiler is not None:
-            profiler.enable()
-
-        try:
-            start = time.perf_counter()
-            resolved_state = dict(
-                await v2.resolve_events_with_store(
-                    cast(Any, clock),
-                    room_id,
-                    cast(RoomVersion, room_version_to_use),
-                    state_sets,
-                    bench_event_map,
-                    cast(Any, store),
+            prev_id = join_ev.event_id
+            for i in range(N):
+                # Each event changes a topic or custom type to create conflicts
+                ev_id = f"$EV_{p}_{i}"
+                bench_ev: EventBase = _make_benchmark_event(
+                    room_version=real_version,
+                    event_id=ev_id,
+                    sender=sender,
+                    event_type=f"org.example.test_{i}",
+                    state_key=f"state_key_{i}",
+                    content={"value": f"val_{p}_{i}"},
+                    origin_server_ts=3000 + p * N + i,
+                    depth=6 + p * N + i,
+                    auth_event_ids=[create.event_id, join_ev.event_id, pl.event_id],
+                    prev_event_ids=[prev_id],
                 )
-            )
-            duration = time.perf_counter() - start
-        finally:
-            if profiler is not None:
-                profiler.disable()
-                _print_profile(profiler, title, args.profile_limit)
+                bench_event_map[ev_id] = bench_ev
 
-        return (
-            RunStats(
-                total_s=duration,
-                bookkeeping_s=0.0,
-                resolve_s=duration,
-                merge_points=1,
-            ),
-            resolved_state,
+                assert bench_ev.state_key is not None
+                part_state[(bench_ev.type, bench_ev.state_key)] = ev_id
+                prev_id = ev_id
+
+            state_sets.append(part_state)
+
+        clock = MockClock()
+        store = MockStateResolutionStore(bench_event_map)
+
+        print("Benchmark Configuration:")
+        print(f"  - Partitions: {P}")
+        print(f"  - Conflicting events per partition: {N}")
+        print(f"  - Total events in map: {len(bench_event_map)}")
+        print("  - Warm-up resolution...")
+
+        async def run_resolution(
+            room_version_to_use: MockRoomVersion,
+            title: str,
+        ) -> tuple[RunStats, dict]:
+            MockEvent.room_version = room_version_to_use
+
+            profiler = cProfile.Profile() if args.profile else None
+            if profiler is not None:
+                profiler.enable()
+
+            try:
+                start = time.perf_counter()
+                resolved_state = dict(
+                    await v2.resolve_events_with_store(
+                        cast(Any, clock),
+                        room_id,
+                        cast(RoomVersion, room_version_to_use),
+                        state_sets,
+                        bench_event_map,
+                        cast(Any, store),
+                    )
+                )
+                duration = time.perf_counter() - start
+            finally:
+                if profiler is not None:
+                    profiler.disable()
+                    _print_profile(profiler, title, args.profile_limit)
+
+            return (
+                RunStats(
+                    total_s=duration,
+                    bookkeeping_s=0.0,
+                    resolve_s=duration,
+                    merge_points=1,
+                ),
+                resolved_state,
+            )
+
+        # Warmup
+        await v2.resolve_events_with_store(
+            cast(Any, clock),
+            room_id,
+            cast(RoomVersion, room_version_rust),
+            state_sets,
+            bench_event_map,
+            cast(Any, store),
         )
 
-    # Warmup
-    await v2.resolve_events_with_store(
-        cast(Any, clock),
-        room_id,
-        cast(RoomVersion, room_version_rust),
-        state_sets,
-        bench_event_map,
-        cast(Any, store),
-    )
+        # 1. Benchmark Rust (rezzy)
+        stats_rust, res_rust = await run_resolution(
+            room_version_rust, "cProfile: Rust run"
+        )
 
-    # 1. Benchmark Rust (rezzy)
-    stats_rust, res_rust = await run_resolution(room_version_rust, "cProfile: Rust run")
+        # 2. Benchmark Python (fallback)
+        # Configure MockEvent.room_version to use the Python-only mock room version
+        stats_py, res_py = await run_resolution(room_version_py, "cProfile: Python run")
 
-    # 2. Benchmark Python (fallback)
-    # Configure MockEvent.room_version to use the Python-only mock room version
-    stats_py, res_py = await run_resolution(room_version_py, "cProfile: Python run")
+        # Restore
+        MockEvent.room_version = room_version_rust
 
-    # Restore
-    MockEvent.room_version = room_version_rust
+        assert res_rust == res_py, (
+            "Error: Resolved states differ between Rust and Python!"
+        )
 
-    assert res_rust == res_py, "Error: Resolved states differ between Rust and Python!"
-
-    _print_results_table(stats_py, stats_rust, "Benchmark Results:")
-    print("\nStage breakdown:")
-    print(
-        f"  - Python total: {stats_py.total_s:.5f}s, resolver: {stats_py.resolve_s:.5f}s, merge points: {stats_py.merge_points}"
-    )
-    print(
-        f"  - Rust total:   {stats_rust.total_s:.5f}s, resolver: {stats_rust.resolve_s:.5f}s, merge points: {stats_rust.merge_points}"
-    )
+        _print_results_table(stats_py, stats_rust, "Benchmark Results:")
+        print("\nStage breakdown:")
+        print(
+            f"  - Python total: {stats_py.total_s:.5f}s, resolver: {stats_py.resolve_s:.5f}s, merge points: {stats_py.merge_points}"
+        )
+        print(
+            f"  - Rust total:   {stats_rust.total_s:.5f}s, resolver: {stats_rust.resolve_s:.5f}s, merge points: {stats_rust.merge_points}"
+        )
 
 
 if __name__ == "__main__":
