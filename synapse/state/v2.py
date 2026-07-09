@@ -382,27 +382,62 @@ async def _get_auth_chain_difference(
     #      the set of persisted events belonging to the auth difference.
     #   3. Adding the results of 1 and 2 together.
 
-    # Map from event ID in `unpersisted_events` to their auth event IDs, and their auth
-    # event IDs if they appear in the `unpersisted_events`. This is the intersection of
-    # the event's auth chain with the events in `unpersisted_events` *plus* their
-    # auth event IDs.
+    # Map from event ID in `unpersisted_events` to the auth chain reachable from it.
+    #
+    # We memoize the transitive closure so shared auth chains are only traversed once.
     events_to_auth_chain: dict[str, set[str]] = {}
-    # remember the forward links when doing the graph traversal, we'll need it for v2.1 checks
-    # This is a map from an event to the set of events that contain it as an auth event.
-    event_to_next_event: dict[str, set[str]] = {}
-    for event in unpersisted_events.values():
-        chain = {event.event_id}
-        events_to_auth_chain[event.event_id] = chain
 
-        to_search = [event]
-        while to_search:
-            next_event = to_search.pop()
-            for auth_id in next_event.auth_event_ids():
+    # Forward links are needed later for v2.1 conflicted-subgraph expansion.
+    # This maps an event to the set of events that reference it directly in auth_events.
+    event_to_next_event: dict[str, set[str]] = {}
+    direct_auth_events: dict[str, list[str]] = {}
+    for event in unpersisted_events.values():
+        auth_ids = list(event.auth_event_ids())
+        direct_auth_events[event.event_id] = auth_ids
+        for auth_id in auth_ids:
+            event_to_next_event.setdefault(auth_id, set()).add(event.event_id)
+
+    def _build_auth_chain(root_event_id: str) -> set[str]:
+        """Return the full auth closure for an unpersisted event."""
+
+        cached = events_to_auth_chain.get(root_event_id)
+        if cached is not None:
+            return cached
+
+        postorder: list[str] = []
+        stack: list[tuple[str, bool]] = [(root_event_id, False)]
+
+        while stack:
+            event_id, expanded = stack.pop()
+
+            if expanded:
+                postorder.append(event_id)
+                continue
+
+            if event_id in events_to_auth_chain:
+                continue
+
+            stack.append((event_id, True))
+            for auth_id in direct_auth_events.get(event_id, []):
+                if (
+                    auth_id in unpersisted_events
+                    and auth_id not in events_to_auth_chain
+                ):
+                    stack.append((auth_id, False))
+
+        for event_id in postorder:
+            chain = {event_id}
+            for auth_id in direct_auth_events.get(event_id, []):
                 chain.add(auth_id)
-                event_to_next_event.setdefault(auth_id, set()).add(next_event.event_id)
-                auth_event = unpersisted_events.get(auth_id)
-                if auth_event:
-                    to_search.append(auth_event)
+                auth_chain = events_to_auth_chain.get(auth_id)
+                if auth_chain is not None:
+                    chain.update(auth_chain)
+            events_to_auth_chain[event_id] = chain
+
+        return events_to_auth_chain[root_event_id]
+
+    for event_id in unpersisted_events:
+        _build_auth_chain(event_id)
 
     # We now 1) calculate the auth chain difference for the unpersisted events
     # and 2) work out the state sets to pass to the store.
