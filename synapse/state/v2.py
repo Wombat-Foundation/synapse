@@ -30,6 +30,7 @@ from typing import (
     Literal,
     Protocol,
     Sequence,
+    cast,
     overload,
 )
 
@@ -368,6 +369,22 @@ async def _get_auth_chain_difference(
     num_conflicted_state = (
         len(conflicted_state) if conflicted_state is not None else None
     )
+
+    if not is_state_res_v21:
+        try:
+            import synapse.synapse_rust.state_res as rust_res
+
+            return cast(
+                set[str],
+                cast(Any, rust_res).get_auth_chain_difference_from_event_graph(
+                    state_sets,
+                    unpersisted_events,
+                ),
+            )
+        except Exception:
+            # Fall back to the Python/store path if the Rust fast path cannot
+            # handle the graph we were given.
+            pass
 
     # The `StateResolutionStore.get_auth_chain_difference` function assumes that
     # all events passed to it (and their auth chains) have been persisted

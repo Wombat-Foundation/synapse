@@ -12,15 +12,84 @@
  * <https://www.gnu.org/licenses/agpl-3.0.html>.
  */
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyTuple};
+use pyo3::types::{PyAny, PyDict, PySet, PyTuple};
 use pythonize::depythonize;
-use rezzy::{resolve_lattice_fold, LeanEvent, SharedState, StateResVersion};
+use rezzy::{
+    auth::roaring::AuthGraph, resolve_lattice_fold, LeanEvent, SharedState, StateResVersion,
+};
 use serde_json::Value;
 
 use crate::events::{Event, EventResolverData};
+
+#[pyfunction]
+#[pyo3(text_signature = "(state_sets, event_map, /)")]
+pub fn get_auth_chain_difference_from_event_graph<'py>(
+    py: Python<'py>,
+    state_sets: Bound<'py, PyAny>,
+    event_map: Bound<'py, PyDict>,
+) -> PyResult<Bound<'py, PySet>> {
+    let mut auth_graph_events: HashMap<String, LeanEvent<String, ()>> = HashMap::new();
+    for (k, v) in event_map.iter() {
+        let event_id: String = k.extract()?;
+        let auth_ids: Vec<String> = if let Ok(event) = v.extract::<PyRef<Event>>() {
+            event.auth_event_ids()?
+        } else {
+            v.call_method0("auth_event_ids")?.extract()?
+        };
+        auth_graph_events.insert(
+            event_id.clone(),
+            LeanEvent {
+                event_id,
+                event_type: String::new(),
+                state_key: None,
+                power_level: 0,
+                origin_server_ts: 0,
+                sender: String::new(),
+                content: (),
+                prev_events: Vec::new(),
+                auth_events: auth_ids,
+                depth: 0,
+                rejected: false,
+                soft_fail: false,
+            },
+        );
+    }
+    let auth_graph = AuthGraph::build(&auth_graph_events);
+
+    let mut state_sets_ids: Vec<Vec<String>> = Vec::new();
+    for state_set in state_sets.try_iter()? {
+        let state_set = state_set?;
+        let values = state_set.call_method0("values")?;
+        state_sets_ids.push(values.extract()?);
+    }
+
+    let mut state_set_closures: Vec<HashSet<String>> = Vec::new();
+    for state_set in state_sets_ids {
+        state_set_closures.push(
+            auth_graph
+                .auth_difference(&[], &state_set)
+                .into_iter()
+                .collect(),
+        );
+    }
+
+    if state_set_closures.is_empty() {
+        return PySet::empty(py);
+    }
+
+    let mut union = state_set_closures[0].clone();
+    let mut intersection = state_set_closures[0].clone();
+    for closure in state_set_closures.iter().skip(1) {
+        union.extend(closure.iter().cloned());
+        intersection = intersection.intersection(closure).cloned().collect();
+    }
+
+    let result: HashSet<String> = union.difference(&intersection).cloned().collect();
+    PySet::new(py, result)
+}
 
 fn resolver_data_to_lean_event(data: EventResolverData) -> LeanEvent<String, Value> {
     LeanEvent {

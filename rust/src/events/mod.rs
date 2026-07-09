@@ -345,7 +345,7 @@ impl Event {
 
     /// Returns the list of auth event IDs. The order matches the order
     /// specified in the event, though there is no meaning to it.
-    fn auth_event_ids(&self) -> PyResult<Vec<String>> {
+    pub(crate) fn auth_event_ids(&self) -> PyResult<Vec<String>> {
         match &*self.parsed_event.specific_fields {
             EventFormatEnum::V1(format) => Ok(format.auth_event_ids()),
             EventFormatEnum::V2V3(format) => Ok(format.auth_event_ids()),
