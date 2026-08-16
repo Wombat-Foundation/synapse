@@ -18,7 +18,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PySet, PyTuple};
 use pythonize::depythonize;
 use rezzy::{
-    auth::roaring::AuthGraph, resolve_lattice_fold, LeanEvent, SharedState, StateResVersion,
+    auth::roaring::AuthGraph, basespec::event_types::EventType, resolve_lattice_fold, LeanEvent,
+    SharedState, StateResVersion,
 };
 use serde_json::Value;
 
@@ -161,9 +162,9 @@ pub fn resolve_v2_via_lattice_fold<'py>(
 
     let mut unconf_state = SharedState::new();
     for (k, v) in unconflicted_state.iter() {
-        let key: (String, String) = k.extract()?;
+        let (type_str, state_key): (String, String) = k.extract()?;
         let val: String = v.extract()?;
-        unconf_state.insert(key, val);
+        unconf_state.insert((EventType::from(type_str), state_key), val);
     }
 
     let conflicted_ids: Vec<String> = conflicted_event_ids.extract()?;
@@ -191,7 +192,7 @@ pub fn resolve_v2_via_lattice_fold<'py>(
 
     let py_resolved = PyDict::new(py);
     for ((type_, state_key), event_id) in resolved {
-        let py_key = PyTuple::new(py, &[type_, state_key])?;
+        let py_key = PyTuple::new(py, [type_.as_str(), &state_key])?;
         py_resolved.set_item(py_key, event_id)?;
     }
 
