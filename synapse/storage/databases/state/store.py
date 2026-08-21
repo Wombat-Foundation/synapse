@@ -58,6 +58,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _state_hamt_root_tikv_key(state_group: int) -> bytes:
+    return f"hamt:root:{state_group}".encode("utf-8")
+
+
+def _state_hamt_node_tikv_key(structural_hash: bytes) -> bytes:
+    return b"hamt:node:" + structural_hash.hex().encode("ascii")
+
+
 def _fetch_tikv_state_groups_sync(
     groups: list[int], state_filter: StateFilter
 ) -> tuple[dict[int, StateMap[str]], list[int]]:
@@ -117,6 +125,36 @@ def _fetch_tikv_state_groups_sync(
         results[g] = state_filter.filter_state(state_map)
 
     return results, missing_groups
+
+
+def _put_state_hamt_tikv_sync(
+    state_group: int,
+    root_structural_hash: bytes,
+    nodes: list[tuple[bytes, bytes]],
+) -> None:
+    from synapse.synapse_rust import tikv_engine
+
+    tikv_engine.batch_put(
+        [(_state_hamt_root_tikv_key(state_group), root_structural_hash)]
+        + [
+            (_state_hamt_node_tikv_key(structural_hash), node_bytes)
+            for structural_hash, node_bytes in nodes
+        ]
+    )
+
+
+def _delete_state_hamt_roots_tikv_sync(state_groups: "Collection[int]") -> None:
+    from synapse.synapse_rust import tikv_engine
+
+    tikv_engine.batch_delete(
+        [_state_hamt_root_tikv_key(state_group) for state_group in state_groups]
+    )
+
+
+def _delete_legacy_tikv_state_groups_sync(groups: "Collection[int]") -> None:
+    from synapse.synapse_rust import tikv_engine
+
+    tikv_engine.batch_delete([f"sg:{sg}".encode("utf-8") for sg in groups])
 
 
 class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
@@ -508,6 +546,9 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         room_id: str,
         current_state_ids: StateMap[str],
     ) -> None:
+        if not self.tikv_pd_endpoints:
+            return
+
         from synapse.synapse_rust import state_hamt
 
         root_handle_parts, nodes = state_hamt.build_root_handle(
@@ -516,24 +557,11 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             self._build_state_hamt_entries(current_state_ids),
         )
 
-        self.db_pool.simple_insert_txn(
-            txn,
-            table="state_hamt_roots",
-            values={
-                "state_group": state_group,
-                "room_id": room_id,
-                "structural_hash": root_handle_parts[0].hex(),
-                "state_group_id": root_handle_parts[1].hex(),
-            },
-        )
-
-        self.db_pool.simple_upsert_many_txn(
-            txn,
-            table="state_hamt_nodes",
-            key_names=("structural_hash",),
-            key_values=[(structural_hash.hex(),) for structural_hash, _ in nodes],
-            value_names=("node_bytes",),
-            value_values=[(node_bytes.hex(),) for _, node_bytes in nodes],
+        txn.call_after(
+            _put_state_hamt_tikv_sync,
+            state_group,
+            root_handle_parts[0],
+            nodes,
         )
 
     def _persist_state_group_snapshot_txn(
@@ -852,10 +880,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             [(sg,) for sg in state_groups_to_delete],
         )
         txn.execute_batch(
-            "DELETE FROM state_hamt_roots WHERE state_group = ?",
-            [(sg,) for sg in state_groups_to_delete],
-        )
-        txn.execute_batch(
             "DELETE FROM state_group_edges WHERE state_group = ?",
             [(sg,) for sg in state_groups_to_delete],
         )
@@ -871,13 +895,11 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         def delete_from_tikv(groups: "Collection[int]") -> None:
             if self.tikv_pd_endpoints:
                 from synapse.logging.context import defer_to_thread
-                from synapse.synapse_rust import tikv_engine
 
                 def _do_delete() -> None:
                     try:
-                        tikv_engine.batch_delete(
-                            [f"sg:{sg}".encode("utf-8") for sg in groups]
-                        )
+                        _delete_legacy_tikv_state_groups_sync(groups)
+                        _delete_state_hamt_roots_tikv_sync(groups)
                     except Exception as e:
                         logger.error("Failed to delete state groups from TiKV: %s", e)
 
@@ -981,13 +1003,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 SELECT id FROM state_groups AS sg WHERE sg.room_id = ?
             )""",
             (room_id,),
-        )
-
-        logger.info("[purge] removing %s from state_hamt_roots", room_id)
-        self.db_pool.simple_delete_txn(
-            txn,
-            table="state_hamt_roots",
-            keyvalues={"room_id": room_id},
         )
 
         logger.info("[purge] removing %s from state_groups", room_id)
