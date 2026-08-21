@@ -35,6 +35,7 @@ from synapse.storage.database import (
 from synapse.storage.engines import PostgresEngine
 from synapse.types import MutableStateMap, StateMap
 from synapse.types.state import StateFilter
+from synapse.util.iterutils import batch_iter
 from synapse.util.caches import intern_string
 
 if TYPE_CHECKING:
@@ -118,7 +119,20 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         if state_filter is None:
             state_filter = StateFilter.all()
 
+        groups = list(groups)
         results: dict[int, MutableStateMap[str]] = {group: {} for group in groups}
+
+        hamt_results, missing_groups = self._get_state_groups_from_hamt_txn(
+            txn, groups, state_filter
+        )
+        results.update(hamt_results)
+
+        if not missing_groups:
+            return results
+
+        groups = missing_groups
+
+        logger.debug("Falling back to legacy state-group reads for %s", groups)
 
         if isinstance(self.database_engine, PostgresEngine):
             # Temporarily disable sequential scans in this transaction. This is
@@ -277,6 +291,96 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
 
         # The results shouldn't be considered mutable.
         return results
+
+    def _get_state_groups_from_hamt_txn(
+        self,
+        txn: LoggingTransaction,
+        groups: list[int],
+        state_filter: StateFilter,
+    ) -> tuple[dict[int, StateMap[str]], list[int]]:
+        from synapse.synapse_rust import state_hamt
+
+        results: dict[int, StateMap[str]] = {}
+        missing_groups: list[int] = []
+
+        for group in groups:
+            try:
+                root_row = self.db_pool.simple_select_one_txn(
+                    txn,
+                    table="state_hamt_roots",
+                    keyvalues={"state_group": group},
+                    retcols=("structural_hash",),
+                    allow_none=True,
+                )
+                if root_row is None:
+                    missing_groups.append(group)
+                    continue
+
+                (root_structural_hash_hex,) = root_row
+                root_node_row = self.db_pool.simple_select_one_txn(
+                    txn,
+                    table="state_hamt_nodes",
+                    keyvalues={"structural_hash": root_structural_hash_hex},
+                    retcols=("node_bytes",),
+                    allow_none=True,
+                )
+                if root_node_row is None:
+                    missing_groups.append(group)
+                    continue
+
+                (root_node_hex,) = root_node_row
+                node_bytes_by_hash: dict[str, bytes] = {
+                    root_structural_hash_hex: bytes.fromhex(root_node_hex)
+                }
+                seen_hashes = {root_structural_hash_hex}
+                to_fetch = {root_structural_hash_hex}
+
+                while to_fetch:
+                    current_batch = list(to_fetch)
+                    to_fetch = set()
+
+                    for chunk in batch_iter(current_batch, 100):
+                        rows = self.db_pool.simple_select_many_txn(
+                            txn,
+                            table="state_hamt_nodes",
+                            column="structural_hash",
+                            iterable=chunk,
+                            keyvalues={},
+                            retcols=("structural_hash", "node_bytes"),
+                        )
+
+                        for structural_hash_hex, node_hex in rows:
+                            node_bytes = bytes.fromhex(node_hex)
+                            node_bytes_by_hash[structural_hash_hex] = node_bytes
+
+                            for child_hash in state_hamt.node_child_hashes(node_bytes):
+                                child_hash_hex = child_hash.hex()
+                                if child_hash_hex not in seen_hashes:
+                                    seen_hashes.add(child_hash_hex)
+                                    to_fetch.add(child_hash_hex)
+
+                entries = state_hamt.materialize_state_entries(
+                    node_bytes_by_hash[root_structural_hash_hex],
+                    [
+                        (bytes.fromhex(structural_hash_hex), node_bytes)
+                        for structural_hash_hex, node_bytes in node_bytes_by_hash.items()
+                    ],
+                )
+
+                state_map: MutableStateMap[str] = {}
+                for typ, state_key, event_id in entries:
+                    key = (intern_string(typ), intern_string(state_key))
+                    state_map[key] = event_id
+
+                results[group] = state_filter.filter_state(state_map)
+            except Exception:
+                logger.exception(
+                    "Failed to materialize HAMT state for state group %s; falling back to SQL",
+                    group,
+                )
+                missing_groups.append(group)
+
+        return results, missing_groups
 
 
 class StateBackgroundUpdateStore(StateGroupBackgroundUpdateStore):
