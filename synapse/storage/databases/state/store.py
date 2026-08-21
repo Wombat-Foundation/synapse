@@ -419,7 +419,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         state_group: int,
         room_id: str,
         current_state_ids: StateMap[str],
-    ) -> None:
+    ) -> tuple[bytes, list[tuple[bytes, bytes]]]:
         from synapse.synapse_rust import state_hamt
 
         root_handle_parts, nodes = state_hamt.build_root_handle(
@@ -427,40 +427,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             room_id,
             self._build_state_hamt_entries(current_state_ids),
         )
-
-        txn.async_call_after(
-            self._put_state_hamt_objects_off_thread,
-            state_group,
-            root_handle_parts[0],
-            nodes,
-            bool(self.tikv_pd_endpoints),
-        )
-
-    async def _put_state_hamt_objects_off_thread(
-        self,
-        state_group: int,
-        root_structural_hash: bytes,
-        nodes: list[tuple[bytes, bytes]],
-        use_tikv: bool,
-    ) -> None:
-        """Write the HAMT root/nodes for a state group without blocking the
-        reactor thread on the (potentially remote) TiKV write.
-        """
-        try:
-            await defer_to_thread(
-                self.hs.get_reactor(),
-                put_state_hamt_objects,
-                state_group,
-                root_structural_hash,
-                nodes,
-                use_tikv,
-                self._in_memory_state_hamt,
-            )
-        except Exception:
-            logger.exception(
-                "Failed to persist HAMT state objects for state group %s",
-                state_group,
-            )
+        return root_handle_parts[0], nodes
 
     def _persist_state_group_snapshot_txn(
         self,
@@ -470,7 +437,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         event_id: str,
         current_state_ids: StateMap[str],
         prev_group: int | None = None,
-    ) -> None:
+    ) -> tuple[bytes, list[tuple[bytes, bytes]]]:
         self.db_pool.simple_insert_txn(
             txn,
             table="state_groups",
@@ -510,7 +477,36 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             value=current_non_member_state_ids,
         )
 
-        self._persist_state_hamt_txn(txn, state_group, room_id, current_state_ids)
+        return self._persist_state_hamt_txn(txn, state_group, room_id, current_state_ids)
+
+    async def _put_state_hamt_objects_after_txn(
+        self,
+        state_group: int,
+        root_structural_hash: bytes,
+        nodes: list[tuple[bytes, bytes]],
+    ) -> None:
+        """Persist the HAMT objects for a single state group.
+
+        We wait for this after the SQL transaction commits so callers don't
+        observe a state group before its trie root exists in TiKV or the
+        in-memory fallback store.
+        """
+
+        try:
+            await defer_to_thread(
+                self.hs.get_reactor(),
+                put_state_hamt_objects,
+                state_group,
+                root_structural_hash,
+                nodes,
+                bool(self.tikv_pd_endpoints),
+                self._in_memory_state_hamt,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to persist HAMT state objects for state group %s",
+                state_group,
+            )
 
     @trace
     @tag_args
@@ -572,6 +568,8 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
 
             sg_before = prev_group
             state_group_iter = iter(state_groups)
+            hamt_writes: list[tuple[int, bytes, list[tuple[bytes, bytes]]]] = []
+
             for event, context in events_and_context:
                 if not event.is_state():
                     context.state_group_after_event = sg_before
@@ -585,7 +583,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     (event.type, event.state_key): event.event_id
                 }
                 current_state_ids[(event.type, event.state_key)] = event.event_id
-                self._persist_state_group_snapshot_txn(
+                root_structural_hash, nodes = self._persist_state_group_snapshot_txn(
                     txn,
                     sg_after,
                     room_id,
@@ -593,16 +591,24 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     current_state_ids,
                     prev_group=sg_before,
                 )
+                hamt_writes.append((sg_after, root_structural_hash, nodes))
                 sg_before = sg_after
 
-            return events_and_context
+            return events_and_context, hamt_writes
 
-        return await self.db_pool.runInteraction(
+        events_and_context, hamt_writes = await self.db_pool.runInteraction(
             "store_state_deltas_for_batched.insert_deltas_group",
             insert_deltas_group_txn,
             events_and_context,
             prev_group,
         )
+
+        for state_group, root_structural_hash, nodes in hamt_writes:
+            await self._put_state_hamt_objects_after_txn(
+                state_group, root_structural_hash, nodes
+            )
+
+        return events_and_context
 
     @trace
     @tag_args
@@ -657,7 +663,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     )
 
             state_group = self._state_group_seq_gen.get_next_id_txn(txn)
-            self._persist_state_group_snapshot_txn(
+            root_structural_hash, nodes = self._persist_state_group_snapshot_txn(
                 txn,
                 state_group,
                 room_id,
@@ -666,12 +672,16 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 prev_group=prev_group,
             )
 
-            return state_group
+            return state_group, root_structural_hash, nodes
 
-        state_group = await self.db_pool.runInteraction(
+        state_group, root_structural_hash, nodes = await self.db_pool.runInteraction(
             "store_state_group.insert_full_state",
             insert_full_state_txn,
             current_state_ids,
+        )
+
+        await self._put_state_hamt_objects_after_txn(
+            state_group, root_structural_hash, nodes
         )
 
         return state_group
