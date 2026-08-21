@@ -53,6 +53,7 @@ from synapse.storage.types import Cursor
 from synapse.storage.util.sequence import build_sequence_generator
 from synapse.types import MutableStateMap, StateKey, StateMap
 from synapse.types.state import StateFilter
+from synapse.util.duration import Duration
 from synapse.util.caches.dictionary_cache import DictionaryCache
 from synapse.util.cancellation import cancellable
 
@@ -165,17 +166,44 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         Returns:
             Dict of state group to state map.
         """
-        results: dict[int, StateMap[str]] = {}
-
         chunks = [groups[i : i + 100] for i in range(0, len(groups), 100)]
-        for chunk in chunks:
-            res = await self.db_pool.runInteraction(
-                "_get_state_groups_from_groups",
-                self._get_state_groups_from_groups_txn,
-                chunk,
-                state_filter,
+
+        for attempt in range(10):
+            results: dict[int, StateMap[str]] = {}
+            for chunk in chunks:
+                res = await self.db_pool.runInteraction(
+                    "_get_state_groups_from_groups",
+                    self._get_state_groups_from_groups_txn,
+                    chunk,
+                    state_filter,
+                )
+                results.update(res)
+
+            if not state_filter.is_full():
+                return results
+
+            missing_groups = [group for group in groups if not results[group]]
+            if not missing_groups:
+                return results
+
+            existing_rows = await self.db_pool.simple_select_many_batch(
+                table="state_groups",
+                column="id",
+                iterable=missing_groups,
+                retcols=("id",),
+                desc="_get_state_groups_from_groups.check_state_groups",
             )
-            results.update(res)
+            existing_groups = {group for (group,) in existing_rows}
+            retry_groups = [group for group in missing_groups if group in existing_groups]
+            if not retry_groups:
+                return results
+
+            logger.debug(
+                "State group HAMT not ready yet for %s; retrying (%d/10)",
+                retry_groups,
+                attempt + 1,
+            )
+            await self.hs.get_clock().sleep(Duration(milliseconds=50 * (attempt + 1)))
 
         return results
 
