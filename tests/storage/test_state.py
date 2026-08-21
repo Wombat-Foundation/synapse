@@ -31,6 +31,7 @@ from synapse.api.constants import EventTypes, Membership
 from synapse.api.room_versions import RoomVersions
 from synapse.events import EventBase
 from synapse.server import HomeServer
+from synapse.storage.databases.state import bg_updates
 from synapse.types import JsonDict, RoomID, StateMap, UserID
 from synapse.types.state import StateFilter
 from synapse.util.clock import Clock
@@ -144,6 +145,34 @@ class StateStoreTestCase(HomeserverTestCase):
         self.assertDictEqual(
             state_group_map[state_group],
             {(EventTypes.Create, ""): e1.event_id, (EventTypes.Name, ""): e2.event_id},
+        )
+
+    def test_state_group_hamt_corruption_does_not_fallback_to_sql(self) -> None:
+        event = self.inject_state_event(
+            self.room, self.u_alice, EventTypes.Create, "", {}
+        )
+        state_group = self.get_success(
+            self.store._get_state_group_for_event(event.event_id)
+        )
+        assert state_group is not None
+
+        root_key = bg_updates._state_hamt_root_tikv_key(state_group)
+        root_structural_hash = bg_updates._IN_MEMORY_STATE_HAMT[root_key]
+        bg_updates._IN_MEMORY_STATE_HAMT.pop(
+            bg_updates._state_hamt_node_tikv_key(root_structural_hash)
+        )
+
+        # If a HAMT root exists, missing/corrupt nodes are data corruption.
+        # Do not hide that by falling back to the legacy SQL snapshot.
+        failure = self.get_failure(
+            self.storage.state.stores.state._get_state_groups_from_groups(
+                [state_group], StateFilter.all()
+            ),
+            RuntimeError,
+        )
+        self.assertIn(
+            "Missing HAMT root node for state group",
+            str(failure.value),
         )
 
     def test_get_state_groups(self) -> None:

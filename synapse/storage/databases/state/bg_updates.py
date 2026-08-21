@@ -374,68 +374,75 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         use_tikv = bool(getattr(self, "tikv_pd_endpoints", None))
 
         for group in groups:
-            try:
-                root_structural_hash = _get_state_hamt_object(
-                    _state_hamt_root_tikv_key(group), use_tikv
+            root_structural_hash = _get_state_hamt_object(
+                _state_hamt_root_tikv_key(group), use_tikv
+            )
+            if root_structural_hash is None:
+                missing_groups.append(group)
+                continue
+
+            root_node_bytes = _get_state_hamt_object(
+                _state_hamt_node_tikv_key(root_structural_hash), use_tikv
+            )
+            if root_node_bytes is None:
+                raise RuntimeError(
+                    "Missing HAMT root node for state group "
+                    f"{group}: {root_structural_hash.hex()}"
                 )
-                if root_structural_hash is None:
-                    missing_groups.append(group)
-                    continue
 
-                root_node_bytes = _get_state_hamt_object(
-                    _state_hamt_node_tikv_key(root_structural_hash), use_tikv
-                )
-                if root_node_bytes is None:
-                    missing_groups.append(group)
-                    continue
+            node_bytes_by_hash: dict[bytes, bytes] = {
+                root_structural_hash: root_node_bytes
+            }
+            seen_hashes = {root_structural_hash}
+            to_fetch = {root_structural_hash}
 
-                node_bytes_by_hash: dict[bytes, bytes] = {
-                    root_structural_hash: root_node_bytes
-                }
-                seen_hashes = {root_structural_hash}
-                to_fetch = {root_structural_hash}
+            while to_fetch:
+                current_batch = list(to_fetch)
+                to_fetch = set()
 
-                while to_fetch:
-                    current_batch = list(to_fetch)
-                    to_fetch = set()
-
-                    for chunk in batch_iter(current_batch, 100):
-                        rows = _get_state_hamt_objects(
-                            [
-                                _state_hamt_node_tikv_key(structural_hash)
-                                for structural_hash in chunk
-                            ],
-                            use_tikv,
+                for chunk in batch_iter(current_batch, 100):
+                    rows = _get_state_hamt_objects(
+                        [
+                            _state_hamt_node_tikv_key(structural_hash)
+                            for structural_hash in chunk
+                        ],
+                        use_tikv,
+                    )
+                    found_hashes = {
+                        bytes.fromhex(
+                            node_key.removeprefix(b"hamt:node:").decode("ascii")
+                        )
+                        for node_key, _ in rows
+                    }
+                    missing_hashes = set(chunk) - found_hashes
+                    if missing_hashes:
+                        raise RuntimeError(
+                            "Missing HAMT child nodes for state group "
+                            f"{group}: {[hash.hex() for hash in missing_hashes]}"
                         )
 
-                        for node_key, node_bytes in rows:
-                            structural_hash = bytes.fromhex(
-                                node_key.removeprefix(b"hamt:node:").decode("ascii")
-                            )
-                            node_bytes_by_hash[structural_hash] = node_bytes
+                    for node_key, node_bytes in rows:
+                        structural_hash = bytes.fromhex(
+                            node_key.removeprefix(b"hamt:node:").decode("ascii")
+                        )
+                        node_bytes_by_hash[structural_hash] = node_bytes
 
-                            for child_hash in state_hamt.node_child_hashes(node_bytes):
-                                if child_hash not in seen_hashes:
-                                    seen_hashes.add(child_hash)
-                                    to_fetch.add(child_hash)
+                        for child_hash in state_hamt.node_child_hashes(node_bytes):
+                            if child_hash not in seen_hashes:
+                                seen_hashes.add(child_hash)
+                                to_fetch.add(child_hash)
 
-                entries = state_hamt.materialize_state_entries(
-                    node_bytes_by_hash[root_structural_hash],
-                    list(node_bytes_by_hash.items()),
-                )
+            entries = state_hamt.materialize_state_entries(
+                node_bytes_by_hash[root_structural_hash],
+                list(node_bytes_by_hash.items()),
+            )
 
-                state_map: MutableStateMap[str] = {}
-                for typ, state_key, event_id in entries:
-                    key = (intern_string(typ), intern_string(state_key))
-                    state_map[key] = event_id
+            state_map: MutableStateMap[str] = {}
+            for typ, state_key, event_id in entries:
+                key = (intern_string(typ), intern_string(state_key))
+                state_map[key] = event_id
 
-                results[group] = dict(state_filter.filter_state(state_map))
-            except Exception:
-                logger.exception(
-                    "Failed to materialize HAMT state for state group %s; falling back to SQL",
-                    group,
-                )
-                missing_groups.append(group)
+            results[group] = dict(state_filter.filter_state(state_map))
 
         return results, missing_groups
 

@@ -62,73 +62,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _fetch_tikv_state_groups_sync(
-    groups: list[int], state_filter: StateFilter
-) -> tuple[dict[int, StateMap[str]], list[int]]:
-    import json
-
-    from synapse.synapse_rust import tikv_engine
-
-    results: dict[int, StateMap[str]] = {}
-    missing_groups: list[int] = []
-
-    groups_to_fetch = set(groups)
-    fetched_data = {}
-
-    while groups_to_fetch:
-        keys = [f"sg:{g}".encode("utf-8") for g in groups_to_fetch]
-        pairs = tikv_engine.batch_get(keys)
-
-        found_groups = set()
-        for k, v in pairs:
-            sg_id = int(k.decode("utf-8")[3:])
-            found_groups.add(sg_id)
-            fetched_data[sg_id] = json.loads(v.decode("utf-8"))
-
-        groups_to_fetch = set()
-        for sg_id in found_groups:
-            data = fetched_data[sg_id]
-            prev = data.get("prev")
-            if prev is not None and prev not in fetched_data:
-                groups_to_fetch.add(prev)
-
-    for g in groups:
-        if g not in fetched_data:
-            missing_groups.append(g)
-            continue
-
-        state_map: dict[tuple[str, str], str] = {}
-        curr = g
-        valid = True
-        deltas_stack = []
-
-        while curr is not None:
-            if curr not in fetched_data:
-                valid = False
-                break
-            data = fetched_data[curr]
-            deltas_stack.append(data.get("deltas", []))
-            curr = data.get("prev")
-
-        if not valid:
-            missing_groups.append(g)
-            continue
-
-        for deltas in reversed(deltas_stack):
-            for item in deltas:
-                state_map[(item[0], item[1])] = item[2]
-
-        results[g] = state_filter.filter_state(state_map)
-
-    return results, missing_groups
-
-
-def _delete_legacy_tikv_state_groups_sync(groups: "Collection[int]") -> None:
-    from synapse.synapse_rust import tikv_engine
-
-    tikv_engine.batch_delete([f"sg:{sg}".encode("utf-8") for sg in groups])
-
-
 class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
     """A data store for fetching/storing state groups."""
 
@@ -232,38 +165,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             Dict of state group to state map.
         """
         results: dict[int, StateMap[str]] = {}
-
-        if self.tikv_pd_endpoints:
-            try:
-                from synapse.logging.context import (
-                    defer_to_thread,
-                    make_deferred_yieldable,
-                )
-
-                tikv_res, missing_groups = await make_deferred_yieldable(
-                    defer_to_thread(
-                        self.hs.get_reactor(),
-                        _fetch_tikv_state_groups_sync,
-                        groups,
-                        state_filter,
-                    )
-                )
-
-                results.update(tikv_res)
-
-                if missing_groups:
-                    logger.warning(
-                        "State groups missing in TiKV: %s, falling back to SQL for those",
-                        missing_groups,
-                    )
-                    groups = missing_groups
-                else:
-                    return results
-            except Exception as e:
-                logger.error(
-                    "Failed to fetch state groups from TiKV, falling back to SQL: %s",
-                    e,
-                )
 
         chunks = [groups[i : i + 100] for i in range(0, len(groups), 100)]
         for chunk in chunks:
@@ -560,6 +461,9 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         )
 
         if prev_group is not None:
+            # `state_group_edges` is lifecycle ancestry metadata for purge and
+            # deletion safety. State is stored as a full snapshot plus HAMT, so
+            # this edge no longer means `state_groups_state` contains a delta.
             self.db_pool.simple_insert_txn(
                 txn,
                 table="state_group_edges",
@@ -863,19 +767,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         )
 
         def delete_external_state_objects(groups: "Collection[int]") -> None:
-            if self.tikv_pd_endpoints:
-                from synapse.logging.context import defer_to_thread
-
-                def _do_delete() -> None:
-                    try:
-                        _delete_legacy_tikv_state_groups_sync(groups)
-                    except Exception as e:
-                        logger.error(
-                            "Failed to delete legacy state groups from TiKV: %s", e
-                        )
-
-                defer_to_thread(self.hs.get_reactor(), _do_delete)
-
             try:
                 delete_state_hamt_roots(groups, bool(self.tikv_pd_endpoints))
             except Exception as e:
