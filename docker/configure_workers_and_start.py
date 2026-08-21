@@ -958,6 +958,12 @@ def generate_worker_files(
     else:
         healthcheck_urls = ["http://localhost:8080/health"]
 
+    # The URLs above hit each worker's `/health` directly, bypassing nginx, so
+    # they never prove nginx itself is up and routing correctly. Add one check
+    # through nginx, at a `federation_reader` endpoint, to close that gap.
+    if requested_workers:
+        healthcheck_urls.append("http://localhost:8008/_matrix/federation/v1/version")
+
     # Get the set of all worker types that we have configured
     all_worker_types_in_use = set(
         chain(*[worker.worker_types for worker in requested_workers])
