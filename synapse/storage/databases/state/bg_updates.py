@@ -309,8 +309,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         if not getattr(self, "tikv_pd_endpoints", None):
             return {}, groups
 
-        from synapse.synapse_rust import state_hamt
-        from synapse.synapse_rust import tikv_engine
+        from synapse.synapse_rust import state_hamt, tikv_engine
 
         results: dict[int, MutableStateMap[str]] = {}
         missing_groups: list[int] = []
@@ -360,10 +359,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
 
                 entries = state_hamt.materialize_state_entries(
                     node_bytes_by_hash[root_structural_hash],
-                    [
-                        (structural_hash, node_bytes)
-                        for structural_hash, node_bytes in node_bytes_by_hash.items()
-                    ],
+                    list(node_bytes_by_hash.items()),
                 )
 
                 state_map: MutableStateMap[str] = {}
