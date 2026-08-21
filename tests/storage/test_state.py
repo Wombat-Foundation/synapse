@@ -114,6 +114,38 @@ class StateStoreTestCase(HomeserverTestCase):
             {(EventTypes.Create, ""): e1.event_id, (EventTypes.Name, ""): e2.event_id},
         )
 
+    def test_state_group_reads_use_hamt_by_default(self) -> None:
+        e1 = self.inject_state_event(self.room, self.u_alice, EventTypes.Create, "", {})
+        e2 = self.inject_state_event(
+            self.room, self.u_alice, EventTypes.Name, "", {"name": "test room"}
+        )
+
+        state_group = self.get_success(
+            self.store._get_state_group_for_event(e2.event_id)
+        )
+        assert state_group is not None
+
+        self.get_success(
+            self.store.db_pool.simple_delete(
+                table="state_groups_state",
+                keyvalues={"state_group": state_group},
+                desc="test_state_group_reads_use_hamt_by_default",
+            )
+        )
+
+        # The active refactor path materializes state from HAMT first. Removing
+        # the legacy SQL snapshot rows should not affect state-group reads.
+        state_group_map = self.get_success(
+            self.storage.state.stores.state._get_state_groups_from_groups(
+                [state_group], StateFilter.all()
+            )
+        )
+
+        self.assertDictEqual(
+            state_group_map[state_group],
+            {(EventTypes.Create, ""): e1.event_id, (EventTypes.Name, ""): e2.event_id},
+        )
+
     def test_get_state_groups(self) -> None:
         e1 = self.inject_state_event(self.room, self.u_alice, EventTypes.Create, "", {})
         e2 = self.inject_state_event(

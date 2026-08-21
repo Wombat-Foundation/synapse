@@ -22,6 +22,7 @@
 import logging
 from typing import (
     TYPE_CHECKING,
+    Collection,
     Mapping,
 )
 
@@ -53,6 +54,66 @@ def _state_hamt_root_tikv_key(state_group: int) -> bytes:
 
 def _state_hamt_node_tikv_key(structural_hash: bytes) -> bytes:
     return b"hamt:node:" + structural_hash.hex().encode("ascii")
+
+
+_IN_MEMORY_STATE_HAMT: dict[bytes, bytes] = {}
+
+
+def put_state_hamt_objects(
+    state_group: int,
+    root_structural_hash: bytes,
+    nodes: list[tuple[bytes, bytes]],
+    use_tikv: bool,
+) -> None:
+    pairs = [(_state_hamt_root_tikv_key(state_group), root_structural_hash)] + [
+        (_state_hamt_node_tikv_key(structural_hash), node_bytes)
+        for structural_hash, node_bytes in nodes
+    ]
+
+    if use_tikv:
+        from synapse.synapse_rust import tikv_engine
+
+        tikv_engine.batch_put(pairs)
+        return
+
+    _IN_MEMORY_STATE_HAMT.update(pairs)
+
+
+def delete_state_hamt_roots(state_groups: Collection[int], use_tikv: bool) -> None:
+    keys = [_state_hamt_root_tikv_key(state_group) for state_group in state_groups]
+
+    if use_tikv:
+        from synapse.synapse_rust import tikv_engine
+
+        tikv_engine.batch_delete(keys)
+        return
+
+    for key in keys:
+        _IN_MEMORY_STATE_HAMT.pop(key, None)
+
+
+def _get_state_hamt_object(key: bytes, use_tikv: bool) -> bytes | None:
+    if use_tikv:
+        from synapse.synapse_rust import tikv_engine
+
+        return tikv_engine.get(key)
+
+    return _IN_MEMORY_STATE_HAMT.get(key)
+
+
+def _get_state_hamt_objects(
+    keys: list[bytes], use_tikv: bool
+) -> list[tuple[bytes, bytes]]:
+    if use_tikv:
+        from synapse.synapse_rust import tikv_engine
+
+        return tikv_engine.batch_get(keys)
+
+    return [
+        (key, _IN_MEMORY_STATE_HAMT[key])
+        for key in keys
+        if key in _IN_MEMORY_STATE_HAMT
+    ]
 
 
 class StateGroupBackgroundUpdateStore(SQLBaseStore):
@@ -306,23 +367,23 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         groups: list[int],
         state_filter: StateFilter,
     ) -> tuple[dict[int, MutableStateMap[str]], list[int]]:
-        if not getattr(self, "tikv_pd_endpoints", None):
-            return {}, groups
-
-        from synapse.synapse_rust import state_hamt, tikv_engine
+        from synapse.synapse_rust import state_hamt
 
         results: dict[int, MutableStateMap[str]] = {}
         missing_groups: list[int] = []
+        use_tikv = bool(getattr(self, "tikv_pd_endpoints", None))
 
         for group in groups:
             try:
-                root_structural_hash = tikv_engine.get(_state_hamt_root_tikv_key(group))
+                root_structural_hash = _get_state_hamt_object(
+                    _state_hamt_root_tikv_key(group), use_tikv
+                )
                 if root_structural_hash is None:
                     missing_groups.append(group)
                     continue
 
-                root_node_bytes = tikv_engine.get(
-                    _state_hamt_node_tikv_key(root_structural_hash)
+                root_node_bytes = _get_state_hamt_object(
+                    _state_hamt_node_tikv_key(root_structural_hash), use_tikv
                 )
                 if root_node_bytes is None:
                     missing_groups.append(group)
@@ -339,11 +400,12 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
                     to_fetch = set()
 
                     for chunk in batch_iter(current_batch, 100):
-                        rows = tikv_engine.batch_get(
+                        rows = _get_state_hamt_objects(
                             [
                                 _state_hamt_node_tikv_key(structural_hash)
                                 for structural_hash in chunk
-                            ]
+                            ],
+                            use_tikv,
                         )
 
                         for node_key, node_bytes in rows:
