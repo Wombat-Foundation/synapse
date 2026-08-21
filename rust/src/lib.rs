@@ -20,6 +20,7 @@ pub mod push;
 pub mod rendezvous;
 pub mod room_versions;
 pub mod segmenter;
+pub mod state_hamt;
 pub mod state_res;
 pub mod tikv_engine;
 pub mod tokio_runtime;
@@ -77,6 +78,7 @@ fn synapse_rust(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     msc4388_rendezvous::register_module(py, m)?;
     segmenter::register_module(py, m)?;
     room_versions::register_module(py, m)?;
+    state_hamt::register_module(py, m)?;
     state_res::register_module(py, m)?;
     types::register_module(py, m)?;
     tikv_engine::register_module(py, m)?;

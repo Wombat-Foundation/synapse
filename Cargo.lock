@@ -589,6 +589,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
+name = "hmac"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
+dependencies = [
+ "digest",
+]
+
+[[package]]
 name = "http"
 version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1573,7 +1582,7 @@ dependencies = [
 [[package]]
 name = "rezzy"
 version = "0.6.0"
-source = "git+https://github.com/gamesguru/rezzy.git?branch=dev#92af9746f9da7e07f88cbeb70ad0927ed8c4714b"
+source = "git+https://github.com/gamesguru/rezzy.git?branch=dev#016a31fe8961041f88bd8bf231a19d1cfbadda1a"
 dependencies = [
  "base64 0.22.1",
  "blake2",
@@ -1945,6 +1954,7 @@ dependencies = [
  "futures",
  "headers",
  "hex",
+ "hmac",
  "http 1.4.2",
  "http-body-util",
  "icu_segmenter",
