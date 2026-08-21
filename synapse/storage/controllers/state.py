@@ -87,25 +87,6 @@ class StateStorageController:
 
     @trace
     @tag_args
-    async def get_state_group_delta(
-        self, state_group: int
-    ) -> tuple[int | None, StateMap[str] | None]:
-        """Given a state group try to return a previous group and a delta between
-        the old and the new.
-
-        Args:
-            state_group: The state group used to retrieve state deltas.
-
-        Returns:
-            A tuple of the previous group and a state map of the event IDs which
-            make up the delta between the old and new state groups.
-        """
-
-        state_group_delta = await self.stores.state.get_state_group_delta(state_group)
-        return state_group_delta.prev_group, state_group_delta.delta_ids
-
-    @trace
-    @tag_args
     async def get_state_groups_ids(
         self, _room_id: str, event_ids: Collection[str], await_full_state: bool = True
     ) -> dict[int, MutableStateMap[str]]:

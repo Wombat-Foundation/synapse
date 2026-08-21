@@ -28,8 +28,6 @@ from typing import (
     cast,
 )
 
-import attr
-
 from synapse.api.constants import EventTypes
 from synapse.events import EventBase
 from synapse.events.snapshot import (
@@ -49,7 +47,6 @@ from synapse.storage.types import Cursor
 from synapse.storage.util.sequence import build_sequence_generator
 from synapse.types import MutableStateMap, StateKey, StateMap
 from synapse.types.state import StateFilter
-from synapse.util.caches.descriptors import cached
 from synapse.util.caches.dictionary_cache import DictionaryCache
 from synapse.util.cancellation import cancellable
 
@@ -119,19 +116,6 @@ def _fetch_tikv_state_groups_sync(
         results[g] = state_filter.filter_state(state_map)
 
     return results, missing_groups
-
-
-@attr.s(slots=True, frozen=True, auto_attribs=True)
-class _GetStateGroupDelta:
-    """Return type of get_state_group_delta that implements __len__, which lets
-    us use the iterable flag when caching
-    """
-
-    prev_group: int | None
-    delta_ids: StateMap[str] | None
-
-    def __len__(self) -> int:
-        return len(self.delta_ids) if self.delta_ids else 0
 
 
 class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
@@ -219,49 +203,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             except Exception as e:
                 logger.error("Failed to connect to TiKV cluster: %s", e)
                 self.tikv_pd_endpoints = None
-
-    @cached(max_entries=10000, iterable=True)
-    async def get_state_group_delta(self, state_group: int) -> _GetStateGroupDelta:
-        """Given a state group try to return a previous group and a delta between
-        the old and the new.
-
-        Returns:
-            _GetStateGroupDelta containing prev_group and delta_ids, where both may be None.
-        """
-
-        def _get_state_group_delta_txn(txn: LoggingTransaction) -> _GetStateGroupDelta:
-            prev_group = self.db_pool.simple_select_one_onecol_txn(
-                txn,
-                table="state_group_edges",
-                keyvalues={"state_group": state_group},
-                retcol="prev_state_group",
-                allow_none=True,
-            )
-
-            if not prev_group:
-                return _GetStateGroupDelta(None, None)
-
-            delta_ids = cast(
-                list[tuple[str, str, str]],
-                self.db_pool.simple_select_list_txn(
-                    txn,
-                    table="state_groups_state",
-                    keyvalues={"state_group": state_group},
-                    retcols=("type", "state_key", "event_id"),
-                ),
-            )
-
-            return _GetStateGroupDelta(
-                prev_group,
-                {
-                    (event_type, state_key): event_id
-                    for event_type, state_key, event_id in delta_ids
-                },
-            )
-
-        return await self.db_pool.runInteraction(
-            "get_state_group_delta", _get_state_group_delta_txn
-        )
 
     @trace
     @tag_args
@@ -616,9 +557,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         )
 
         current_member_state_ids = {
-            s: ev
-            for (s, ev) in current_state_ids.items()
-            if s[0] == EventTypes.Member
+            s: ev for (s, ev) in current_state_ids.items() if s[0] == EventTypes.Member
         }
         txn.call_after(
             self._state_group_members_cache.update,
@@ -628,9 +567,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         )
 
         current_non_member_state_ids = {
-            s: ev
-            for (s, ev) in current_state_ids.items()
-            if s[0] != EventTypes.Member
+            s: ev for (s, ev) in current_state_ids.items() if s[0] != EventTypes.Member
         }
         txn.call_after(
             self._state_group_cache.update,
@@ -774,11 +711,9 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             txn: LoggingTransaction, current_state_ids: StateMap[str]
         ) -> int:
             if prev_group is not None:
-                is_missing = (
-                    self._state_deletion_store._check_state_groups_and_bump_deletion_txn(
-                        txn,
-                        {prev_group},
-                    )
+                is_missing = self._state_deletion_store._check_state_groups_and_bump_deletion_txn(
+                    txn,
+                    {prev_group},
                 )
                 if is_missing:
                     raise Exception(

@@ -515,19 +515,7 @@ class StateHandler:
         state_group_ids_set = set(state_group_ids)
         if len(state_group_ids_set) == 1:
             (state_group_id,) = state_group_ids_set
-            (
-                prev_group,
-                delta_ids,
-            ) = await self._state_storage_controller.get_state_group_delta(
-                state_group_id
-            )
-
-            return _StateCacheEntry(
-                state=None,
-                state_group=state_group_id,
-                prev_group=prev_group,
-                delta_ids=delta_ids,
-            )
+            return _StateCacheEntry(state=None, state_group=state_group_id)
         elif len(state_group_ids_set) == 0:
             return _StateCacheEntry(state={}, state_group=None)
 

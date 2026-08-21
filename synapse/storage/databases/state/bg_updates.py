@@ -35,8 +35,8 @@ from synapse.storage.database import (
 from synapse.storage.engines import PostgresEngine
 from synapse.types import MutableStateMap, StateMap
 from synapse.types.state import StateFilter
-from synapse.util.iterutils import batch_iter
 from synapse.util.caches import intern_string
+from synapse.util.iterutils import batch_iter
 
 if TYPE_CHECKING:
     from synapse.server import HomeServer
