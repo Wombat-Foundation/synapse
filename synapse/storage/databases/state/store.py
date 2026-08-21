@@ -477,20 +477,10 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             values={"id": state_group, "room_id": room_id, "event_id": event_id},
         )
 
-        self.db_pool.simple_insert_many_txn(
-            txn,
-            table="state_groups_state",
-            keys=("state_group", "room_id", "type", "state_key", "event_id"),
-            values=[
-                (state_group, room_id, key[0], key[1], state_id)
-                for key, state_id in current_state_ids.items()
-            ],
-        )
-
         if prev_group is not None:
             # `state_group_edges` is lifecycle ancestry metadata for purge and
-            # deletion safety. State is stored as a full snapshot plus HAMT, so
-            # this edge no longer means `state_groups_state` contains a delta.
+            # deletion safety. The live state payload now lives in HAMT/TiKV,
+            # so this edge is only ancestry metadata.
             self.db_pool.simple_insert_txn(
                 txn,
                 table="state_group_edges",

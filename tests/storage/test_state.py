@@ -676,18 +676,11 @@ class StateStoreTestCase(HomeserverTestCase):
             if event.is_state():
                 self.assertIn(event.event_id, events)
 
-        expected_state = {
-            (EventTypes.Create, ""): creation_event.event_id,
-        }
-
-        # Check that each state event's state group has the exact full snapshot
-        # we expect after applying that event. `state_group_edges` is still
-        # written as lifecycle ancestry metadata, not as a signal that
-        # `state_groups_state` only contains a delta row.
+        # The HAMT path is now the source of truth for live state snapshots.
+        # `state_groups_state` should not receive rows for freshly written state
+        # groups anymore.
         for event, context in processed_events_and_context:
             if event.is_state():
-                expected_state[(event.type, event.state_key)] = event.event_id
-
                 state = cast(
                     list[tuple[str, str, str]],
                     self.get_success(
@@ -698,13 +691,7 @@ class StateStoreTestCase(HomeserverTestCase):
                         )
                     ),
                 )
-                self.assertEqual(
-                    {
-                        (state_type, state_key): event_id
-                        for state_type, state_key, event_id in state
-                    },
-                    expected_state,
-                )
+                self.assertEqual(state, [])
 
                 groups = cast(
                     list[tuple[str]],
