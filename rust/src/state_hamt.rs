@@ -239,18 +239,32 @@ pub fn reachability_audit(
             .ok_or_else(|| format!("Missing persisted HAMT node: {:02x?}", hash))
     };
 
-    let audit = rezzy::hamt::reachability_audit(roots, universe, &mut resolver)
+    let audit = rezzy::hamt::bitmap_reachability_audit(roots, universe, &mut resolver)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{e:?}")))?;
     let reachable = audit
         .reachable
-        .into_iter()
-        .map(|hash| hash.to_vec())
-        .collect();
+        .iter()
+        .map(|idx| {
+            audit.universe.hash_at(idx).ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "HAMT bitmap audit returned out-of-range reachable index: {idx}"
+                ))
+            })
+        })
+        .map(|hash| hash.map(|hash| hash.to_vec()))
+        .collect::<PyResult<Vec<_>>>()?;
     let unreachable = audit
         .unreachable
-        .into_iter()
-        .map(|hash| hash.to_vec())
-        .collect();
+        .iter()
+        .map(|idx| {
+            audit.universe.hash_at(idx).ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "HAMT bitmap audit returned out-of-range unreachable index: {idx}"
+                ))
+            })
+        })
+        .map(|hash| hash.map(|hash| hash.to_vec()))
+        .collect::<PyResult<Vec<_>>>()?;
 
     Ok((reachable, unreachable))
 }
