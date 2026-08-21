@@ -543,6 +543,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         room_id: str,
         event_id: str,
         current_state_ids: StateMap[str],
+        prev_group: int | None = None,
     ) -> None:
         self.db_pool.simple_insert_txn(
             txn,
@@ -559,6 +560,16 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 for key, state_id in current_state_ids.items()
             ],
         )
+
+        if prev_group is not None:
+            self.db_pool.simple_insert_txn(
+                txn,
+                table="state_group_edges",
+                values={
+                    "state_group": state_group,
+                    "prev_state_group": prev_group,
+                },
+            )
 
         current_member_state_ids = {
             s: ev for (s, ev) in current_state_ids.items() if s[0] == EventTypes.Member
@@ -661,6 +672,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     room_id,
                     event.event_id,
                     current_state_ids,
+                    prev_group=sg_before,
                 )
                 sg_before = sg_after
 
@@ -732,6 +744,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 room_id,
                 event_id,
                 current_state_ids,
+                prev_group=prev_group,
             )
 
             return state_group
@@ -836,6 +849,10 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         logger.info("[purge] removing redundant state groups")
         txn.execute_batch(
             "DELETE FROM state_groups_state WHERE state_group = ?",
+            [(sg,) for sg in state_groups_to_delete],
+        )
+        txn.execute_batch(
+            "DELETE FROM state_hamt_roots WHERE state_group = ?",
             [(sg,) for sg in state_groups_to_delete],
         )
         txn.execute_batch(
@@ -964,6 +981,13 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 SELECT id FROM state_groups AS sg WHERE sg.room_id = ?
             )""",
             (room_id,),
+        )
+
+        logger.info("[purge] removing %s from state_hamt_roots", room_id)
+        self.db_pool.simple_delete_txn(
+            txn,
+            table="state_hamt_roots",
+            keyvalues={"room_id": room_id},
         )
 
         logger.info("[purge] removing %s from state_groups", room_id)
