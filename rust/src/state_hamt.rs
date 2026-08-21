@@ -33,6 +33,7 @@ type PyRootHandleParts = (Vec<u8>, Vec<u8>);
 type PyPersistedNodeBytes = (Vec<u8>, Vec<u8>);
 type PyBuiltRoot = (PyRootHandleParts, Vec<PyPersistedNodeBytes>);
 type PyStateEntry = (String, String, String);
+type PyReachabilityAudit = (Vec<Vec<u8>>, Vec<Vec<u8>>);
 
 #[must_use]
 fn room_structural_key_raw(server_secret: &[u8; 32], room_id: &str) -> [u8; 32] {
@@ -101,6 +102,12 @@ fn decode_persisted_node(node_bytes: &[u8]) -> Result<Arc<HamtNode<String, Strin
     Ok(Arc::new(node))
 }
 
+fn structural_hash_from_bytes(hash_bytes: Vec<u8>) -> Result<StructuralHash, PyErr> {
+    hash_bytes
+        .try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("structural hash must be 16 bytes"))
+}
+
 #[pyfunction]
 #[pyo3(text_signature = "(server_secret, room_id, /)")]
 pub fn room_structural_key(server_secret: Vec<u8>, room_id: &str) -> PyResult<Vec<u8>> {
@@ -143,9 +150,7 @@ pub fn materialize_state_entries(
     let mut node_map: HashMap<StructuralHash, Arc<HamtNode<String, String>>> = HashMap::new();
 
     for (hash_bytes, node_bytes) in nodes {
-        let hash: [u8; 16] = hash_bytes.try_into().map_err(|_| {
-            pyo3::exceptions::PyValueError::new_err("structural hash must be 16 bytes")
-        })?;
+        let hash = structural_hash_from_bytes(hash_bytes)?;
         let node = decode_persisted_node(&node_bytes)
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
         node_map.insert(hash, node);
@@ -186,12 +191,89 @@ pub fn node_child_hashes(node_bytes: Vec<u8>) -> PyResult<Vec<Vec<u8>>> {
         .collect())
 }
 
+#[pyfunction]
+#[pyo3(text_signature = "(root_node_bytes, roots, universe, nodes, /)")]
+pub fn reachability_audit(
+    root_node_bytes: Vec<u8>,
+    roots: Vec<Vec<u8>>,
+    universe: Vec<Vec<u8>>,
+    nodes: Vec<(Vec<u8>, Vec<u8>)>,
+) -> PyResult<PyReachabilityAudit> {
+    let root_node = decode_persisted_node(&root_node_bytes)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    let root_hash = root_node.structural_hash;
+
+    let mut node_map: HashMap<StructuralHash, Arc<HamtNode<String, String>>> = HashMap::new();
+    node_map.insert(root_hash, root_node);
+
+    for (hash_bytes, node_bytes) in nodes {
+        let hash = structural_hash_from_bytes(hash_bytes)?;
+        let node = decode_persisted_node(&node_bytes)
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        node_map.insert(hash, node);
+    }
+
+    let roots = roots
+        .into_iter()
+        .map(structural_hash_from_bytes)
+        .map(|hash| {
+            hash.and_then(|hash| {
+                node_map.get(&hash).cloned().ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "Missing HAMT root node: {:02x?}",
+                        hash
+                    ))
+                })
+            })
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    let universe = universe
+        .into_iter()
+        .map(structural_hash_from_bytes)
+        .collect::<PyResult<Vec<_>>>()?;
+
+    let mut resolver = |hash: &StructuralHash| -> Result<Arc<HamtNode<String, String>>, String> {
+        node_map
+            .get(hash)
+            .cloned()
+            .ok_or_else(|| format!("Missing persisted HAMT node: {:02x?}", hash))
+    };
+
+    let audit = rezzy::hamt::reachability_audit(roots, universe, &mut resolver)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{e:?}")))?;
+    let reachable = audit
+        .reachable
+        .into_iter()
+        .map(|hash| hash.to_vec())
+        .collect();
+    let unreachable = audit
+        .unreachable
+        .into_iter()
+        .map(|hash| hash.to_vec())
+        .collect();
+
+    Ok((reachable, unreachable))
+}
+
+#[pyfunction]
+#[pyo3(text_signature = "(root_node_bytes, roots, universe, nodes, /)")]
+pub fn unreachable_node_hashes(
+    root_node_bytes: Vec<u8>,
+    roots: Vec<Vec<u8>>,
+    universe: Vec<Vec<u8>>,
+    nodes: Vec<(Vec<u8>, Vec<u8>)>,
+) -> PyResult<Vec<Vec<u8>>> {
+    reachability_audit(root_node_bytes, roots, universe, nodes).map(|(_, unreachable)| unreachable)
+}
+
 pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     let child_module = PyModule::new(py, "state_hamt")?;
     child_module.add_function(wrap_pyfunction!(room_structural_key, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(build_root_handle, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(materialize_state_entries, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(node_child_hashes, &child_module)?)?;
+    child_module.add_function(wrap_pyfunction!(reachability_audit, &child_module)?)?;
+    child_module.add_function(wrap_pyfunction!(unreachable_node_hashes, &child_module)?)?;
     m.add_submodule(&child_module)?;
 
     py.import("sys")?
@@ -280,5 +362,52 @@ mod tests {
                 && event_id == "$1"));
         assert!(recovered.iter().any(|(_, _, event_id)| event_id == "$2"));
         assert_eq!(root_hash.len(), 16);
+    }
+
+    #[test]
+    fn unreachable_node_hashes_reports_orphan_root() {
+        let server_secret = [11u8; 32];
+        let room_id = "!room:test.example";
+        let live_entries = vec![("m.room.name".to_owned(), "".to_owned(), "$live".to_owned())];
+        let orphan_entries = vec![(
+            "m.room.topic".to_owned(),
+            "".to_owned(),
+            "$orphan".to_owned(),
+        )];
+
+        let ((_, _), live_nodes) =
+            build_root_handle_and_nodes(&server_secret, room_id, live_entries)
+                .expect("live HAMT root should build");
+        let ((_, _), orphan_nodes) =
+            build_root_handle_and_nodes(&server_secret, room_id, orphan_entries)
+                .expect("orphan HAMT root should build");
+
+        let (live_root_hash, live_root_bytes) = live_nodes
+            .last()
+            .cloned()
+            .expect("live root node should exist");
+        let (orphan_root_hash, _) = orphan_nodes
+            .last()
+            .cloned()
+            .expect("orphan root node should exist");
+        let all_nodes: Vec<_> = live_nodes
+            .into_iter()
+            .chain(orphan_nodes)
+            .map(|(hash, bytes)| (hash.to_vec(), bytes))
+            .collect();
+        let universe: Vec<_> = all_nodes.iter().map(|(hash, _)| hash.clone()).collect();
+
+        let (reachable, unreachable) = reachability_audit(
+            live_root_bytes,
+            vec![live_root_hash.to_vec()],
+            universe,
+            all_nodes,
+        )
+        .expect("reachability audit should succeed");
+
+        assert!(reachable.contains(&live_root_hash.to_vec()));
+        assert!(!reachable.contains(&orphan_root_hash.to_vec()));
+        assert!(unreachable.contains(&orphan_root_hash.to_vec()));
+        assert!(!unreachable.contains(&live_root_hash.to_vec()));
     }
 }

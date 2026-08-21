@@ -11,3 +11,15 @@ def materialize_state_entries(
     nodes: Sequence[tuple[bytes, bytes]],
 ) -> list[tuple[str, str, str]]: ...
 def node_child_hashes(node_bytes: bytes) -> list[bytes]: ...
+def reachability_audit(
+    root_node_bytes: bytes,
+    roots: Sequence[bytes],
+    universe: Sequence[bytes],
+    nodes: Sequence[tuple[bytes, bytes]],
+) -> tuple[list[bytes], list[bytes]]: ...
+def unreachable_node_hashes(
+    root_node_bytes: bytes,
+    roots: Sequence[bytes],
+    universe: Sequence[bytes],
+    nodes: Sequence[tuple[bytes, bytes]],
+) -> list[bytes]: ...
