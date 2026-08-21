@@ -297,10 +297,10 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         txn: LoggingTransaction,
         groups: list[int],
         state_filter: StateFilter,
-    ) -> tuple[dict[int, StateMap[str]], list[int]]:
+    ) -> tuple[dict[int, MutableStateMap[str]], list[int]]:
         from synapse.synapse_rust import state_hamt
 
-        results: dict[int, StateMap[str]] = {}
+        results: dict[int, MutableStateMap[str]] = {}
         missing_groups: list[int] = []
 
         for group in groups:
@@ -372,7 +372,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
                     key = (intern_string(typ), intern_string(state_key))
                     state_map[key] = event_id
 
-                results[group] = state_filter.filter_state(state_map)
+                results[group] = dict(state_filter.filter_state(state_map))
             except Exception:
                 logger.exception(
                     "Failed to materialize HAMT state for state group %s; falling back to SQL",
