@@ -37,6 +37,7 @@ from synapse.storage.engines import PostgresEngine
 from synapse.types import MutableStateMap, StateMap
 from synapse.types.state import StateFilter
 from synapse.util.caches import intern_string
+from synapse.util.caches.lrucache import LruCache
 from synapse.util.iterutils import batch_iter
 
 if TYPE_CHECKING:
@@ -47,6 +48,10 @@ logger = logging.getLogger(__name__)
 
 MAX_STATE_DELTA_HOPS = 100
 
+# Bound on the number of HAMT root/node objects kept in the per-homeserver
+# in-memory fallback store (used when TiKV isn't configured, e.g. in tests).
+IN_MEMORY_STATE_HAMT_MAX_SIZE = 100_000
+
 
 def _state_hamt_root_tikv_key(state_group: int) -> bytes:
     return f"hamt:root:{state_group}".encode("utf-8")
@@ -56,14 +61,12 @@ def _state_hamt_node_tikv_key(structural_hash: bytes) -> bytes:
     return b"hamt:node:" + structural_hash.hex().encode("ascii")
 
 
-_IN_MEMORY_STATE_HAMT: dict[bytes, bytes] = {}
-
-
 def put_state_hamt_objects(
     state_group: int,
     root_structural_hash: bytes,
     nodes: list[tuple[bytes, bytes]],
     use_tikv: bool,
+    local_store: "LruCache[bytes, bytes]",
 ) -> None:
     pairs = [(_state_hamt_root_tikv_key(state_group), root_structural_hash)] + [
         (_state_hamt_node_tikv_key(structural_hash), node_bytes)
@@ -76,10 +79,15 @@ def put_state_hamt_objects(
         tikv_engine.batch_put(pairs)
         return
 
-    _IN_MEMORY_STATE_HAMT.update(pairs)
+    for key, value in pairs:
+        local_store[key] = value
 
 
-def delete_state_hamt_roots(state_groups: Collection[int], use_tikv: bool) -> None:
+def delete_state_hamt_roots(
+    state_groups: Collection[int],
+    use_tikv: bool,
+    local_store: "LruCache[bytes, bytes]",
+) -> None:
     keys = [_state_hamt_root_tikv_key(state_group) for state_group in state_groups]
 
     if use_tikv:
@@ -89,37 +97,58 @@ def delete_state_hamt_roots(state_groups: Collection[int], use_tikv: bool) -> No
         return
 
     for key in keys:
-        _IN_MEMORY_STATE_HAMT.pop(key, None)
+        local_store.pop(key, None)
 
 
-def _get_state_hamt_object(key: bytes, use_tikv: bool) -> bytes | None:
+def _get_state_hamt_object(
+    key: bytes, use_tikv: bool, local_store: "LruCache[bytes, bytes]"
+) -> bytes | None:
     if use_tikv:
         from synapse.synapse_rust import tikv_engine
 
         return tikv_engine.get(key)
 
-    return _IN_MEMORY_STATE_HAMT.get(key)
+    return local_store.get(key)
 
 
 def _get_state_hamt_objects(
-    keys: list[bytes], use_tikv: bool
+    keys: list[bytes],
+    use_tikv: bool,
+    local_store: "LruCache[bytes, bytes]",
 ) -> list[tuple[bytes, bytes]]:
     if use_tikv:
         from synapse.synapse_rust import tikv_engine
 
         return tikv_engine.batch_get(keys)
 
-    return [
-        (key, _IN_MEMORY_STATE_HAMT[key])
-        for key in keys
-        if key in _IN_MEMORY_STATE_HAMT
-    ]
+    return [(key, local_store[key]) for key in keys if key in local_store]
 
 
 class StateGroupBackgroundUpdateStore(SQLBaseStore):
     """Defines functions related to state groups needed to run the state background
     updates.
     """
+
+    def __init__(
+        self,
+        database: DatabasePool,
+        db_conn: LoggingDatabaseConnection,
+        hs: "HomeServer",
+    ):
+        super().__init__(database, db_conn, hs)
+
+        # Per-homeserver fallback store for HAMT root/node objects, used when
+        # TiKV isn't configured (e.g. in tests). This used to be a module-level
+        # dict shared (and never cleared) across every HomeServer in the
+        # process; that both leaked memory unboundedly and let state groups
+        # from one HomeServer/test leak into another. Scoping it to the store
+        # instance and bounding it via `LruCache` fixes both.
+        self._in_memory_state_hamt: LruCache[bytes, bytes] = LruCache(
+            max_size=IN_MEMORY_STATE_HAMT_MAX_SIZE,
+            clock=hs.get_clock(),
+            server_name=hs.hostname,
+            cache_name="state_hamt_in_memory_fallback",
+        )
 
     @trace
     @tag_args
@@ -375,14 +404,16 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
 
         for group in groups:
             root_structural_hash = _get_state_hamt_object(
-                _state_hamt_root_tikv_key(group), use_tikv
+                _state_hamt_root_tikv_key(group), use_tikv, self._in_memory_state_hamt
             )
             if root_structural_hash is None:
                 missing_groups.append(group)
                 continue
 
             root_node_bytes = _get_state_hamt_object(
-                _state_hamt_node_tikv_key(root_structural_hash), use_tikv
+                _state_hamt_node_tikv_key(root_structural_hash),
+                use_tikv,
+                self._in_memory_state_hamt,
             )
             if root_node_bytes is None:
                 raise RuntimeError(
@@ -407,6 +438,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
                             for structural_hash in chunk
                         ],
                         use_tikv,
+                        self._in_memory_state_hamt,
                     )
                     found_hashes = {
                         bytes.fromhex(

@@ -35,6 +35,7 @@ from synapse.events.snapshot import (
     UnpersistedEventContext,
     UnpersistedEventContextBase,
 )
+from synapse.logging.context import defer_to_thread
 from synapse.logging.opentracing import tag_args, trace
 from synapse.storage._base import SQLBaseStore
 from synapse.storage.database import (
@@ -427,13 +428,39 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             self._build_state_hamt_entries(current_state_ids),
         )
 
-        txn.call_after(
-            put_state_hamt_objects,
+        txn.async_call_after(
+            self._put_state_hamt_objects_off_thread,
             state_group,
             root_handle_parts[0],
             nodes,
             bool(self.tikv_pd_endpoints),
         )
+
+    async def _put_state_hamt_objects_off_thread(
+        self,
+        state_group: int,
+        root_structural_hash: bytes,
+        nodes: list[tuple[bytes, bytes]],
+        use_tikv: bool,
+    ) -> None:
+        """Write the HAMT root/nodes for a state group without blocking the
+        reactor thread on the (potentially remote) TiKV write.
+        """
+        try:
+            await defer_to_thread(
+                self.hs.get_reactor(),
+                put_state_hamt_objects,
+                state_group,
+                root_structural_hash,
+                nodes,
+                use_tikv,
+                self._in_memory_state_hamt,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to persist HAMT state objects for state group %s",
+                state_group,
+            )
 
     def _persist_state_group_snapshot_txn(
         self,
@@ -767,8 +794,18 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         )
 
         def delete_external_state_objects(groups: "Collection[int]") -> None:
+            # This only deletes the per-group `hamt:root:*` pointers. The
+            # `hamt:node:*` objects themselves are content-addressed and may
+            # be shared by other, still-live roots, so they are intentionally
+            # retained rather than reference-counted/GC'd here. This trades
+            # some unreachable node storage for avoiding an unsafe delete of
+            # a node another root still points to.
             try:
-                delete_state_hamt_roots(groups, bool(self.tikv_pd_endpoints))
+                delete_state_hamt_roots(
+                    groups,
+                    bool(self.tikv_pd_endpoints),
+                    self._in_memory_state_hamt,
+                )
             except Exception as e:
                 logger.error("Failed to delete HAMT state roots: %s", e)
 

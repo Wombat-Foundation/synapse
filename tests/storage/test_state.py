@@ -157,8 +157,9 @@ class StateStoreTestCase(HomeserverTestCase):
         assert state_group is not None
 
         root_key = bg_updates._state_hamt_root_tikv_key(state_group)
-        root_structural_hash = bg_updates._IN_MEMORY_STATE_HAMT[root_key]
-        bg_updates._IN_MEMORY_STATE_HAMT.pop(
+        in_memory_state_hamt = self.storage.state.stores.state._in_memory_state_hamt
+        root_structural_hash = in_memory_state_hamt[root_key]
+        in_memory_state_hamt.pop(
             bg_updates._state_hamt_node_tikv_key(root_structural_hash)
         )
 
