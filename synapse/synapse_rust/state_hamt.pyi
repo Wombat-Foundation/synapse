@@ -4,5 +4,5 @@ def room_structural_key(server_secret: bytes, room_id: str) -> bytes: ...
 def build_root_handle(
     server_secret: bytes,
     room_id: str,
-    entries: Iterable[tuple[int, int]],
+    entries: Iterable[tuple[str, str, str]],
 ) -> tuple[tuple[bytes, bytes], list[tuple[bytes, bytes]]]: ...

@@ -45,7 +45,7 @@ fn root_handle_parts(root_handle: &RootHandle) -> RootHandleParts {
 }
 
 fn collect_persisted_nodes(
-    node: Arc<HamtNode<u64, u64>>,
+    node: Arc<HamtNode<String, String>>,
     seen: &mut HashSet<StructuralHash>,
     nodes: &mut Vec<PersistedNodeBytes>,
 ) {
@@ -59,17 +59,26 @@ fn collect_persisted_nodes(
         }
     }
 
-    let persisted: PersistedInternalNode<u64, u64> = node.as_ref().into();
+    let persisted: PersistedInternalNode<String, String> = node.as_ref().into();
     nodes.push((persisted.structural_hash, persisted.encode_v1()));
 }
 
 fn build_root_handle_and_nodes(
     server_secret: &[u8; 32],
     room_id: &str,
-    entries: Vec<(u64, u64)>,
+    entries: Vec<(String, String, String)>,
 ) -> Result<BuiltRoot, String> {
     let structural_key = room_structural_key_raw(server_secret, room_id);
     let lattice = LtHash::default();
+    let entries = entries
+        .into_iter()
+        .map(|(event_type, state_key, event_id)| {
+            (
+                serde_json::to_string(&(event_type, state_key))
+                    .expect("state key serialization should not fail"),
+                event_id,
+            )
+        });
     let (root_handle, root_node) =
         rezzy::hamt::build_hamt_root_handle(&structural_key, &lattice, entries)
             .map_err(|e| format!("Failed to build HAMT root: {e:?}"))?;
@@ -95,7 +104,7 @@ pub fn room_structural_key(server_secret: Vec<u8>, room_id: &str) -> PyResult<Ve
 pub fn build_root_handle(
     server_secret: Vec<u8>,
     room_id: &str,
-    entries: Vec<(u64, u64)>,
+    entries: Vec<(String, String, String)>,
 ) -> PyResult<PyBuiltRoot> {
     let server_secret: [u8; 32] = server_secret
         .try_into()
@@ -147,7 +156,15 @@ mod tests {
     fn build_root_handle_returns_root_and_persisted_nodes() {
         let server_secret = [11u8; 32];
         let room_id = "!room:test.example";
-        let entries = vec![(1, 1001), (2, 1002), (3, 1003)];
+        let entries = vec![
+            (
+                "m.room.member".to_owned(),
+                "@alice:test.example".to_owned(),
+                "$1".to_owned(),
+            ),
+            ("m.room.name".to_owned(), "".to_owned(), "$2".to_owned()),
+            ("m.room.topic".to_owned(), "".to_owned(), "$3".to_owned()),
+        ];
 
         let ((structural_hash, state_group_id), nodes) =
             build_root_handle_and_nodes(&server_secret, room_id, entries)

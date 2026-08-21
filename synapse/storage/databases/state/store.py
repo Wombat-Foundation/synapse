@@ -121,9 +121,6 @@ def _fetch_tikv_state_groups_sync(
     return results, missing_groups
 
 
-MAX_STATE_DELTA_HOPS = 100
-
-
 @attr.s(slots=True, frozen=True, auto_attribs=True)
 class _GetStateGroupDelta:
     """Return type of get_state_group_delta that implements __len__, which lets
@@ -551,6 +548,99 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 fetched_keys=non_member_types,
             )
 
+    def _build_state_hamt_entries(
+        self, current_state_ids: StateMap[str]
+    ) -> list[tuple[str, str, str]]:
+        return [
+            (state_key[0], state_key[1], event_id)
+            for state_key, event_id in current_state_ids.items()
+        ]
+
+    def _persist_state_hamt_txn(
+        self,
+        txn: LoggingTransaction,
+        state_group: int,
+        room_id: str,
+        current_state_ids: StateMap[str],
+    ) -> None:
+        from synapse.synapse_rust import state_hamt
+
+        root_handle_parts, nodes = state_hamt.build_root_handle(
+            self.hs.config.key.macaroon_secret_key,
+            room_id,
+            self._build_state_hamt_entries(current_state_ids),
+        )
+
+        self.db_pool.simple_insert_txn(
+            txn,
+            table="state_hamt_roots",
+            values={
+                "state_group": state_group,
+                "room_id": room_id,
+                "structural_hash": root_handle_parts[0].hex(),
+                "state_group_id": root_handle_parts[1].hex(),
+            },
+        )
+
+        self.db_pool.simple_upsert_many_txn(
+            txn,
+            table="state_hamt_nodes",
+            key_names=("structural_hash",),
+            key_values=[(structural_hash.hex(),) for structural_hash, _ in nodes],
+            value_names=("node_bytes",),
+            value_values=[(node_bytes.hex(),) for _, node_bytes in nodes],
+        )
+
+    def _persist_state_group_snapshot_txn(
+        self,
+        txn: LoggingTransaction,
+        state_group: int,
+        room_id: str,
+        event_id: str,
+        current_state_ids: StateMap[str],
+    ) -> None:
+        self.db_pool.simple_insert_txn(
+            txn,
+            table="state_groups",
+            values={"id": state_group, "room_id": room_id, "event_id": event_id},
+        )
+
+        self.db_pool.simple_insert_many_txn(
+            txn,
+            table="state_groups_state",
+            keys=("state_group", "room_id", "type", "state_key", "event_id"),
+            values=[
+                (state_group, room_id, key[0], key[1], state_id)
+                for key, state_id in current_state_ids.items()
+            ],
+        )
+
+        current_member_state_ids = {
+            s: ev
+            for (s, ev) in current_state_ids.items()
+            if s[0] == EventTypes.Member
+        }
+        txn.call_after(
+            self._state_group_members_cache.update,
+            self._state_group_members_cache.sequence,
+            key=state_group,
+            value=current_member_state_ids,
+        )
+
+        current_non_member_state_ids = {
+            s: ev
+            for (s, ev) in current_state_ids.items()
+            if s[0] != EventTypes.Member
+        }
+        txn.call_after(
+            self._state_group_cache.update,
+            self._state_group_cache.sequence,
+            key=state_group,
+            value=current_non_member_state_ids,
+        )
+
+        self._persist_state_hamt_txn(txn, state_group, room_id, current_state_ids)
+
     @trace
     @tag_args
     async def store_state_deltas_for_batched(
@@ -559,8 +649,9 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         room_id: str,
         prev_group: int,
     ) -> list[tuple[EventBase, UnpersistedEventContext]]:
-        """Generate and store state deltas for a group of events and contexts created to be
-        batch persisted. Note that all the events must be in a linear chain (ie a <- b <- c).
+        """Generate and store state groups for a batch of events.
+
+        Note that all the events must be in a linear chain (ie a <- b <- c).
 
         Args:
             events_and_context: the events to generate and store a state groups for
@@ -596,6 +687,10 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     % (prev_group,)
                 )
 
+            current_state_ids = dict(
+                self._get_state_groups_from_groups_txn(txn, [prev_group])[prev_group]
+            )
+
             num_state_groups = sum(
                 1 for event, _ in events_and_context if event.is_state()
             )
@@ -618,50 +713,15 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 context.state_delta_due_to_event = {
                     (event.type, event.state_key): event.event_id
                 }
+                current_state_ids[(event.type, event.state_key)] = event.event_id
+                self._persist_state_group_snapshot_txn(
+                    txn,
+                    sg_after,
+                    room_id,
+                    event.event_id,
+                    current_state_ids,
+                )
                 sg_before = sg_after
-
-            self.db_pool.simple_insert_many_txn(
-                txn,
-                table="state_groups",
-                keys=("id", "room_id", "event_id"),
-                values=[
-                    (context.state_group_after_event, room_id, event.event_id)
-                    for event, context in events_and_context
-                    if event.is_state()
-                ],
-            )
-
-            self.db_pool.simple_insert_many_txn(
-                txn,
-                table="state_group_edges",
-                keys=("state_group", "prev_state_group"),
-                values=[
-                    (
-                        context.state_group_after_event,
-                        context.state_group_before_event,
-                    )
-                    for event, context in events_and_context
-                    if event.is_state()
-                ],
-            )
-
-            self.db_pool.simple_insert_many_txn(
-                txn,
-                table="state_groups_state",
-                keys=("state_group", "room_id", "type", "state_key", "event_id"),
-                values=[
-                    (
-                        context.state_group_after_event,
-                        room_id,
-                        key[0],
-                        key[1],
-                        state_id,
-                    )
-                    for event, context in events_and_context
-                    if context.state_delta_due_to_event is not None
-                    for key, state_id in context.state_delta_due_to_event.items()
-                ],
-            )
 
             return events_and_context
 
@@ -682,10 +742,9 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         delta_ids: StateMap[str] | None,
         current_state_ids: StateMap[str] | None,
     ) -> int:
-        """Store a new set of state, returning a newly assigned state group.
+        """Store a new state snapshot, returning a newly assigned state group.
 
-        At least one of `current_state_ids` and `prev_group` must be provided. Whenever
-        `prev_group` is not None, `delta_ids` must also not be None.
+        At least one of `current_state_ids` and `prev_group` must be provided.
 
         Args:
             event_id: The event ID for which the state was calculated
@@ -704,166 +763,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         if prev_group is None and current_state_ids is None:
             raise Exception("current_state_ids and prev_group can't both be None")
 
-        if prev_group is not None and delta_ids is None:
-            raise Exception("delta_ids is None when prev_group is not None")
-
-        def insert_delta_group_txn(
-            txn: LoggingTransaction, prev_group: int, delta_ids: StateMap[str]
-        ) -> int | None:
-            """Try and persist the new group as a delta.
-
-            Requires that we have the state as a delta from a previous state group.
-
-            Returns:
-                The state group if successfully created, or None if the state
-                needs to be persisted as a full state.
-            """
-
-            # We need to check that the prev group isn't about to be deleted
-            is_missing = (
-                self._state_deletion_store._check_state_groups_and_bump_deletion_txn(
-                    txn,
-                    {prev_group},
-                )
-            )
-            if is_missing:
-                raise Exception(
-                    "Trying to persist state with unpersisted prev_group: %r"
-                    % (prev_group,)
-                )
-
-            # if the chain of state group deltas is going too long, we fall back to
-            # persisting a complete state group.
-            potential_hops = self._count_state_group_hops_txn(txn, prev_group)
-            if potential_hops >= MAX_STATE_DELTA_HOPS:
-                return None
-
-            state_group = self._state_group_seq_gen.get_next_id_txn(txn)
-
-            self.db_pool.simple_insert_txn(
-                txn,
-                table="state_groups",
-                values={"id": state_group, "room_id": room_id, "event_id": event_id},
-            )
-
-            self.db_pool.simple_insert_txn(
-                txn,
-                table="state_group_edges",
-                values={"state_group": state_group, "prev_state_group": prev_group},
-            )
-
-            self.db_pool.simple_insert_many_txn(
-                txn,
-                table="state_groups_state",
-                keys=("state_group", "room_id", "type", "state_key", "event_id"),
-                values=[
-                    (state_group, room_id, key[0], key[1], state_id)
-                    for key, state_id in delta_ids.items()
-                ],
-            )
-
-            return state_group
-
-        def insert_full_state_txn(
-            txn: LoggingTransaction, current_state_ids: StateMap[str]
-        ) -> int:
-            """Persist the full state, returning the new state group."""
-            state_group = self._state_group_seq_gen.get_next_id_txn(txn)
-
-            self.db_pool.simple_insert_txn(
-                txn,
-                table="state_groups",
-                values={"id": state_group, "room_id": room_id, "event_id": event_id},
-            )
-
-            self.db_pool.simple_insert_many_txn(
-                txn,
-                table="state_groups_state",
-                keys=("state_group", "room_id", "type", "state_key", "event_id"),
-                values=[
-                    (state_group, room_id, key[0], key[1], state_id)
-                    for key, state_id in current_state_ids.items()
-                ],
-            )
-
-            # Prefill the state group caches with this group.
-            # It's fine to use the sequence like this as the state group map
-            # is immutable. (If the map wasn't immutable then this prefill could
-            # race with another update)
-
-            current_member_state_ids = {
-                s: ev
-                for (s, ev) in current_state_ids.items()
-                if s[0] == EventTypes.Member
-            }
-            txn.call_after(
-                self._state_group_members_cache.update,
-                self._state_group_members_cache.sequence,
-                key=state_group,
-                value=current_member_state_ids,
-            )
-
-            current_non_member_state_ids = {
-                s: ev
-                for (s, ev) in current_state_ids.items()
-                if s[0] != EventTypes.Member
-            }
-            txn.call_after(
-                self._state_group_cache.update,
-                self._state_group_cache.sequence,
-                key=state_group,
-                value=current_non_member_state_ids,
-            )
-
-            return state_group
-
-        if prev_group is not None:
-            state_group = await self.db_pool.runInteraction(
-                "store_state_group.insert_delta_group",
-                insert_delta_group_txn,
-                prev_group,
-                delta_ids,
-            )
-            if state_group is not None:
-                if self.tikv_pd_endpoints:
-                    try:
-                        import json
-
-                        from synapse.logging.context import (
-                            defer_to_thread,
-                            make_deferred_yieldable,
-                        )
-                        from synapse.synapse_rust import tikv_engine
-
-                        key = f"sg:{state_group}".encode("utf-8")
-                        deltas = (
-                            [[k[0], k[1], v] for k, v in delta_ids.items()]
-                            if delta_ids
-                            else []
-                        )
-                        payload = {"prev": prev_group, "deltas": deltas}
-                        val = json.dumps(payload).encode("utf-8")
-                        await make_deferred_yieldable(
-                            defer_to_thread(
-                                self.hs.get_reactor(), tikv_engine.put, key, val
-                            )
-                        )
-                        logger.info(
-                            "Successfully stored state group %s in TiKV (delta size: %s)",
-                            state_group,
-                            len(deltas),
-                        )
-                    except Exception as e:
-                        logger.error(
-                            "Failed to store state group %s in TiKV: %s",
-                            state_group,
-                            e,
-                        )
-                return state_group
-
-        # We're going to persist the state as a complete group rather than
-        # a delta, so first we need to ensure we have loaded the state map
-        # from the database.
         if current_state_ids is None:
             assert prev_group is not None
             assert delta_ids is not None
@@ -871,40 +770,38 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             current_state_ids = dict(groups[prev_group])
             current_state_ids.update(delta_ids)
 
+        def insert_full_state_txn(
+            txn: LoggingTransaction, current_state_ids: StateMap[str]
+        ) -> int:
+            if prev_group is not None:
+                is_missing = (
+                    self._state_deletion_store._check_state_groups_and_bump_deletion_txn(
+                        txn,
+                        {prev_group},
+                    )
+                )
+                if is_missing:
+                    raise Exception(
+                        "Trying to persist state with unpersisted prev_group: %r"
+                        % (prev_group,)
+                    )
+
+            state_group = self._state_group_seq_gen.get_next_id_txn(txn)
+            self._persist_state_group_snapshot_txn(
+                txn,
+                state_group,
+                room_id,
+                event_id,
+                current_state_ids,
+            )
+
+            return state_group
+
         state_group = await self.db_pool.runInteraction(
             "store_state_group.insert_full_state",
             insert_full_state_txn,
             current_state_ids,
         )
-
-        if self.tikv_pd_endpoints:
-            try:
-                import json
-
-                from synapse.logging.context import (
-                    defer_to_thread,
-                    make_deferred_yieldable,
-                )
-                from synapse.synapse_rust import tikv_engine
-
-                key = f"sg:{state_group}".encode("utf-8")
-                deltas = [
-                    [k[0], k[1], event_id] for k, event_id in current_state_ids.items()
-                ]
-                payload = {"prev": None, "deltas": deltas}
-                val = json.dumps(payload).encode("utf-8")
-                await make_deferred_yieldable(
-                    defer_to_thread(self.hs.get_reactor(), tikv_engine.put, key, val)
-                )
-                logger.info(
-                    "Successfully stored state group %s in TiKV (size: %s entries)",
-                    state_group,
-                    len(deltas),
-                )
-            except Exception as e:
-                logger.error(
-                    "Failed to store state group %s in TiKV: %s", state_group, e
-                )
 
         return state_group
 
