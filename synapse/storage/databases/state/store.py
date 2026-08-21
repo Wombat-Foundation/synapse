@@ -19,6 +19,7 @@
 #
 #
 
+import hashlib
 import logging
 from typing import (
     TYPE_CHECKING,
@@ -497,6 +498,9 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             for state_key, event_id in current_state_ids.items()
         ]
 
+    def _state_hamt_secret(self) -> bytes:
+        return hashlib.sha256(self.hs.config.key.macaroon_secret_key).digest()
+
     def _persist_state_hamt_txn(
         self,
         txn: LoggingTransaction,
@@ -507,7 +511,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         from synapse.synapse_rust import state_hamt
 
         root_handle_parts, nodes = state_hamt.build_root_handle(
-            self.hs.config.key.macaroon_secret_key,
+            self._state_hamt_secret(),
             room_id,
             self._build_state_hamt_entries(current_state_ids),
         )
