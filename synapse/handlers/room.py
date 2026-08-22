@@ -1624,7 +1624,7 @@ class RoomCreationHandler:
         )
         current_state_group = event_to_state[member_event_id]
 
-        events_to_send = []
+        events_to_send: list[tuple[EventBase, UnpersistedEventContext]] = []
         # We treat the power levels override specially as this needs to be one
         # of the first events that get sent into a room.
         pl_content = initial_state.pop((EventTypes.PowerLevels, ""), None)
@@ -1632,6 +1632,7 @@ class RoomCreationHandler:
             power_event, power_context = await create_event(
                 EventTypes.PowerLevels, pl_content, True
             )
+            assert isinstance(power_context, UnpersistedEventContext)
             events_to_send.append((power_event, power_context))
         else:
             # Please update the docs for `default_power_level_content_override` when
@@ -1692,12 +1693,14 @@ class RoomCreationHandler:
                 power_level_content,
                 True,
             )
+            assert isinstance(pl_context, UnpersistedEventContext)
             events_to_send.append((pl_event, pl_context))
 
         if room_alias and (EventTypes.CanonicalAlias, "") not in initial_state:
             room_alias_event, room_alias_context = await create_event(
                 EventTypes.CanonicalAlias, {"alias": room_alias.to_string()}, True
             )
+            assert isinstance(room_alias_context, UnpersistedEventContext)
             events_to_send.append((room_alias_event, room_alias_context))
 
         if (EventTypes.JoinRules, "") not in initial_state:
@@ -1706,6 +1709,7 @@ class RoomCreationHandler:
                 {"join_rule": config["join_rules"]},
                 True,
             )
+            assert isinstance(join_rules_context, UnpersistedEventContext)
             events_to_send.append((join_rules_event, join_rules_context))
 
         if (EventTypes.RoomHistoryVisibility, "") not in initial_state:
@@ -1714,6 +1718,7 @@ class RoomCreationHandler:
                 {"history_visibility": config["history_visibility"]},
                 True,
             )
+            assert isinstance(visibility_context, UnpersistedEventContext)
             events_to_send.append((visibility_event, visibility_context))
 
         if config["guest_can_join"]:
@@ -1723,12 +1728,14 @@ class RoomCreationHandler:
                     {EventContentFields.GUEST_ACCESS: GuestAccess.CAN_JOIN},
                     True,
                 )
+                assert isinstance(guest_access_context, UnpersistedEventContext)
                 events_to_send.append((guest_access_event, guest_access_context))
 
         for (etype, state_key), content in initial_state.items():
             event, context = await create_event(
                 etype, content, True, state_key=state_key
             )
+            assert isinstance(context, UnpersistedEventContext)
             events_to_send.append((event, context))
 
         if config["encrypted"] and not ignore_forced_encryption:
@@ -1738,6 +1745,7 @@ class RoomCreationHandler:
                 True,
                 state_key="",
             )
+            assert isinstance(encryption_context, UnpersistedEventContext)
             events_to_send.append((encryption_event, encryption_context))
 
         if "name" in room_config:
@@ -1747,6 +1755,7 @@ class RoomCreationHandler:
                 {"name": name},
                 True,
             )
+            assert isinstance(name_context, UnpersistedEventContext)
             events_to_send.append((name_event, name_context))
 
         if "topic" in room_config:
@@ -1762,6 +1771,7 @@ class RoomCreationHandler:
                 },
                 True,
             )
+            assert isinstance(topic_context, UnpersistedEventContext)
             events_to_send.append((topic_event, topic_context))
 
         datastore = self.hs.get_datastores().state

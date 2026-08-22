@@ -23,7 +23,6 @@ import hashlib
 import logging
 from typing import (
     TYPE_CHECKING,
-    Collection,
     Iterable,
     Mapping,
     cast,
@@ -456,7 +455,38 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             room_id,
             self._build_state_hamt_entries(current_state_ids),
         )
+
+        if not self.tikv_pd_endpoints:
+            self._store_state_hamt_objects_txn(
+                txn, state_group, root_handle_parts[0], nodes
+            )
+
         return root_handle_parts[0], nodes
+
+    def _store_state_hamt_objects_txn(
+        self,
+        txn: LoggingTransaction,
+        state_group: int,
+        root_structural_hash: bytes,
+        nodes: list[tuple[bytes, bytes]],
+    ) -> None:
+        self.db_pool.simple_insert_txn(
+            txn,
+            table="state_hamt_roots",
+            values={
+                "state_group": state_group,
+                "root_structural_hash": root_structural_hash,
+            },
+        )
+
+        txn.executemany(
+            """
+            INSERT INTO state_hamt_nodes (structural_hash, node_bytes)
+            VALUES (?, ?)
+            ON CONFLICT (structural_hash) DO NOTHING
+            """,
+            nodes,
+        )
 
     def _persist_state_group_snapshot_txn(
         self,
@@ -520,8 +550,11 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
 
         We wait for this after the SQL transaction commits so callers don't
         observe a state group before its trie root exists in TiKV or the
-        in-memory fallback store.
+        SQL transaction has committed.
         """
+
+        if not self.tikv_pd_endpoints:
+            return
 
         try:
             await defer_to_thread(
@@ -531,7 +564,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 root_structural_hash,
                 nodes,
                 bool(self.tikv_pd_endpoints),
-                self._in_memory_state_hamt,
             )
         except Exception:
             logger.exception(
@@ -827,23 +859,23 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             [(sg,) for sg in state_groups_to_delete],
         )
 
-        def delete_external_state_objects(groups: "Collection[int]") -> None:
-            # This only deletes the per-group `hamt:root:*` pointers. The
-            # `hamt:node:*` objects themselves are content-addressed and may
-            # be shared by other, still-live roots, so they are intentionally
-            # retained rather than reference-counted/GC'd here. This trades
-            # some unreachable node storage for avoiding an unsafe delete of
-            # a node another root still points to.
-            try:
-                delete_state_hamt_roots(
-                    groups,
-                    bool(self.tikv_pd_endpoints),
-                    self._in_memory_state_hamt,
-                )
-            except Exception as e:
-                logger.error("Failed to delete HAMT state roots: %s", e)
-
-        txn.call_after(delete_external_state_objects, state_groups_to_delete)
+        # This only deletes the per-group `hamt:root:*` pointers. The
+        # `hamt:node:*` objects themselves are content-addressed and may be
+        # shared by other, still-live roots, so they are intentionally
+        # retained rather than reference-counted/GC'd here. This trades some
+        # unreachable node storage for avoiding an unsafe delete of a node
+        # another root still points to.
+        if self.tikv_pd_endpoints:
+            txn.call_after(
+                delete_state_hamt_roots,
+                state_groups_to_delete,
+                bool(self.tikv_pd_endpoints),
+            )
+        else:
+            txn.execute_batch(
+                "DELETE FROM state_hamt_roots WHERE state_group = ?",
+                [(sg,) for sg in state_groups_to_delete],
+            )
 
         return True
 

@@ -30,8 +30,8 @@ from twisted.internet.testing import MemoryReactor
 from synapse.api.constants import EventTypes, Membership
 from synapse.api.room_versions import RoomVersions
 from synapse.events import EventBase
+from synapse.events.snapshot import UnpersistedEventContext
 from synapse.server import HomeServer
-from synapse.storage.databases.state import bg_updates
 from synapse.types import JsonDict, RoomID, StateMap, UserID
 from synapse.types.state import StateFilter
 from synapse.util.clock import Clock
@@ -156,11 +156,20 @@ class StateStoreTestCase(HomeserverTestCase):
         )
         assert state_group is not None
 
-        root_key = bg_updates._state_hamt_root_tikv_key(state_group)
-        in_memory_state_hamt = self.storage.state.stores.state._in_memory_state_hamt
-        root_structural_hash = in_memory_state_hamt[root_key]
-        in_memory_state_hamt.pop(
-            bg_updates._state_hamt_node_tikv_key(root_structural_hash)
+        root_structural_hash = self.get_success(
+            self.store.db_pool.simple_select_one_onecol(
+                table="state_hamt_roots",
+                keyvalues={"state_group": state_group},
+                retcol="root_structural_hash",
+                desc="test_state_group_hamt_corruption.root",
+            )
+        )
+        self.get_success(
+            self.store.db_pool.simple_delete(
+                table="state_hamt_nodes",
+                keyvalues={"structural_hash": root_structural_hash},
+                desc="test_state_group_hamt_corruption.node",
+            )
         )
 
         # If a HAMT root exists, missing/corrupt nodes are data corruption.
@@ -585,7 +594,7 @@ class StateStoreTestCase(HomeserverTestCase):
         current_state_group = list(state_to_event.keys())[0]
 
         # create some unpersisted events and event contexts to store against room
-        events_and_context = []
+        events_and_context: list[tuple[EventBase, UnpersistedEventContext]] = []
         builder = self.event_builder_factory.for_room_version(
             RoomVersions.V1,
             {
@@ -600,6 +609,7 @@ class StateStoreTestCase(HomeserverTestCase):
         event1, unpersisted_context1 = self.get_success(
             self.event_creation_handler.create_new_client_event(builder)
         )
+        assert isinstance(unpersisted_context1, UnpersistedEventContext)
         events_and_context.append((event1, unpersisted_context1))
 
         builder2 = self.event_builder_factory.for_room_version(
@@ -616,6 +626,7 @@ class StateStoreTestCase(HomeserverTestCase):
         event2, unpersisted_context2 = self.get_success(
             self.event_creation_handler.create_new_client_event(builder2)
         )
+        assert isinstance(unpersisted_context2, UnpersistedEventContext)
         events_and_context.append((event2, unpersisted_context2))
 
         builder3 = self.event_builder_factory.for_room_version(
@@ -631,6 +642,7 @@ class StateStoreTestCase(HomeserverTestCase):
         event3, unpersisted_context3 = self.get_success(
             self.event_creation_handler.create_new_client_event(builder3)
         )
+        assert isinstance(unpersisted_context3, UnpersistedEventContext)
         events_and_context.append((event3, unpersisted_context3))
 
         builder4 = self.event_builder_factory.for_room_version(
@@ -647,6 +659,7 @@ class StateStoreTestCase(HomeserverTestCase):
         event4, unpersisted_context4 = self.get_success(
             self.event_creation_handler.create_new_client_event(builder4)
         )
+        assert isinstance(unpersisted_context4, UnpersistedEventContext)
         events_and_context.append((event4, unpersisted_context4))
 
         processed_events_and_context = self.get_success(
