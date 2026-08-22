@@ -33,7 +33,6 @@ from synapse.api.constants import EventTypes
 from synapse.events import EventBase
 from synapse.events.snapshot import (
     UnpersistedEventContext,
-    UnpersistedEventContextBase,
 )
 from synapse.logging.context import defer_to_thread
 from synapse.logging.opentracing import tag_args, trace
@@ -544,7 +543,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
     @tag_args
     async def store_state_deltas_for_batched(
         self,
-        events_and_context: list[tuple[EventBase, UnpersistedEventContextBase]],
+        events_and_context: list[tuple[EventBase, UnpersistedEventContext]],
         room_id: str,
         prev_group: int,
     ) -> list[tuple[EventBase, UnpersistedEventContext]]:
@@ -565,7 +564,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             events_and_context: list[tuple[EventBase, UnpersistedEventContext]],
             prev_group: int,
         ) -> tuple[
-            list[tuple[EventBase, UnpersistedEventContextBase]],
+            list[tuple[EventBase, UnpersistedEventContext]],
             list[tuple[int, bytes, list[tuple[bytes, bytes]]]],
         ]:
             """Generate and store state groups for the provided events and contexts.
@@ -629,15 +628,12 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 hamt_writes.append((sg_after, root_structural_hash, nodes))
                 sg_before = sg_after
 
-            return cast(
-                list[tuple[EventBase, UnpersistedEventContextBase]],
-                events_and_context,
-            ), hamt_writes
+            return events_and_context, hamt_writes
 
         events_and_context, hamt_writes = await self.db_pool.runInteraction(
             "store_state_deltas_for_batched.insert_deltas_group",
             insert_deltas_group_txn,
-            cast(list[tuple[EventBase, UnpersistedEventContext]], events_and_context),
+            events_and_context,
             prev_group,
         )
 
@@ -646,7 +642,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 state_group, root_structural_hash, nodes
             )
 
-        return cast(list[tuple[EventBase, UnpersistedEventContext]], events_and_context)
+        return events_and_context
 
     @trace
     @tag_args

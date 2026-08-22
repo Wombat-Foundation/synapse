@@ -1713,7 +1713,9 @@ class EventCreationHandler:
             current_state_group
         )
 
-        events_and_contexts_to_send = []
+        events_and_contexts_to_send: list[
+            tuple[EventBase, UnpersistedEventContext]
+        ] = []
         state_map = dict(state_map)
         depth = None
 
@@ -1728,6 +1730,7 @@ class EventCreationHandler:
                 state_map=dict(state_map),
                 for_batch=True,
             )
+            assert isinstance(context, UnpersistedEventContext)
             events_and_contexts_to_send.append((event, context))
 
             prev_event_id = event.event_id

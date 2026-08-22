@@ -365,7 +365,7 @@ class UnpersistedEventContext(UnpersistedEventContextBase):
     @classmethod
     async def batch_persist_unpersisted_contexts(
         cls,
-        events_and_context: list[tuple[EventBase, "UnpersistedEventContextBase"]],
+        events_and_context: list[tuple[EventBase, "UnpersistedEventContext"]],
         room_id: str,
         last_known_state_group: int,
         datastore: "StateGroupDataStore",
