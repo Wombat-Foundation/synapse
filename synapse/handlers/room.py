@@ -1572,6 +1572,7 @@ class RoomCreationHandler:
                 {
                     "content": creation_content,
                     "sender": creator.user.to_string(),
+                    "room_id": room_id,
                     "type": EventTypes.Create,
                     "state_key": "",
                 },
@@ -1583,6 +1584,15 @@ class RoomCreationHandler:
             creation_context = await unpersisted_creation_context.persist(
                 creation_event
             )
+            depth = 2
+            prev_event = [creation_event.event_id]
+            state_map[(creation_event.type, creation_event.state_key)] = (
+                creation_event.event_id
+            )
+            if room_version.msc4242_state_dags and event_exists_in_state_dag(
+                creation_event
+            ):
+                prev_state_events = [creation_event.event_id]
         else:
             (creation_event, creation_context) = creation_event_with_context
             # we had to do the above already in order to have a room ID, so just updates local vars
