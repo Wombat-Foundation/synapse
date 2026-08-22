@@ -32,7 +32,7 @@ from synapse.api.room_versions import RoomVersions
 from synapse.events import EventBase
 from synapse.events.snapshot import UnpersistedEventContext
 from synapse.server import HomeServer
-from synapse.types import JsonDict, RoomID, StateMap, UserID
+from synapse.types import JsonDict, RoomID, StateMap, UserID, create_requester
 from synapse.types.state import StateFilter
 from synapse.util.clock import Clock
 from synapse.util.stringutils import random_string
@@ -592,6 +592,12 @@ class StateStoreTestCase(HomeserverTestCase):
             )
         )
         current_state_group = list(state_to_event.keys())[0]
+        state_map = dict(
+            self.get_success(
+                self.storage.state.get_state_ids_for_group(current_state_group)
+            )
+        )
+        prev_event_id = creation_event.event_id
 
         # create some unpersisted events and event contexts to store against room
         events_and_context: list[tuple[EventBase, UnpersistedEventContext]] = []
@@ -607,10 +613,18 @@ class StateStoreTestCase(HomeserverTestCase):
         )
 
         event1, unpersisted_context1 = self.get_success(
-            self.event_creation_handler.create_new_client_event(builder)
+            self.event_creation_handler.create_new_client_event_for_batch(
+                builder,
+                requester=create_requester(self.u_alice),
+                prev_event_ids=[prev_event_id],
+                state_map=dict(state_map),
+                current_state_group=current_state_group,
+            )
         )
-        assert isinstance(unpersisted_context1, UnpersistedEventContext)
         events_and_context.append((event1, unpersisted_context1))
+        prev_event_id = event1.event_id
+        if event1.is_state():
+            state_map[(event1.type, event1.state_key)] = event1.event_id
 
         builder2 = self.event_builder_factory.for_room_version(
             RoomVersions.V1,
@@ -624,10 +638,18 @@ class StateStoreTestCase(HomeserverTestCase):
         )
 
         event2, unpersisted_context2 = self.get_success(
-            self.event_creation_handler.create_new_client_event(builder2)
+            self.event_creation_handler.create_new_client_event_for_batch(
+                builder2,
+                requester=create_requester(self.u_alice),
+                prev_event_ids=[prev_event_id],
+                state_map=dict(state_map),
+                current_state_group=current_state_group,
+            )
         )
-        assert isinstance(unpersisted_context2, UnpersistedEventContext)
         events_and_context.append((event2, unpersisted_context2))
+        prev_event_id = event2.event_id
+        if event2.is_state():
+            state_map[(event2.type, event2.state_key)] = event2.event_id
 
         builder3 = self.event_builder_factory.for_room_version(
             RoomVersions.V1,
@@ -640,10 +662,16 @@ class StateStoreTestCase(HomeserverTestCase):
         )
 
         event3, unpersisted_context3 = self.get_success(
-            self.event_creation_handler.create_new_client_event(builder3)
+            self.event_creation_handler.create_new_client_event_for_batch(
+                builder3,
+                requester=create_requester(self.u_alice),
+                prev_event_ids=[prev_event_id],
+                state_map=dict(state_map),
+                current_state_group=current_state_group,
+            )
         )
-        assert isinstance(unpersisted_context3, UnpersistedEventContext)
         events_and_context.append((event3, unpersisted_context3))
+        prev_event_id = event3.event_id
 
         builder4 = self.event_builder_factory.for_room_version(
             RoomVersions.V1,
@@ -657,9 +685,14 @@ class StateStoreTestCase(HomeserverTestCase):
         )
 
         event4, unpersisted_context4 = self.get_success(
-            self.event_creation_handler.create_new_client_event(builder4)
+            self.event_creation_handler.create_new_client_event_for_batch(
+                builder4,
+                requester=create_requester(self.u_alice),
+                prev_event_ids=[prev_event_id],
+                state_map=dict(state_map),
+                current_state_group=current_state_group,
+            )
         )
-        assert isinstance(unpersisted_context4, UnpersistedEventContext)
         events_and_context.append((event4, unpersisted_context4))
 
         processed_events_and_context = self.get_success(

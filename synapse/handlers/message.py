@@ -1468,6 +1468,74 @@ class EventCreationHandler:
 
         return event, context
 
+    async def create_new_client_event_for_batch(
+        self,
+        builder: EventBuilder,
+        requester: Requester,
+        prev_event_ids: list[str],
+        state_map: StateMap[str],
+        current_state_group: int,
+        auth_event_ids: list[str] | None = None,
+        state_event_ids: list[str] | None = None,
+        depth: int | None = None,
+        prev_state_events: StrCollection | None = None,
+    ) -> tuple[EventBase, UnpersistedEventContext]:
+        """Create a new event and unpersisted context for batch persistence."""
+
+        auth_ids = self._event_auth_handler.compute_auth_events(builder, state_map)
+        event = await builder.build(
+            prev_event_ids=prev_event_ids,
+            auth_event_ids=auth_ids,
+            depth=depth,
+            prev_state_events=prev_state_events,
+        )
+
+        context = await self.state.calculate_context_info(
+            event,
+            state_ids_before_event=state_map,
+            partial_state=False,
+            state_group_before_event=current_state_group,
+        )
+
+        if requester and requester.app_service_id:
+            context.app_service = self.store.get_app_service_by_id(
+                requester.app_service_id
+            )
+
+        res, new_content = await self._third_party_event_rules.check_event_allowed(
+            event, context
+        )
+        if res is False:
+            logger.info(
+                "Event %s forbidden by third-party rules",
+                event,
+            )
+            raise SynapseError(
+                403, "This event is not allowed in this context", Codes.FORBIDDEN
+            )
+        elif new_content is not None:
+            event, context = await self._rebuild_event_after_third_party_rules(
+                new_content, event
+            )
+
+        self.validator.validate_new(event, self.config)
+        await self._validate_event_relation(event)
+
+        if event.type == EventTypes.CallInvite:
+            room_id = event.room_id
+            room_info = await self.store.get_room_with_stats(room_id)
+            assert room_info is not None
+
+            if room_info.join_rules == JoinRules.PUBLIC:
+                raise SynapseError(
+                    403,
+                    "Call invites are not allowed in public rooms.",
+                    Codes.FORBIDDEN,
+                )
+        logger.debug("Created event %s", event.event_id)
+
+        return event, context
+
     async def _validate_event_relation(self, event: EventBase) -> None:
         """
         Ensure the relation data on a new event is not bogus.
@@ -1720,17 +1788,19 @@ class EventCreationHandler:
         depth = None
 
         for event_dict in event_dicts:
-            event, context = await self.create_event(
+            builder = self.event_builder_factory.for_room_version(
+                await self.store.get_room_version(room_id), event_dict
+            )
+            event, context = await self.create_new_client_event_for_batch(
+                builder=builder,
                 requester=requester,
-                event_dict=event_dict,
                 prev_event_ids=[prev_event_id],
                 depth=depth,
                 # Take a copy to ensure each event gets a unique copy of
                 # state_map since it is modified below.
                 state_map=dict(state_map),
-                for_batch=True,
+                current_state_group=current_state_group,
             )
-            assert isinstance(context, UnpersistedEventContext)
             events_and_contexts_to_send.append((event, context))
 
             prev_event_id = event.event_id
@@ -2397,7 +2467,7 @@ class EventCreationHandler:
 
     async def _rebuild_event_after_third_party_rules(
         self, third_party_result: dict, original_event: EventBase
-    ) -> tuple[EventBase, UnpersistedEventContextBase]:
+    ) -> tuple[EventBase, UnpersistedEventContext]:
         # the third_party_event_rules want to replace the event.
         # we do some basic checks, and then return the replacement event.
 

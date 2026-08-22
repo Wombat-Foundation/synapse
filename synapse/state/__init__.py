@@ -42,7 +42,6 @@ from synapse.events.py_protocol import supports_msc4242_state_dag
 from synapse.events.snapshot import (
     EventContext,
     UnpersistedEventContext,
-    UnpersistedEventContextBase,
 )
 from synapse.logging.context import ContextResourceUsage
 from synapse.logging.opentracing import tag_args, trace
@@ -263,7 +262,7 @@ class StateHandler:
         state_ids_before_event: StateMap[str] | None = None,
         partial_state: bool | None = None,
         state_group_before_event: int | None = None,
-    ) -> UnpersistedEventContextBase:
+    ) -> UnpersistedEventContext:
         """
         Calulates the contents of an unpersisted event context, other than the current
         state group (which is either provided or calculated when the event context is persisted)
