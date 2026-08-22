@@ -53,9 +53,9 @@ from synapse.storage.types import Cursor
 from synapse.storage.util.sequence import build_sequence_generator
 from synapse.types import MutableStateMap, StateKey, StateMap
 from synapse.types.state import StateFilter
-from synapse.util.duration import Duration
 from synapse.util.caches.dictionary_cache import DictionaryCache
 from synapse.util.cancellation import cancellable
+from synapse.util.duration import Duration
 
 if TYPE_CHECKING:
     from synapse.server import HomeServer
@@ -194,7 +194,9 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 desc="_get_state_groups_from_groups.check_state_groups",
             )
             existing_groups = {group for (group,) in existing_rows}
-            retry_groups = [group for group in missing_groups if group in existing_groups]
+            retry_groups = [
+                group for group in missing_groups if group in existing_groups
+            ]
             if not retry_groups:
                 return results
 
@@ -505,7 +507,9 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             value=current_non_member_state_ids,
         )
 
-        return self._persist_state_hamt_txn(txn, state_group, room_id, current_state_ids)
+        return self._persist_state_hamt_txn(
+            txn, state_group, room_id, current_state_ids
+        )
 
     async def _put_state_hamt_objects_after_txn(
         self,
@@ -560,7 +564,10 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             txn: LoggingTransaction,
             events_and_context: list[tuple[EventBase, UnpersistedEventContext]],
             prev_group: int,
-        ) -> list[tuple[EventBase, UnpersistedEventContext]]:
+        ) -> tuple[
+            list[tuple[EventBase, UnpersistedEventContextBase]],
+            list[tuple[int, bytes, list[tuple[bytes, bytes]]]],
+        ]:
             """Generate and store state groups for the provided events and contexts.
 
             Requires that we have the state as a delta from the last persisted state group.
@@ -622,12 +629,15 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 hamt_writes.append((sg_after, root_structural_hash, nodes))
                 sg_before = sg_after
 
-            return events_and_context, hamt_writes
+            return cast(
+                list[tuple[EventBase, UnpersistedEventContextBase]],
+                events_and_context,
+            ), hamt_writes
 
         events_and_context, hamt_writes = await self.db_pool.runInteraction(
             "store_state_deltas_for_batched.insert_deltas_group",
             insert_deltas_group_txn,
-            events_and_context,
+            cast(list[tuple[EventBase, UnpersistedEventContext]], events_and_context),
             prev_group,
         )
 
@@ -636,7 +646,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 state_group, root_structural_hash, nodes
             )
 
-        return events_and_context
+        return cast(list[tuple[EventBase, UnpersistedEventContext]], events_and_context)
 
     @trace
     @tag_args
@@ -678,7 +688,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
 
         def insert_full_state_txn(
             txn: LoggingTransaction, current_state_ids: StateMap[str]
-        ) -> int:
+        ) -> tuple[int, bytes, list[tuple[bytes, bytes]]]:
             if prev_group is not None:
                 is_missing = self._state_deletion_store._check_state_groups_and_bump_deletion_txn(
                     txn,
