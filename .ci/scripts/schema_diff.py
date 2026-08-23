@@ -21,6 +21,32 @@ SCHEMA_DIR = "synapse/storage/schema"
 MAKE_FULL_SCHEMA_SCRIPT = REPO_ROOT / "scripts-dev" / "make_full_schema.sh"
 
 
+def python_env_runner() -> list[str]:
+    """Return the environment runner for the currently checked-out tree."""
+
+    if (REPO_ROOT / "uv.lock").exists():
+        return ["uv", "run"]
+
+    return ["poetry", "run"]
+
+
+def install_dependencies() -> None:
+    """Install dependencies for the currently checked-out tree."""
+
+    if (REPO_ROOT / "uv.lock").exists():
+        cmd = ["uv", "sync", "--extra", "postgres", "--locked"]
+    else:
+        cmd = ["poetry", "install", "--extras", "postgres"]
+
+    print(f"Running: {' '.join(cmd)}", file=sys.stderr)
+    subprocess.run(
+        cmd,
+        cwd=REPO_ROOT,
+        check=True,
+        stdout=sys.stderr,
+    )
+
+
 def run_make_full_schema(output_dir: Path) -> None:
     """Run make_full_schema.sh, piping the password via stdin."""
     pg_user = os.environ.get("PGUSER", "")
@@ -39,8 +65,7 @@ def run_make_full_schema(output_dir: Path) -> None:
         "faketime",
         "-f",
         "2001-05-25 12:42:42",
-        "poetry",
-        "run",
+        *python_env_runner(),
         str(MAKE_FULL_SCHEMA_SCRIPT),
         "-p",
         pg_user,
@@ -198,13 +223,7 @@ def main() -> None:
 
             # Refresh dependencies
             print("Installing dependencies for base commit...", file=sys.stderr)
-            subprocess.run(
-                ["poetry", "install", "--extras", "postgres"],
-                cwd=REPO_ROOT,
-                check=True,
-                # Poetry install is noisy, so pipe its stdout to stderr
-                stdout=sys.stderr,
-            )
+            install_dependencies()
 
             run_make_full_schema(before_dir)
         finally:
