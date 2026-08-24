@@ -21,10 +21,24 @@ SCHEMA_DIR = "synapse/storage/schema"
 MAKE_FULL_SCHEMA_SCRIPT = REPO_ROOT / "scripts-dev" / "make_full_schema.sh"
 
 
+def python_env_runner() -> list[str]:
+    """Return an uv runner without resolving a lockless tree twice."""
+
+    if (REPO_ROOT / "uv.lock").exists():
+        return ["uv", "run"]
+
+    return ["uv", "run", "--no-sync"]
+
+
 def install_dependencies() -> None:
     """Install dependencies for the currently checked-out tree."""
 
-    cmd = ["uv", "sync", "--extra", "postgres", "--locked"]
+    lockfile = REPO_ROOT / "uv.lock"
+    had_lockfile = lockfile.exists()
+    cmd = ["uv", "sync", "--extra", "postgres"]
+    if had_lockfile:
+        cmd.append("--locked")
+
     print(f"Running: {' '.join(cmd)}", file=sys.stderr)
     subprocess.run(
         cmd,
@@ -32,6 +46,8 @@ def install_dependencies() -> None:
         check=True,
         stdout=sys.stderr,
     )
+    if not had_lockfile:
+        lockfile.unlink(missing_ok=True)
 
 
 def run_make_full_schema(output_dir: Path) -> None:
@@ -50,8 +66,7 @@ def run_make_full_schema(output_dir: Path) -> None:
         "faketime",
         "-f",
         "2001-05-25 12:42:42",
-        "uv",
-        "run",
+        *python_env_runner(),
         str(MAKE_FULL_SCHEMA_SCRIPT),
         "-p",
         pg_user,
