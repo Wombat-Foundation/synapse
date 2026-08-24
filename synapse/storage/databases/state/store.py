@@ -180,7 +180,24 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             if not state_filter.is_full():
                 return results
 
-            missing_groups = [group for group in groups if not results[group]]
+            empty_groups = [group for group in groups if not results[group]]
+            if not empty_groups:
+                return results
+
+            def get_groups_without_hamt_roots_txn(
+                txn: LoggingTransaction,
+            ) -> list[int]:
+                use_tikv = bool(self.tikv_pd_endpoints)
+                return [
+                    group
+                    for group in empty_groups
+                    if self._get_state_hamt_root_txn(txn, group, use_tikv) is None
+                ]
+
+            missing_groups = await self.db_pool.runInteraction(
+                "_get_state_groups_from_groups.check_hamt_roots",
+                get_groups_without_hamt_roots_txn,
+            )
             if not missing_groups:
                 return results
 

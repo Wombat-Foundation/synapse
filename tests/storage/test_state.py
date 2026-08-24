@@ -22,6 +22,7 @@
 import json
 import logging
 from typing import cast
+from unittest.mock import patch
 
 from immutabledict import immutabledict
 
@@ -146,6 +147,27 @@ class StateStoreTestCase(HomeserverTestCase):
             state_group_map[state_group],
             {(EventTypes.Create, ""): e1.event_id, (EventTypes.Name, ""): e2.event_id},
         )
+
+    def test_empty_state_group_does_not_retry(self) -> None:
+        state_group = self.get_success(
+            self.state_datastore.store_state_group(
+                event_id="$empty-state-group",
+                room_id=self.room.to_string(),
+                prev_group=None,
+                delta_ids=None,
+                current_state_ids={},
+            )
+        )
+
+        with patch.object(self.state_datastore.hs.get_clock(), "sleep") as sleep:
+            state_group_map = self.get_success(
+                self.state_datastore._get_state_groups_from_groups(
+                    [state_group], StateFilter.all()
+                )
+            )
+
+        self.assertDictEqual(state_group_map[state_group], {})
+        sleep.assert_not_called()
 
     def test_state_group_hamt_corruption_does_not_fallback_to_sql(self) -> None:
         event = self.inject_state_event(
