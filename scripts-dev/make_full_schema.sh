@@ -106,8 +106,9 @@ export PGPASSWORD
 # Exit immediately if a command fails
 set -e
 
-# cd to root of the synapse directory
-cd "$(dirname "$0")/.."
+# cd to root of the synapse directory. Callers running a saved copy of this
+# script can explicitly point it at the checkout being inspected.
+cd "${SYNAPSE_SOURCE_DIR:-$(dirname "$0")/..}"
 
 # Create temporary SQLite and Postgres homeserver db configs and key file
 TMPDIR=$(mktemp -d)

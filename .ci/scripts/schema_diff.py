@@ -86,6 +86,7 @@ def run_make_full_schema(output_dir: Path, script: Path) -> None:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         cwd=REPO_ROOT,
+        env={**os.environ, "SYNAPSE_SOURCE_DIR": str(REPO_ROOT)},
         text=True,
     )
     stdout, _ = proc.communicate(input=pg_password + "\n")
