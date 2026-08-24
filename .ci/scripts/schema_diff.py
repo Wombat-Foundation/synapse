@@ -21,23 +21,10 @@ SCHEMA_DIR = "synapse/storage/schema"
 MAKE_FULL_SCHEMA_SCRIPT = REPO_ROOT / "scripts-dev" / "make_full_schema.sh"
 
 
-def python_env_runner() -> list[str]:
-    """Return the environment runner for the currently checked-out tree."""
-
-    if (REPO_ROOT / "uv.lock").exists():
-        return ["uv", "run"]
-
-    return ["poetry", "run"]
-
-
 def install_dependencies() -> None:
     """Install dependencies for the currently checked-out tree."""
 
-    if (REPO_ROOT / "uv.lock").exists():
-        cmd = ["uv", "sync", "--extra", "postgres", "--locked"]
-    else:
-        cmd = ["poetry", "install", "--extras", "postgres"]
-
+    cmd = ["uv", "sync", "--extra", "postgres", "--locked"]
     print(f"Running: {' '.join(cmd)}", file=sys.stderr)
     subprocess.run(
         cmd,
@@ -60,12 +47,11 @@ def run_make_full_schema(output_dir: Path) -> None:
 
     cmd: list[str] = [
         # Use faketime here for schema deltas that are wall-clock sensitive under SQLite
-        # We must only use faketime at this level because freezing the clock
-        # seems to cause `poetry install` to hang when recompiling our Rust module
         "faketime",
         "-f",
         "2001-05-25 12:42:42",
-        *python_env_runner(),
+        "uv",
+        "run",
         str(MAKE_FULL_SCHEMA_SCRIPT),
         "-p",
         pg_user,
