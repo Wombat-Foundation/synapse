@@ -19,7 +19,7 @@ use pyo3::types::{PyAny, PyDict, PySet, PyTuple};
 use pythonize::depythonize;
 use rezzy::{
     auth::roaring::AuthGraph, basespec::event_types::EventType, resolve_lattice_fold, LeanEvent,
-    SharedState, StateResVersion,
+    RoomId, SharedState, StateResVersion,
 };
 use serde_json::Value;
 
@@ -56,6 +56,7 @@ pub fn get_auth_chain_difference_from_event_graph<'py>(
                 depth: 0,
                 rejected: false,
                 soft_fail: false,
+                room_id: None,
             },
         );
     }
@@ -110,11 +111,13 @@ fn resolver_data_to_lean_event(data: EventResolverData) -> LeanEvent<String, Val
         depth: data.depth,
         rejected: data.rejected,
         soft_fail: data.soft_failed,
+        room_id: Some(RoomId::new(data.room_id)),
     }
 }
 
 fn py_to_lean_event(py_ev: &Bound<'_, PyAny>) -> PyResult<LeanEvent<String, Value>> {
     let event_id: String = py_ev.getattr("event_id")?.extract()?;
+    let room_id: String = py_ev.getattr("room_id")?.extract()?;
     let event_type: String = py_ev.getattr("type")?.extract()?;
     let state_key: Option<String> = py_ev.call_method0("get_state_key")?.extract()?;
     let sender: String = py_ev.getattr("sender")?.extract()?;
@@ -147,6 +150,7 @@ fn py_to_lean_event(py_ev: &Bound<'_, PyAny>) -> PyResult<LeanEvent<String, Valu
         depth,
         rejected: rejected_reason.is_some(),
         soft_fail: soft_failed,
+        room_id: Some(RoomId::new(room_id)),
     })
 }
 

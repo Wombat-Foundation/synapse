@@ -99,6 +99,7 @@ use json_object::JsonObject;
 #[derive(Clone)]
 pub(crate) struct EventResolverData {
     pub(crate) event_id: String,
+    pub(crate) room_id: String,
     pub(crate) event_type: String,
     pub(crate) state_key: Option<String>,
     pub(crate) sender: String,
@@ -664,6 +665,7 @@ impl Event {
 
         Ok(EventResolverData {
             event_id: self.event_id.to_string(),
+            room_id: self.room_id.to_string(),
             event_type: self.r#type().to_string(),
             state_key: self.get_state_key().map(str::to_owned),
             sender: self.sender().to_string(),
