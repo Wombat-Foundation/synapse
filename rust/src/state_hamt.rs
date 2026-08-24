@@ -239,7 +239,7 @@ pub fn reachability_audit(
             .ok_or_else(|| format!("Missing persisted HAMT node: {:02x?}", hash))
     };
 
-    let audit = rezzy::hamt::bitmap_reachability_audit(roots, universe, &mut resolver)
+    let audit = rezzy::hamt::bitmap_node_reachability_audit(roots, universe, &mut resolver)
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{e:?}")))?;
     let reachable = audit
         .reachable
