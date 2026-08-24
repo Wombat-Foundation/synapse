@@ -171,14 +171,16 @@ to check that your contributions render correctly. The docs are written in
 
 ## Making changes to the Rust code
 
-When changes are made to any Rust code then you must call either `uv sync`
-or `maturin develop` (if installed) to rebuild the Rust code.
+When changes are made to any Rust code, rebuild the extension with
+`uv run maturin develop`. Alternatively, force `uv` to rebuild the project with
+`uv sync --reinstall-package matrix-synapse`.
 
-You can use `uv sync -v` or `-vv` to get more info about build failures.
+You can add `-v` or `-vv` to either command to get more information about build
+failures.
 
 Using [`maturin`](https://github.com/PyO3/maturin)
-is quicker than `uv sync`, so is recommended when making frequent
-changes to the Rust code.
+is quicker than reinstalling the project with `uv`, so is recommended when
+making frequent changes to the Rust code.
 
 
 # 8. Test, test, test!
