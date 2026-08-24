@@ -11,6 +11,7 @@
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -50,7 +51,7 @@ def install_dependencies() -> None:
         lockfile.unlink(missing_ok=True)
 
 
-def run_make_full_schema(output_dir: Path) -> None:
+def run_make_full_schema(output_dir: Path, script: Path) -> None:
     """Run make_full_schema.sh, piping the password via stdin."""
     pg_user = os.environ.get("PGUSER", "")
     pg_password = os.environ.get("PGPASSWORD", "")
@@ -67,7 +68,7 @@ def run_make_full_schema(output_dir: Path) -> None:
         "-f",
         "2001-05-25 12:42:42",
         *python_env_runner(),
-        str(MAKE_FULL_SCHEMA_SCRIPT),
+        str(script),
         "-p",
         pg_user,
         "-o",
@@ -152,9 +153,11 @@ def main() -> None:
         before_dir = Path(tmpdir) / "before"
         after_dir.mkdir()
         before_dir.mkdir()
+        schema_script = Path(tmpdir) / "make_full_schema.sh"
+        shutil.copy2(MAKE_FULL_SCHEMA_SCRIPT, schema_script)
 
         print("\n--- Running make_full_schema.sh (after) ---", file=sys.stderr)
-        run_make_full_schema(after_dir)
+        run_make_full_schema(after_dir, schema_script)
 
         # Checkout base and run make_full_schema.sh
         print(
@@ -226,7 +229,7 @@ def main() -> None:
             print("Installing dependencies for base commit...", file=sys.stderr)
             install_dependencies()
 
-            run_make_full_schema(before_dir)
+            run_make_full_schema(before_dir, schema_script)
         finally:
             print("Returning to HEAD...", file=sys.stderr)
             subprocess.run(
