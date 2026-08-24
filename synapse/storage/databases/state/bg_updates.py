@@ -421,13 +421,14 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
 
             return tikv_engine.get(_state_hamt_root_tikv_key(state_group))
 
-        return self.db_pool.simple_select_one_onecol_txn(
+        root = self.db_pool.simple_select_one_onecol_txn(
             txn,
             table="state_hamt_roots",
             keyvalues={"state_group": state_group},
             retcol="root_structural_hash",
             allow_none=True,
         )
+        return bytes(root) if root is not None else None
 
     def _get_state_hamt_node_txn(
         self, txn: LoggingTransaction, structural_hash: bytes, use_tikv: bool
@@ -437,13 +438,14 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
 
             return tikv_engine.get(_state_hamt_node_tikv_key(structural_hash))
 
-        return self.db_pool.simple_select_one_onecol_txn(
+        node = self.db_pool.simple_select_one_onecol_txn(
             txn,
             table="state_hamt_nodes",
-            keyvalues={"structural_hash": structural_hash},
+            keyvalues={"structural_hash": bytearray(structural_hash)},
             retcol="node_bytes",
             allow_none=True,
         )
+        return bytes(node) if node is not None else None
 
     def _get_state_hamt_nodes_txn(
         self,
@@ -469,12 +471,14 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
             ]
 
         return [
-            (structural_hash, node_bytes)
+            (bytes(structural_hash), bytes(node_bytes))
             for structural_hash, node_bytes in self.db_pool.simple_select_many_txn(
                 txn,
                 table="state_hamt_nodes",
                 column="structural_hash",
-                iterable=structural_hashes,
+                iterable=[
+                    bytearray(structural_hash) for structural_hash in structural_hashes
+                ],
                 keyvalues={},
                 retcols=("structural_hash", "node_bytes"),
             )

@@ -475,7 +475,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             table="state_hamt_roots",
             values={
                 "state_group": state_group,
-                "root_structural_hash": root_structural_hash,
+                "root_structural_hash": bytearray(root_structural_hash),
             },
         )
 
@@ -485,7 +485,10 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             VALUES (?, ?)
             ON CONFLICT (structural_hash) DO NOTHING
             """,
-            nodes,
+            [
+                (bytearray(structural_hash), bytearray(node_bytes))
+                for structural_hash, node_bytes in nodes
+            ],
         )
 
     def _persist_state_group_snapshot_txn(
