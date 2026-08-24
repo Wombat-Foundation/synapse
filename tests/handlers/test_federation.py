@@ -20,7 +20,6 @@
 #
 import logging
 from typing import Collection
-from unittest import TestCase
 from unittest.mock import AsyncMock, Mock, patch
 
 from twisted.internet.defer import Deferred
@@ -422,7 +421,7 @@ class FederationTestCase(unittest.FederatingHomeserverTestCase):
         return join_event
 
 
-class EventFromPduTestCase(TestCase):
+class EventFromPduTestCase(unittest.TestCase):
     def test_valid_json(self) -> None:
         """Valid JSON should be turned into an event."""
         ev = make_test_pdu_event(

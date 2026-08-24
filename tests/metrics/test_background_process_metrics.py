@@ -1,11 +1,12 @@
-from unittest import TestCase as StdlibTestCase
 from unittest.mock import Mock
+
+from twisted.trial import unittest
 
 from synapse.logging.context import ContextResourceUsage, LoggingContext
 from synapse.metrics.background_process_metrics import _BackgroundProcess
 
 
-class TestBackgroundProcessMetrics(StdlibTestCase):
+class TestBackgroundProcessMetrics(unittest.TestCase):
     def test_update_metrics_with_negative_time_diff(self) -> None:
         """We should ignore negative reported utime and stime differences"""
         usage = ContextResourceUsage()
