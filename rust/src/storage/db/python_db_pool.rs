@@ -108,18 +108,20 @@ pub struct PythonDatabasePoolWrapper {
     /// reactor thread (via `callFromThread`) when starting transactions, since
     /// Twisted's thread pool machinery must be driven from there.
     ///
-    /// This must be weak: test reactors retain callbacks which can point back to the
-    /// homeserver, and PyO3-held references are opaque to Python's cyclic GC.
-    reactor_py_ref: Py<PyWeakrefReference>,
+    /// A strong reference is fine here: the reactor is a process-global singleton that
+    /// never gets garbage collected and never points back at the homeserver, so it is
+    /// not part of any reference cycle. Ideally, we could worry about it but
+    /// practically probably doesn't matter.
+    reactor: Py<PyAny>,
 }
 
 impl PythonDatabasePoolWrapper {
     /// Build a wrapper around the Python `DatabasePool` (e.g.
     /// `hs.get_datastores().main.db_pool`) and the Twisted `reactor`.
-    pub fn new(database_pool: &Bound<'_, PyAny>, reactor: &Bound<'_, PyAny>) -> PyResult<Self> {
+    pub fn new(database_pool: &Bound<'_, PyAny>, reactor: Py<PyAny>) -> PyResult<Self> {
         Ok(Self {
             database_pool_py_ref: PyWeakrefReference::new(database_pool)?.unbind(),
-            reactor_py_ref: PyWeakrefReference::new(reactor)?.unbind(),
+            reactor,
         })
     }
 }
@@ -217,18 +219,11 @@ impl DatabasePool for PythonDatabasePoolWrapper {
                     })?
                     .unbind();
 
-                let reactor = self
-                    .reactor_py_ref
-                    .bind(py)
-                    .upgrade()
-                    .ok_or_else(|| {
-                        PyRuntimeError::new_err(
-                            "The Twisted reactor has already been dropped, so we cannot run the database interaction",
-                        )
-                    })?
-                    .unbind();
-
-                Ok((callback, database_pool_py, reactor))
+                Ok((
+                    callback,
+                    database_pool_py,
+                    self.reactor.clone_ref(py),
+                ))
             })
             .map_err(anyhow::Error::from)?;
 

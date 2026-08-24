@@ -15,11 +15,7 @@
 
 use std::sync::Arc;
 
-use pyo3::{
-    exceptions::PyRuntimeError,
-    prelude::*,
-    types::{PyWeakrefMethods, PyWeakrefReference},
-};
+use pyo3::prelude::*;
 use pythonize::{pythonize, PythonizeError};
 use serde::Serialize;
 
@@ -49,9 +45,9 @@ impl<'py> IntoPyObject<'py> for VersionsResponse {
 pub struct VersionsHandler {
     pub global_unstable_feature_map: Arc<UnstableFeatureMap>,
     pub store: Arc<Store>,
-    /// Weak reference to the Twisted reactor used to bridge async responses into
-    /// Deferreds. Test reactors can point back to the homeserver through callbacks.
-    pub reactor_ref: Py<PyWeakrefReference>,
+    /// The Twisted reactor, used to bridge our `async` response back into a
+    /// Twisted deferred that Python can `await`.
+    pub reactor: Py<PyAny>,
 }
 
 #[pymethods]
@@ -66,11 +62,8 @@ impl VersionsHandler {
     ) -> PyResult<Bound<'py, PyAny>> {
         let store = Arc::clone(&self.store);
         let global_unstable_feature_map = Arc::clone(&self.global_unstable_feature_map);
-        let reactor = self.reactor_ref.bind(py).upgrade().ok_or_else(|| {
-            PyRuntimeError::new_err("The Twisted reactor has already been dropped")
-        })?;
 
-        create_deferred(py, &reactor, async move {
+        create_deferred(py, self.reactor.bind(py), async move {
             build_versions_response(&store, &global_unstable_feature_map, user_id.as_deref())
                 .await
                 .map_err(|err| {

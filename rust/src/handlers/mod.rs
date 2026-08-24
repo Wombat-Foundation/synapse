@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use pyo3::{
     prelude::*,
-    types::{PyAnyMethods, PyModule, PyModuleMethods, PyWeakrefReference},
+    types::{PyAnyMethods, PyModule, PyModuleMethods},
     Bound, PyResult, Python,
 };
 
@@ -41,14 +41,14 @@ impl RustHandlers {
 
         // The Twisted reactor, used both to drive our Tokio runtime and to
         // marshal database work back onto the reactor thread.
-        let reactor = homeserver.call_method0("get_reactor")?;
+        let reactor = homeserver.call_method0("get_reactor")?.unbind();
 
         // hs.get_datastores().main.db_pool
         let db_pool_py = homeserver
             .call_method0("get_datastores")?
             .getattr("main")?
             .getattr("db_pool")?;
-        let db_pool = PythonDatabasePoolWrapper::new(&db_pool_py, &reactor)?;
+        let db_pool = PythonDatabasePoolWrapper::new(&db_pool_py, reactor.clone_ref(py))?;
 
         // Store is shared across all of the handlers so let's use an `Arc`
         let store = Arc::new(Store {
@@ -64,7 +64,7 @@ impl RustHandlers {
             versions::VersionsHandler {
                 global_unstable_feature_map: Arc::clone(&global_unstable_feature_map),
                 store: Arc::clone(&store),
-                reactor_ref: PyWeakrefReference::new(&reactor)?.unbind(),
+                reactor: reactor.clone_ref(py),
             },
         )?;
 
