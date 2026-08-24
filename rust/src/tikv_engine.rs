@@ -5,6 +5,8 @@ use tokio::runtime::Runtime;
 
 static RUNTIME: OnceCell<Runtime> = OnceCell::new();
 static CLIENT: OnceCell<RawClient> = OnceCell::new();
+const READINESS_PROBE_KEY: &[u8] = b"synapse:tikv:readiness-probe";
+const READINESS_PROBE_VALUE: &[u8] = b"ok";
 
 fn get_runtime() -> &'static Runtime {
     RUNTIME.get_or_init(|| {
@@ -28,6 +30,33 @@ pub fn open_client(py: Python<'_>, pd_endpoints: Vec<String>) -> PyResult<()> {
                 .map_err(|e| e.to_string())
         })
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+
+    py.detach(|| {
+        rt.block_on(async {
+            client
+                .put(READINESS_PROBE_KEY.to_vec(), READINESS_PROBE_VALUE.to_vec())
+                .await
+                .map_err(|e| e.to_string())?;
+
+            let value = client
+                .get(READINESS_PROBE_KEY.to_vec())
+                .await
+                .map_err(|e| e.to_string())?;
+            if value.as_deref() != Some(READINESS_PROBE_VALUE) {
+                return Err("TiKV readiness probe returned an unexpected value".to_owned());
+            }
+
+            client
+                .delete(READINESS_PROBE_KEY.to_vec())
+                .await
+                .map_err(|e| e.to_string())
+        })
+    })
+    .map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!(
+            "TiKV cluster is reachable but not ready for raw KV operations: {e}"
+        ))
+    })?;
 
     CLIENT.set(client).map_err(|_| {
         pyo3::exceptions::PyRuntimeError::new_err("Failed to set TiKV Client instance")
