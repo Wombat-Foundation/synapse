@@ -176,6 +176,12 @@ main() {
     echo "Checkout available at 'complement-${COMPLEMENT_REF}'"
   fi
 
+  if [[ -z "$use_in_repo_tests" ]] && [[ "$(realpath "$COMPLEMENT_DIR")" == "$(realpath ./complement)" ]]; then
+    echo "COMPLEMENT_DIR points at this repository's in-repo Complement tests." >&2
+    echo "Use --in-repo with COMPLEMENT_DIR=./complement, or unset COMPLEMENT_DIR to test against upstream Complement." >&2
+    return 1
+  fi
+
   if [ -n "$use_editable_synapse" ]; then
     if [[ -e synapse/synapse_rust.abi3.so ]]; then
       # In an editable install, back up the host's compiled Rust module to prevent
@@ -377,6 +383,10 @@ main() {
   # Log a few more useful things for a developer attempting to debug something
   # particularly tricky.
   export PASS_SYNAPSE_LOG_TESTING=1
+
+  if [[ -n "$SYNAPSE_TIKV_PD_ENDPOINTS" ]]; then
+    export PASS_SYNAPSE_TIKV_PD_ENDPOINTS="$SYNAPSE_TIKV_PD_ENDPOINTS"
+  fi
 
   if [ -n "$skip_complement_run" ]; then
     echo "Skipping Complement run as requested."

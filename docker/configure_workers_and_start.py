@@ -1239,8 +1239,11 @@ def generate_worker_files(
     # Support TiKV offloading in Complement integration tests
     tikv_endpoints = os.environ.get("SYNAPSE_TIKV_PD_ENDPOINTS")
     if tikv_endpoints:
+        pd_endpoints = [ep.strip() for ep in tikv_endpoints.split(",") if ep.strip()]
+        if not pd_endpoints:
+            raise RuntimeError("SYNAPSE_TIKV_PD_ENDPOINTS was set but had no endpoints")
         shared_config["tikv"] = {
-            "pd_endpoints": [ep.strip() for ep in tikv_endpoints.split(",")]
+            "pd_endpoints": pd_endpoints,
         }
 
     # Shared homeserver config

@@ -145,8 +145,9 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     self.tikv_pd_endpoints,
                 )
             except Exception as e:
-                logger.error("Failed to connect to TiKV cluster: %s", e)
-                self.tikv_pd_endpoints = None
+                raise RuntimeError(
+                    f"Failed to connect to TiKV cluster at {self.tikv_pd_endpoints}"
+                ) from e
 
     @trace
     @tag_args
