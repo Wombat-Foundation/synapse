@@ -244,7 +244,16 @@ fn root_tikv_key(state_group: i64) -> Vec<u8> {
     format!("hamt:root:{state_group}").into_bytes()
 }
 
-/// The value stored at `root_tikv_key(state_group)` is `room_prefix (16
+/// Fixed width of the room-scoped TiKV key prefix. See `room_tikv_prefix_raw`
+/// for why 8 bytes is enough: it's a locality hint, not an identity -- a
+/// prefix collision between two rooms just means their nodes interleave in
+/// the same key range, not a correctness issue (the full key is always
+/// `prefix || structural_hash`, which stays unique regardless). At 8 bytes,
+/// the birthday bound puts a 50% chance of *any* collision existing at
+/// around 4 billion rooms -- far beyond any realistic homeserver.
+const ROOM_PREFIX_LEN: usize = 8;
+
+/// The value stored at `root_tikv_key(state_group)` is `room_prefix (8
 /// bytes) || root_structural_hash (16 bytes)`. Bundling the room prefix into
 /// the root value (rather than re-deriving it from `room_id` + room version
 /// on every read) means reads only ever need `state_group` -- no async
@@ -253,25 +262,26 @@ fn root_tikv_key(state_group: i64) -> Vec<u8> {
 /// happens. The room prefix is fixed for a room's lifetime, so this is safe
 /// to compute once at write time. Must match the encoding written by
 /// `put_state_hamt_objects` in `bg_updates.py`.
-fn decode_root_value(value: &[u8]) -> Result<([u8; 16], StructuralHash), String> {
-    if value.len() != 32 {
+fn decode_root_value(value: &[u8]) -> Result<([u8; ROOM_PREFIX_LEN], StructuralHash), String> {
+    const EXPECTED_LEN: usize = ROOM_PREFIX_LEN + 16;
+    if value.len() != EXPECTED_LEN {
         return Err(format!(
-            "HAMT root value in TiKV is {} bytes, expected 32 (16-byte room prefix + 16-byte root hash)",
+            "HAMT root value in TiKV is {} bytes, expected {EXPECTED_LEN} ({ROOM_PREFIX_LEN}-byte room prefix + 16-byte root hash)",
             value.len()
         ));
     }
-    let mut room_prefix = [0u8; 16];
-    room_prefix.copy_from_slice(&value[..16]);
+    let mut room_prefix = [0u8; ROOM_PREFIX_LEN];
+    room_prefix.copy_from_slice(&value[..ROOM_PREFIX_LEN]);
     let mut root_structural_hash: StructuralHash = [0u8; 16];
-    root_structural_hash.copy_from_slice(&value[16..]);
+    root_structural_hash.copy_from_slice(&value[ROOM_PREFIX_LEN..]);
     Ok((room_prefix, root_structural_hash))
 }
 
 /// Room-prefixed HAMT node key: `hamt:node:<room_prefix_hex>:<structural_hash_hex>`.
 /// The room prefix gives nodes belonging to the same room contiguous byte
 /// ranges in TiKV's sorted keyspace, for locality -- see `room_tikv_prefix_raw`.
-fn node_tikv_key(room_prefix: &[u8; 16], structural_hash: &StructuralHash) -> Vec<u8> {
-    let mut key = Vec::with_capacity(10 + 33 + 33);
+fn node_tikv_key(room_prefix: &[u8; ROOM_PREFIX_LEN], structural_hash: &StructuralHash) -> Vec<u8> {
+    let mut key = Vec::with_capacity(10 + ROOM_PREFIX_LEN * 2 + 1 + 32);
     key.extend_from_slice(b"hamt:node:");
     key.extend_from_slice(hex::encode(room_prefix).as_bytes());
     key.push(b':');

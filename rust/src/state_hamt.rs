@@ -60,10 +60,10 @@ pub(crate) fn room_tikv_prefix_raw(
     server_secret: &[u8; 32],
     room_id: &str,
     msc4291_room_ids_as_hashes: bool,
-) -> Result<[u8; 16], String> {
+) -> Result<[u8; 8], String> {
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 
-    const PREFIX_LEN: usize = 16;
+    const PREFIX_LEN: usize = 8;
     let mut prefix = [0u8; PREFIX_LEN];
 
     if msc4291_room_ids_as_hashes {
@@ -408,7 +408,7 @@ mod tests {
 
         assert_eq!(prefix1, prefix2);
         assert_ne!(prefix1, other_prefix);
-        assert_eq!(prefix1.len(), 16);
+        assert_eq!(prefix1.len(), 8);
     }
 
     #[test]
@@ -422,10 +422,10 @@ mod tests {
 
         let prefix = room_tikv_prefix_raw(&server_secret, &room_id, true).unwrap();
 
-        // The prefix should be exactly the leading 16 bytes of the decoded
+        // The prefix should be exactly the leading 8 bytes of the decoded
         // hash -- i.e. derived directly from the room ID, not re-hashed
         // through the (server-secret-salted) v1-v11 path.
-        assert_eq!(prefix, create_event_hash[..16]);
+        assert_eq!(prefix, create_event_hash[..8]);
     }
 
     #[test]
