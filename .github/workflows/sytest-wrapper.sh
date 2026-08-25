@@ -97,5 +97,28 @@ with open('/sytest/scripts/synapse_sytest.sh', 'w') as f:
     f.write(content)
 "
 
+echo "--- Patching /sytest/lib/SyTest/Homeserver/Synapse.pm to inject TiKV config"
+# When SYNAPSE_TIKV_PD_ENDPOINTS is set, add a `tikv` block to the homeserver
+# config that sytest generates, so the HAMT state backend runs against a real
+# TiKV cluster (mirrors trial-tikv / complement-tikv).
+/venv/bin/python -c "
+import re
+
+with open('/sytest/lib/SyTest/Homeserver/Synapse.pm', 'r') as f:
+    content = f.read()
+
+anchor = '        databases => \\%db_configs,'
+injection = '''        databases => \\%db_configs,
+        ( \$ENV{SYNAPSE_TIKV_PD_ENDPOINTS} ? (
+            tikv => { pd_endpoints => [ map { s/^\\\\s+|\\\\s+\$//gr } split /,/, \$ENV{SYNAPSE_TIKV_PD_ENDPOINTS} ],
+        } ) : () ),'''
+
+assert anchor in content, 'Could not find databases anchor in Synapse.pm'
+content = content.replace(anchor, injection, 1)
+
+with open('/sytest/lib/SyTest/Homeserver/Synapse.pm', 'w') as f:
+    f.write(content)
+"
+
 echo "--- Executing SyTest via synapse_sytest.sh"
 exec /sytest/scripts/synapse_sytest.sh

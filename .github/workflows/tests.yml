@@ -686,6 +686,7 @@ jobs:
       image: matrixdotorg/sytest-synapse:${{ matrix.job.sytest-tag }}
       volumes:
         - ${{ github.workspace }}:/src
+        - /var/run/docker.sock:/var/run/docker.sock
       env:
         # If this is a pull request to a release branch, use that branch as default branch for sytest, else use develop
         # This works because the release script always create a branch on the sytest repo with the same name as the release branch
@@ -696,6 +697,7 @@ jobs:
         ASYNCIO_REACTOR: ${{ (matrix.job.reactor == 'asyncio') || '' }}
         WORKERS: ${{ matrix.job.workers && 1 }}
         BLACKLIST: ${{ matrix.job.workers && 'synapse-blacklist-with-workers' }}
+        SYNAPSE_TIKV_PD_ENDPOINTS: ${{ matrix.job.tikv && '172.17.0.1:2379' }}
         TOP: ${{ github.workspace }}
 
     strategy:
@@ -707,6 +709,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Prepare test blacklist
         run: cat sytest-blacklist .ci/worker-blacklist > synapse-blacklist-with-workers
+
+      - name: Install docker CLI (for TiKV)
+        if: ${{ matrix.job.tikv }}
+        run: |
+          apt-get update
+          apt-get install -y docker.io
+      - name: Start TiKV (PD & TiKV nodes)
+        if: ${{ matrix.job.tikv }}
+        run: .ci/scripts/start_tikv.sh
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # master
