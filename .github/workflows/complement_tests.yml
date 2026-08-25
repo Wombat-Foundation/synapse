@@ -82,27 +82,29 @@ jobs:
         run: |
           set -euxo pipefail
 
-          docker run -d --name pd -p 2379:2379 pingcap/pd:latest \
+          docker run -d --name pd --ulimit nofile=1048576:1048576 -p 2379:2379 pingcap/pd:latest \
             --name=pd \
             --client-urls=http://0.0.0.0:2379 \
             --advertise-client-urls=http://172.17.0.1:2379 \
             --data-dir=/data
 
-          # Wait for PD to be ready
-          until curl -s http://127.0.0.1:2379/pd/api/v1/members; do
-            echo "Waiting for PD to start..."
+          # Wait until PD has elected a leader. Some endpoints can respond
+          # before the single-node PD cluster is ready to bootstrap TiKV.
+          until curl -fsS http://127.0.0.1:2379/pd/api/v1/leader; do
+            echo "Waiting for PD leader..."
             sleep 2
           done
 
-          docker run -d --name tikv -p 20160:20160 pingcap/tikv:latest \
+          docker run -d --name tikv --ulimit nofile=1048576:1048576 -p 20160:20160 pingcap/tikv:latest \
             --addr=0.0.0.0:20160 \
             --advertise-addr=172.17.0.1:20160 \
             --data-dir=/data \
             --pd=172.17.0.1:2379
 
           get_pd_count() {
-            curl -fsS "http://127.0.0.1:2379/pd/api/v1/$1" |
-              python -c 'import json, sys; print(json.load(sys.stdin).get("count", 0))'
+            curl -fsS "http://127.0.0.1:2379/pd/api/v1/$1" 2>/dev/null |
+              python -c 'import json, sys; print(json.load(sys.stdin).get("count", 0))' 2>/dev/null ||
+              echo 0
           }
 
           for i in $(seq 1 60); do
