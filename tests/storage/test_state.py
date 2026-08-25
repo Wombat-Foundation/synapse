@@ -178,19 +178,30 @@ class StateStoreTestCase(HomeserverTestCase):
         )
         assert state_group is not None
 
-        root_structural_hash = self.get_success(
-            self.store.db_pool.simple_select_one_onecol(
-                table="state_hamt_roots",
-                keyvalues={"state_group": state_group},
-                retcol="root_structural_hash",
-                desc="test_state_group_hamt_corruption.root",
+        # `state_hamt_roots.root_structural_hash` has a foreign key into
+        # `state_hamt_nodes`, so we can't simulate a dangling pointer by
+        # deleting the node it references. Instead, insert the corrupt
+        # replacement node first (satisfying the FK on its own, as the
+        # referenced side), then repoint the existing root at it -- this
+        # keeps the FK fully enforced throughout, and simulates corrupt
+        # node *content* rather than a missing row.
+        garbage_structural_hash = random_string(16).encode("ascii")
+        self.get_success(
+            self.store.db_pool.simple_insert(
+                table="state_hamt_nodes",
+                values={
+                    "structural_hash": garbage_structural_hash,
+                    "node_bytes": b"not a valid persisted HAMT node",
+                },
+                desc="test_state_group_hamt_corruption.insert_garbage_node",
             )
         )
         self.get_success(
-            self.store.db_pool.simple_delete(
-                table="state_hamt_nodes",
-                keyvalues={"structural_hash": root_structural_hash},
-                desc="test_state_group_hamt_corruption.node",
+            self.store.db_pool.simple_update_one(
+                table="state_hamt_roots",
+                keyvalues={"state_group": state_group},
+                updatevalues={"root_structural_hash": garbage_structural_hash},
+                desc="test_state_group_hamt_corruption.repoint_root",
             )
         )
 
@@ -203,7 +214,7 @@ class StateStoreTestCase(HomeserverTestCase):
             RuntimeError,
         )
         self.assertIn(
-            "Missing HAMT root node for state group",
+            "Failed to decode persisted HAMT node",
             str(failure.value),
         )
 
