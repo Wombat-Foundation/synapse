@@ -19,6 +19,5 @@ CREATE TABLE IF NOT EXISTS state_hamt_nodes (
 CREATE TABLE IF NOT EXISTS state_hamt_roots (
     state_group BIGINT PRIMARY KEY,
     room_prefix BYTEA NOT NULL,
-    root_structural_hash BYTEA NOT NULL,
-    FOREIGN KEY (root_structural_hash) REFERENCES state_hamt_nodes(structural_hash)
+    root_structural_hash BYTEA NOT NULL
 );

@@ -275,18 +275,6 @@ class StateStoreTestCase(HomeserverTestCase):
         )
         tikv_engine.put(garbage_node_key, b"not a valid persisted HAMT node")
 
-        # The SQL state_hamt_roots FK references state_hamt_nodes, so mirror
-        # the garbage node there before repointing the root.
-        self.get_success(
-            self.store.db_pool.simple_insert(
-                table="state_hamt_nodes",
-                values={
-                    "structural_hash": bytearray(garbage_structural_hash),
-                    "node_bytes": bytearray(b"not a valid persisted HAMT node"),
-                },
-                desc="test_state_group_hamt_corruption.insert_garbage_node",
-            )
-        )
         self.get_success(
             self.store.db_pool.simple_update_one(
                 table="state_hamt_roots",

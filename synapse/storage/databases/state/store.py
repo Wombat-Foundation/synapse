@@ -476,26 +476,10 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         )
         root_structural_hash = root_handle_parts[0]
 
-        if self.tikv_pd_endpoints:
-            # In TiKV mode the full trie lives in TiKV, keyed by content hash
-            # (globally unique). Write just the root node into SQL too so the
-            # state_hamt_roots FK (corruption guard) is satisfied without
-            # mirroring the whole subtree.
-            root_node = next(
-                (
-                    node_bytes
-                    for structural_hash, node_bytes in nodes
-                    if structural_hash == root_structural_hash
-                ),
-                None,
-            )
-            if root_node is None:
-                raise Exception(
-                    "HAMT root node %s not found in persisted nodes"
-                    % (root_structural_hash.hex(),)
-                )
-            self._store_state_hamt_nodes_txn(txn, [(root_structural_hash, root_node)])
-        else:
+        if not self.tikv_pd_endpoints:
+            # In SQL mode, persist the full node tree into `state_hamt_nodes`.
+            # In TiKV mode the nodes (root included) go to TiKV, keyed by
+            # content hash.
             self._store_state_hamt_nodes_txn(txn, nodes)
 
         # The root pointer (state_group -> room_prefix + root_hash) lives in
@@ -503,8 +487,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         # restarts at 1 for every Synapse instance, so it is NOT globally
         # unique -- keeping this mapping in shared TiKV would let two instances
         # overwrite each other's `hamt:root:<state_group>` pointer whenever they
-        # share one cluster. SQL is per-instance, so it is isolated. Inserted
-        # after the node rows so the state_hamt_roots FK is satisfied.
+        # share one cluster. SQL is per-instance, so it is isolated.
         self.db_pool.simple_insert_txn(
             txn,
             table="state_hamt_roots",
@@ -589,7 +572,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
 
     async def _put_state_hamt_objects_after_txn(
         self,
-        state_group: int,
         room_id: str,
         room_version: RoomVersion,
         nodes: list[tuple[bytes, bytes]],
@@ -646,10 +628,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 bool(self.tikv_pd_endpoints),
             )
         except Exception:
-            logger.exception(
-                "Failed to persist HAMT state objects for state group %s",
-                state_group,
-            )
+            logger.exception("Failed to persist HAMT state objects to TiKV")
             raise
 
     @trace
@@ -767,10 +746,11 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             prev_group,
         )
 
-        for state_group, nodes in hamt_writes:
-            await self._put_state_hamt_objects_after_txn(
-                state_group, room_id, room_version, nodes
-            )
+        # All state groups in the batch share the same room (linear chain),
+        # so flush all their content-addressed nodes to TiKV in a single
+        # batched write rather than one round-trip per state group.
+        all_nodes = [node for _, nodes in hamt_writes for node in nodes]
+        await self._put_state_hamt_objects_after_txn(room_id, room_version, all_nodes)
 
         return events_and_context
 
@@ -858,9 +838,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             current_state_ids,
         )
 
-        await self._put_state_hamt_objects_after_txn(
-            state_group, room_id, room_version, nodes
-        )
+        await self._put_state_hamt_objects_after_txn(room_id, room_version, nodes)
 
         return state_group
 
