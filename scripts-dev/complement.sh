@@ -249,11 +249,18 @@ main() {
       # (which `synapse.util.SYNAPSE_VERSION` is built from) directly in bash, using
       # only `pyproject.toml` and `git` -- no Python environment required.
       pkg_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml | head -n1)"
-      git_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null && true)"
+      # `|| true`, not `&& true`: this script runs under `set -e`, and `git
+      # describe --exact-match` fails on basically every commit that isn't
+      # exactly on a tag (the normal case). `cmd && true` does NOT swallow
+      # that failure -- `&&` short-circuits, so the compound command's exit
+      # status is still `cmd`'s failure, which (being inside `$(...)` in a
+      # plain assignment, not an `if`/`while` condition) triggers `-e` and
+      # kills the whole script. `|| true` is what actually neutralizes it.
+      git_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
       [ -n "$git_branch" ] && git_branch="b=$git_branch"
-      git_tag="$(git describe --exact-match 2>/dev/null && true)"
+      git_tag="$(git describe --exact-match 2>/dev/null || true)"
       [ -n "$git_tag" ] && git_tag="t=$git_tag"
-      git_commit="$(git rev-parse --short HEAD 2>/dev/null && true)"
+      git_commit="$(git rev-parse --short HEAD 2>/dev/null || true)"
       git_dirty=""
       if git describe --dirty=-this_is_a_dirty_checkout 2>/dev/null | grep -q -- '-this_is_a_dirty_checkout$'; then
         git_dirty="dirty"
