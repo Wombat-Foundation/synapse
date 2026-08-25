@@ -22,7 +22,6 @@
 import logging
 from typing import (
     TYPE_CHECKING,
-    Collection,
     Mapping,
 )
 
@@ -48,10 +47,6 @@ logger = logging.getLogger(__name__)
 MAX_STATE_DELTA_HOPS = 100
 
 
-def _state_hamt_root_tikv_key(state_group: int) -> bytes:
-    return f"hamt:root:{state_group}".encode("utf-8")
-
-
 def _state_hamt_node_tikv_key(room_prefix: bytes, structural_hash: bytes) -> bytes:
     # Must match `node_tikv_key` in `rust/src/tikv_engine.rs`.
     return (
@@ -63,18 +58,19 @@ def _state_hamt_node_tikv_key(room_prefix: bytes, structural_hash: bytes) -> byt
 
 
 def put_state_hamt_objects(
-    state_group: int,
     room_prefix: bytes,
-    root_structural_hash: bytes,
     nodes: list[tuple[bytes, bytes]],
     use_tikv: bool,
 ) -> None:
-    # The root value bundles `room_prefix` alongside the root hash (rather
-    # than under a separate key) so that reads -- see `materialize_state_hamt`
-    # in `rust/src/tikv_engine.rs` -- only ever need `state_group` to find a
-    # room's node-key prefix, with no room-version lookup required.
-    root_value = room_prefix + root_structural_hash
-    pairs = [(_state_hamt_root_tikv_key(state_group), root_value)] + [
+    # Only content-addressed nodes are stored in TiKV, keyed by
+    # `hamt:node:<room_prefix>:<structural_hash>`. The root *pointer*
+    # (state_group -> room_prefix + root_hash) lives in per-instance SQL
+    # `state_hamt_roots`, so nothing in shared TiKV is keyed by the
+    # per-instance `state_group` id -- which is NOT globally unique across
+    # Synapse instances sharing one cluster (each instance's state_groups
+    # sequence restarts at 1). Keying by the per-instance id in shared TiKV
+    # let two instances overwrite each other's root pointer.
+    pairs = [
         (_state_hamt_node_tikv_key(room_prefix, structural_hash), node_bytes)
         for structural_hash, node_bytes in nodes
     ]
@@ -83,18 +79,6 @@ def put_state_hamt_objects(
         from synapse.synapse_rust import tikv_engine
 
         tikv_engine.batch_put(pairs)
-
-
-def delete_state_hamt_roots(
-    state_groups: Collection[int],
-    use_tikv: bool,
-) -> None:
-    keys = [_state_hamt_root_tikv_key(state_group) for state_group in state_groups]
-
-    if use_tikv:
-        from synapse.synapse_rust import tikv_engine
-
-        tikv_engine.batch_delete(keys)
 
 
 class StateGroupBackgroundUpdateStore(SQLBaseStore):
@@ -353,14 +337,13 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
     def _state_hamt_root_exists_txn(
         self, txn: LoggingTransaction, state_group: int, use_tikv: bool
     ) -> bool:
-        """Cheap existence check for a state_group's HAMT root, without
+        """Cheap existence check for a state_group's HAMT root pointer, without
         fetching or decoding it. Used while waiting for a state group written
-        elsewhere (e.g. on another worker) to become visible."""
-        if use_tikv:
-            from synapse.synapse_rust import tikv_engine
+        elsewhere (e.g. on another worker) to become visible.
 
-            return tikv_engine.get(_state_hamt_root_tikv_key(state_group)) is not None
-
+        The root pointer always lives in per-instance SQL `state_hamt_roots`
+        (in both SQL and TiKV mode), so this is a plain SQL existence check.
+        """
         root = self.db_pool.simple_select_one_onecol_txn(
             txn,
             table="state_hamt_roots",
@@ -382,7 +365,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
 
         for group in groups:
             entries = (
-                self._materialize_state_hamt_from_tikv(group)
+                self._materialize_state_hamt_from_tikv(txn, group)
                 if use_tikv
                 else self._materialize_state_hamt_from_postgres_txn(txn, group)
             )
@@ -400,17 +383,30 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         return results, missing_groups
 
     def _materialize_state_hamt_from_tikv(
-        self, state_group: int
+        self, txn: LoggingTransaction, state_group: int
     ) -> list[tuple[str, str, str]] | None:
-        """Materialize a state_group's HAMT entirely in Rust against TiKV.
+        """Materialize a state_group's HAMT against TiKV.
 
-        See `materialize_state_hamt` in `rust/src/tikv_engine.rs`: the root
-        pointer, BFS fetch, node decoding, and tree walk all happen without
-        crossing back into Python per node.
+        The root pointer (`state_group -> room_prefix + root_hash`) is read
+        from per-instance SQL `state_hamt_roots`, then the content-addressed
+        node tree is BFS-fetched, decoded, and walked entirely in Rust (see
+        `materialize_state_hamt` in `rust/src/tikv_engine.rs`).
         """
         from synapse.synapse_rust import tikv_engine
 
-        return tikv_engine.materialize_state_hamt(state_group)
+        row = self.db_pool.simple_select_one_txn(
+            txn,
+            table="state_hamt_roots",
+            keyvalues={"state_group": state_group},
+            retcols=("room_prefix", "root_structural_hash"),
+            allow_none=True,
+        )
+        if row is None:
+            return None
+        room_prefix = bytes(row[0])
+        root_structural_hash = bytes(row[1])
+
+        return tikv_engine.materialize_state_hamt(room_prefix, root_structural_hash)
 
     def _materialize_state_hamt_from_postgres_txn(
         self, txn: LoggingTransaction, state_group: int

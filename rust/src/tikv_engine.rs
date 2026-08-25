@@ -238,12 +238,6 @@ pub fn scan_prefix(
 /// batching Python previously did in `_get_state_groups_from_hamt_txn`.
 const NODE_FETCH_BATCH_SIZE: usize = 100;
 
-/// Must match `_state_hamt_root_tikv_key` in
-/// `synapse/storage/databases/state/bg_updates.py`.
-fn root_tikv_key(state_group: i64) -> Vec<u8> {
-    format!("hamt:root:{state_group}").into_bytes()
-}
-
 /// Fixed width of the room-scoped TiKV key prefix. See `room_tikv_prefix_raw`
 /// for why 8 bytes is enough: it's a locality hint, not an identity -- a
 /// prefix collision between two rooms just means their nodes interleave in
@@ -252,30 +246,6 @@ fn root_tikv_key(state_group: i64) -> Vec<u8> {
 /// the birthday bound puts a 50% chance of *any* collision existing at
 /// around 4 billion rooms -- far beyond any realistic homeserver.
 const ROOM_PREFIX_LEN: usize = 8;
-
-/// The value stored at `root_tikv_key(state_group)` is `room_prefix (8
-/// bytes) || root_structural_hash (16 bytes)`. Bundling the room prefix into
-/// the root value (rather than re-deriving it from `room_id` + room version
-/// on every read) means reads only ever need `state_group` -- no async
-/// room-version lookup from inside a synchronous DB transaction, and no
-/// dependency on the room's version being reachable from wherever the read
-/// happens. The room prefix is fixed for a room's lifetime, so this is safe
-/// to compute once at write time. Must match the encoding written by
-/// `put_state_hamt_objects` in `bg_updates.py`.
-fn decode_root_value(value: &[u8]) -> Result<([u8; ROOM_PREFIX_LEN], StructuralHash), String> {
-    const EXPECTED_LEN: usize = ROOM_PREFIX_LEN + 16;
-    if value.len() != EXPECTED_LEN {
-        return Err(format!(
-            "HAMT root value in TiKV is {} bytes, expected {EXPECTED_LEN} ({ROOM_PREFIX_LEN}-byte room prefix + 16-byte root hash)",
-            value.len()
-        ));
-    }
-    let mut room_prefix = [0u8; ROOM_PREFIX_LEN];
-    room_prefix.copy_from_slice(&value[..ROOM_PREFIX_LEN]);
-    let mut root_structural_hash: StructuralHash = [0u8; 16];
-    root_structural_hash.copy_from_slice(&value[ROOM_PREFIX_LEN..]);
-    Ok((room_prefix, root_structural_hash))
-}
 
 /// Room-prefixed HAMT node key: `hamt:node:<room_prefix_hex>:<structural_hash_hex>`.
 /// The room prefix gives nodes belonging to the same room contiguous byte
@@ -295,26 +265,21 @@ async fn get_client() -> Result<&'static RawClient, String> {
         .ok_or_else(|| "TiKV client is not open. Call open_client first.".to_owned())
 }
 
-/// Fetch a state_group's full state map directly from TiKV, entirely in Rust:
-/// look up the root pointer (and its bundled room prefix), BFS-fetch only the
+/// Fetch a state group's HAMT from TiKV, entirely in Rust: BFS-fetch the
 /// reachable nodes (batched), decode each one, and materialize
 /// `(event_type, state_key, event_id)` triples -- without crossing back into
 /// Python per node.
 ///
-/// Returns `Ok(None)` if the state_group has no HAMT root recorded in TiKV.
+/// The root pointer (`state_group -> room_prefix + root_hash`) lives in
+/// per-instance SQL `state_hamt_roots`, so the caller supplies `room_prefix`
+/// and `root_structural_hash`; TiKV holds only content-addressed nodes keyed
+/// by `hamt:node:<room_prefix>:<hash>`, which are globally unique and so safe
+/// to share across Synapse instances.
 async fn materialize_state_hamt_async(
-    state_group: i64,
-) -> Result<Option<Vec<(String, String, String)>>, String> {
+    room_prefix: &[u8; ROOM_PREFIX_LEN],
+    root_structural_hash: StructuralHash,
+) -> Result<Vec<(String, String, String)>, String> {
     let client = get_client().await?;
-
-    let (room_prefix, root_structural_hash) = match client
-        .get(root_tikv_key(state_group))
-        .await
-        .map_err(|e| e.to_string())?
-    {
-        Some(value) => decode_root_value(&value)?,
-        None => return Ok(None),
-    };
 
     let mut node_map: HashMap<StructuralHash, Arc<HamtNode<String, String>>> = HashMap::new();
     let mut seen: HashSet<StructuralHash> = HashSet::from([root_structural_hash]);
@@ -326,13 +291,13 @@ async fn materialize_state_hamt_async(
         for chunk in current_batch.chunks(NODE_FETCH_BATCH_SIZE) {
             let keys: Vec<Vec<u8>> = chunk
                 .iter()
-                .map(|hash| node_tikv_key(&room_prefix, hash))
+                .map(|hash| node_tikv_key(room_prefix, hash))
                 .collect();
             let rows = client.batch_get(keys).await.map_err(|e| e.to_string())?;
 
             if rows.len() != chunk.len() {
                 return Err(format!(
-                    "Missing HAMT node(s) for state group {state_group}: expected {}, got {}",
+                    "Missing HAMT node(s): expected {}, got {}",
                     chunk.len(),
                     rows.len()
                 ));
@@ -358,24 +323,37 @@ async fn materialize_state_hamt_async(
         }
     }
 
-    materialize_from_node_map(&root_structural_hash, &node_map).map(Some)
+    materialize_from_node_map(&root_structural_hash, &node_map)
 }
 
-/// Materialize a state_group's full state map directly from TiKV, in pure
-/// Rust. The room prefix used for this room's node keys travels with the
-/// stored root pointer (see `decode_root_value`), so this needs nothing
-/// beyond the state_group id -- no room_id or room-version lookup required.
-///
-/// Returns `None` if the state_group has no HAMT root recorded in TiKV.
+/// Materialize a state group's full state map directly from TiKV, in pure
+/// Rust. `room_prefix` and `root_structural_hash` come from the per-instance
+/// SQL root pointer (`state_hamt_roots`), so this needs no room_id or
+/// room-version lookup. TiKV stores only content-addressed nodes.
 #[pyfunction]
-#[pyo3(text_signature = "(state_group, /)")]
+#[pyo3(text_signature = "(room_prefix, root_structural_hash, /)")]
 pub fn materialize_state_hamt(
     py: Python<'_>,
-    state_group: i64,
+    room_prefix: Vec<u8>,
+    root_structural_hash: Vec<u8>,
 ) -> PyResult<Option<Vec<(String, String, String)>>> {
+    let room_prefix: [u8; ROOM_PREFIX_LEN] = room_prefix.try_into().map_err(|_| {
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "room_prefix must be {ROOM_PREFIX_LEN} bytes"
+        ))
+    })?;
+    let root_structural_hash: StructuralHash = root_structural_hash.try_into().map_err(|_| {
+        pyo3::exceptions::PyValueError::new_err("root_structural_hash must be 16 bytes")
+    })?;
     let rt = get_runtime();
-    py.detach(|| rt.block_on(materialize_state_hamt_async(state_group)))
-        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+    py.detach(|| {
+        rt.block_on(materialize_state_hamt_async(
+            &room_prefix,
+            root_structural_hash,
+        ))
+    })
+    .map(Some)
+    .map_err(pyo3::exceptions::PyRuntimeError::new_err)
 }
 
 pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {

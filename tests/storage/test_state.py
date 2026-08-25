@@ -236,18 +236,17 @@ class StateStoreTestCase(HomeserverTestCase):
     def test_state_group_hamt_corruption_does_not_fallback_to_sql_tikv(self) -> None:
         """TiKV equivalent of test_state_group_hamt_corruption_does_not_fallback_to_sql.
 
-        When TiKV is configured, the SQL-backed state_hamt_roots/
-        state_hamt_nodes tables are never written (see
-        _persist_state_hamt_txn), so the corruption has to be simulated
-        directly in TiKV instead.
+        When TiKV is configured, the full HAMT trie lives in TiKV (keyed by
+        content hash); only the root pointer (state_group -> room_prefix +
+        root_hash) lives in per-instance SQL `state_hamt_roots`. So the
+        corruption is simulated by inserting an undecodable node into TiKV
+        (and into SQL `state_hamt_nodes` so the root FK stays satisfiable) and
+        repointing the SQL root pointer at it.
         """
         if not self.state_datastore.tikv_pd_endpoints:
             self.skipTest("Requires TiKV -- set SYNAPSE_TEST_TIKV_PD_ENDPOINTS to run")
 
-        from synapse.storage.databases.state.bg_updates import (
-            _state_hamt_node_tikv_key,
-            _state_hamt_root_tikv_key,
-        )
+        from synapse.storage.databases.state.bg_updates import _state_hamt_node_tikv_key
         from synapse.synapse_rust import tikv_engine
 
         event = self.inject_state_event(
@@ -258,25 +257,46 @@ class StateStoreTestCase(HomeserverTestCase):
         )
         assert state_group is not None
 
-        root_key = _state_hamt_root_tikv_key(state_group)
-        root_value = tikv_engine.get(root_key)
-        assert root_value is not None, "Expected a HAMT root to already exist in TiKV"
+        # Read the per-instance SQL root pointer.
+        row = self.get_success(
+            self.store.db_pool.simple_select_one(
+                table="state_hamt_roots",
+                keyvalues={"state_group": state_group},
+                retcols=("room_prefix", "root_structural_hash"),
+                allow_none=True,
+            )
+        )
+        assert row is not None, "Expected a HAMT root pointer to exist in SQL"
+        room_prefix = bytes(row[0])
 
-        # The root value is room_prefix || root_structural_hash (see
-        # decode_root_value in rust/src/tikv_engine.rs). Keep the real
-        # room_prefix -- only the room owns it -- and repoint the root at a
-        # freshly inserted, undecodable node under that same prefix. This
-        # simulates corrupt node *content*, analogous to the SQL version's
-        # FK-respecting insert-then-repoint (TiKV has no FK to respect, but
-        # keeping the prefix real means this exercises the same node-lookup
-        # path a genuine root would).
-        room_prefix = root_value[:-16]
         garbage_structural_hash = random_string(16).encode("ascii")
         garbage_node_key = _state_hamt_node_tikv_key(
             room_prefix, garbage_structural_hash
         )
         tikv_engine.put(garbage_node_key, b"not a valid persisted HAMT node")
-        tikv_engine.put(root_key, room_prefix + garbage_structural_hash)
+
+        # The SQL state_hamt_roots FK references state_hamt_nodes, so mirror
+        # the garbage node there before repointing the root.
+        self.get_success(
+            self.store.db_pool.simple_insert(
+                table="state_hamt_nodes",
+                values={
+                    "structural_hash": bytearray(garbage_structural_hash),
+                    "node_bytes": bytearray(b"not a valid persisted HAMT node"),
+                },
+                desc="test_state_group_hamt_corruption.insert_garbage_node",
+            )
+        )
+        self.get_success(
+            self.store.db_pool.simple_update_one(
+                table="state_hamt_roots",
+                keyvalues={"state_group": state_group},
+                updatevalues={
+                    "root_structural_hash": bytearray(garbage_structural_hash)
+                },
+                desc="test_state_group_hamt_corruption.repoint_root",
+            )
+        )
 
         # If a HAMT root exists, missing/corrupt nodes are data corruption.
         # Do not hide that by falling back to the legacy SQL snapshot.

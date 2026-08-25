@@ -44,7 +44,6 @@ from synapse.storage.database import (
 )
 from synapse.storage.databases.state.bg_updates import (
     StateBackgroundUpdateStore,
-    delete_state_hamt_roots,
     put_state_hamt_objects,
 )
 from synapse.storage.engines import PostgresEngine
@@ -465,6 +464,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         txn: LoggingTransaction,
         state_group: int,
         room_id: str,
+        room_prefix: bytes,
         current_state_ids: StateMap[str],
     ) -> tuple[bytes, list[tuple[bytes, bytes]]]:
         from synapse.synapse_rust import state_hamt
@@ -474,19 +474,52 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             room_id,
             self._build_state_hamt_entries(current_state_ids),
         )
+        root_structural_hash = root_handle_parts[0]
 
-        if not self.tikv_pd_endpoints:
-            self._store_state_hamt_objects_txn(
-                txn, state_group, root_handle_parts[0], nodes
+        if self.tikv_pd_endpoints:
+            # In TiKV mode the full trie lives in TiKV, keyed by content hash
+            # (globally unique). Write just the root node into SQL too so the
+            # state_hamt_roots FK (corruption guard) is satisfied without
+            # mirroring the whole subtree.
+            root_node = next(
+                (
+                    node_bytes
+                    for structural_hash, node_bytes in nodes
+                    if structural_hash == root_structural_hash
+                ),
+                None,
             )
+            if root_node is None:
+                raise Exception(
+                    "HAMT root node %s not found in persisted nodes"
+                    % (root_structural_hash.hex(),)
+                )
+            self._store_state_hamt_nodes_txn(txn, [(root_structural_hash, root_node)])
+        else:
+            self._store_state_hamt_nodes_txn(txn, nodes)
 
-        return root_handle_parts[0], nodes
+        # The root pointer (state_group -> room_prefix + root_hash) lives in
+        # per-instance SQL. `state_group` is a per-database sequence that
+        # restarts at 1 for every Synapse instance, so it is NOT globally
+        # unique -- keeping this mapping in shared TiKV would let two instances
+        # overwrite each other's `hamt:root:<state_group>` pointer whenever they
+        # share one cluster. SQL is per-instance, so it is isolated. Inserted
+        # after the node rows so the state_hamt_roots FK is satisfied.
+        self.db_pool.simple_insert_txn(
+            txn,
+            table="state_hamt_roots",
+            values={
+                "state_group": state_group,
+                "room_prefix": bytearray(room_prefix),
+                "root_structural_hash": bytearray(root_structural_hash),
+            },
+        )
 
-    def _store_state_hamt_objects_txn(
+        return root_structural_hash, nodes
+
+    def _store_state_hamt_nodes_txn(
         self,
         txn: LoggingTransaction,
-        state_group: int,
-        root_structural_hash: bytes,
         nodes: list[tuple[bytes, bytes]],
     ) -> None:
         txn.executemany(
@@ -501,20 +534,12 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             ],
         )
 
-        self.db_pool.simple_insert_txn(
-            txn,
-            table="state_hamt_roots",
-            values={
-                "state_group": state_group,
-                "root_structural_hash": bytearray(root_structural_hash),
-            },
-        )
-
     def _persist_state_group_snapshot_txn(
         self,
         txn: LoggingTransaction,
         state_group: int,
         room_id: str,
+        room_prefix: bytes,
         event_id: str,
         current_state_ids: StateMap[str],
         prev_group: int | None = None,
@@ -559,7 +584,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         )
 
         return self._persist_state_hamt_txn(
-            txn, state_group, room_id, current_state_ids
+            txn, state_group, room_id, room_prefix, current_state_ids
         )
 
     async def _put_state_hamt_objects_after_txn(
@@ -567,28 +592,28 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         state_group: int,
         room_id: str,
         room_version: RoomVersion,
-        root_structural_hash: bytes,
         nodes: list[tuple[bytes, bytes]],
     ) -> None:
-        """Persist the HAMT objects for a single state group.
+        """Persist the HAMT node objects for a single state group to TiKV.
 
         We wait for this after the SQL transaction commits so callers don't
-        observe a state group before its trie root exists in TiKV or the
-        SQL transaction has committed.
+        observe a state group before its trie nodes exist in TiKV or the SQL
+        transaction has committed.
 
-        Raises if the TiKV write fails. When TiKV is in use, it is the only
-        place this state_group's HAMT data lives (the SQL-backed
-        state_hamt_nodes/state_hamt_roots tables are only written when TiKV
-        is *not* configured -- see _persist_state_hamt_txn). A failure here
-        after the SQL transaction has already committed the state_group
-        itself means the state_group now exists but is unreadable: silently
-        swallowing that (as this used to do, just logging and returning)
-        left it permanently and invisibly broken -- exactly the dangling
-        state the state_hamt_roots -> state_hamt_nodes foreign key
-        (4a9a931bb2) exists to prevent on the read side. Propagating the
-        error at least surfaces the failure immediately to the caller
-        (typically event persistence), rather than the event appearing to
-        succeed while its state is silently unreadable forever after.
+        Only the content-addressed HAMT nodes are stored in TiKV (keyed by
+        `hamt:node:<room_prefix>:<structural_hash>`); the root *pointer*
+        (`state_group -> room_prefix + root_hash`) lives in per-instance SQL
+        `state_hamt_roots` (written inside the SQL transaction in
+        `_persist_state_hamt_txn`). This keeps shared TiKV free of any key
+        derived from the per-instance `state_group` id, which is not globally
+        unique across Synapse instances sharing one cluster.
+
+        Raises if the TiKV write fails. A failure here after the SQL
+        transaction has already committed the state_group itself means the
+        state_group now exists but is unreadable: silently swallowing that (as
+        this used to do, just logging and returning) left it permanently and
+        invisibly broken. Propagating the error at least surfaces the failure
+        immediately to the caller (typically event persistence).
         """
 
         if not self.tikv_pd_endpoints:
@@ -604,14 +629,8 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         # process, so a fresh read of `main.rooms` here had no transactional
         # guarantee of observing a `store_room` write from moments earlier in
         # the same request -- an intermittent cross-connection race, observed
-        # in practice for MSC4291 rooms specifically (their `rooms` row is
-        # inserted partway through room creation, after the create event's
-        # own state has already started persisting, leaving less margin
-        # before this runs). This would only get worse under a real worker
-        # split, where "not yet visible" means "not yet replicated". Passing
-        # the already-known room_version needs no read at all, so there's no
-        # race to have. It's bundled into the stored root value (see
-        # `put_state_hamt_objects`) so reads never need to resolve it again.
+        # in practice for MSC4291 rooms specifically. Passing the already-known
+        # room_version needs no read at all, so there's no race to have.
         room_prefix = state_hamt.room_tikv_prefix(
             self._state_hamt_secret(),
             room_id,
@@ -622,9 +641,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             await defer_to_thread(
                 self.hs.get_reactor(),
                 put_state_hamt_objects,
-                state_group,
                 room_prefix,
-                root_structural_hash,
                 nodes,
                 bool(self.tikv_pd_endpoints),
             )
@@ -663,13 +680,21 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         # connection yet.
         room_version = events_and_context[0][0].room_version
 
+        from synapse.synapse_rust import state_hamt
+
+        room_prefix = state_hamt.room_tikv_prefix(
+            self._state_hamt_secret(),
+            room_id,
+            room_version.msc4291_room_ids_as_hashes,
+        )
+
         def insert_deltas_group_txn(
             txn: LoggingTransaction,
             events_and_context: list[tuple[EventBase, UnpersistedEventContext]],
             prev_group: int,
         ) -> tuple[
             list[tuple[EventBase, UnpersistedEventContext]],
-            list[tuple[int, bytes, list[tuple[bytes, bytes]]]],
+            list[tuple[int, list[tuple[bytes, bytes]]]],
         ]:
             """Generate and store state groups for the provided events and contexts.
 
@@ -706,7 +731,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
 
             sg_before = prev_group
             state_group_iter = iter(state_groups)
-            hamt_writes: list[tuple[int, bytes, list[tuple[bytes, bytes]]]] = []
+            hamt_writes: list[tuple[int, list[tuple[bytes, bytes]]]] = []
 
             for event, context in events_and_context:
                 if not event.is_state():
@@ -721,15 +746,16 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     (event.type, event.state_key): event.event_id
                 }
                 current_state_ids[(event.type, event.state_key)] = event.event_id
-                root_structural_hash, nodes = self._persist_state_group_snapshot_txn(
+                _, nodes = self._persist_state_group_snapshot_txn(
                     txn,
                     sg_after,
                     room_id,
+                    room_prefix,
                     event.event_id,
                     current_state_ids,
                     prev_group=sg_before,
                 )
-                hamt_writes.append((sg_after, root_structural_hash, nodes))
+                hamt_writes.append((sg_after, nodes))
                 sg_before = sg_after
 
             return events_and_context, hamt_writes
@@ -741,9 +767,9 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             prev_group,
         )
 
-        for state_group, root_structural_hash, nodes in hamt_writes:
+        for state_group, nodes in hamt_writes:
             await self._put_state_hamt_objects_after_txn(
-                state_group, room_id, room_version, root_structural_hash, nodes
+                state_group, room_id, room_version, nodes
             )
 
         return events_and_context
@@ -791,6 +817,14 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             current_state_ids = dict(groups[prev_group])
             current_state_ids.update(delta_ids)
 
+        from synapse.synapse_rust import state_hamt
+
+        room_prefix = state_hamt.room_tikv_prefix(
+            self._state_hamt_secret(),
+            room_id,
+            room_version.msc4291_room_ids_as_hashes,
+        )
+
         def insert_full_state_txn(
             txn: LoggingTransaction, current_state_ids: StateMap[str]
         ) -> tuple[int, bytes, list[tuple[bytes, bytes]]]:
@@ -810,6 +844,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 txn,
                 state_group,
                 room_id,
+                room_prefix,
                 event_id,
                 current_state_ids,
                 prev_group=prev_group,
@@ -817,14 +852,14 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
 
             return state_group, root_structural_hash, nodes
 
-        state_group, root_structural_hash, nodes = await self.db_pool.runInteraction(
+        state_group, _, nodes = await self.db_pool.runInteraction(
             "store_state_group.insert_full_state",
             insert_full_state_txn,
             current_state_ids,
         )
 
         await self._put_state_hamt_objects_after_txn(
-            state_group, room_id, room_version, root_structural_hash, nodes
+            state_group, room_id, room_version, nodes
         )
 
         return state_group
@@ -936,23 +971,17 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             [(sg,) for sg in state_groups_to_delete],
         )
 
-        # This only deletes the per-group `hamt:root:*` pointers. The
-        # `hamt:node:*` objects themselves are content-addressed and may be
-        # shared by other, still-live roots, so they are intentionally
-        # retained rather than reference-counted/GC'd here. This trades some
-        # unreachable node storage for avoiding an unsafe delete of a node
-        # another root still points to.
-        if self.tikv_pd_endpoints:
-            txn.call_after(
-                delete_state_hamt_roots,
-                state_groups_to_delete,
-                bool(self.tikv_pd_endpoints),
-            )
-        else:
-            txn.execute_batch(
-                "DELETE FROM state_hamt_roots WHERE state_group = ?",
-                [(sg,) for sg in state_groups_to_delete],
-            )
+        # The root pointer lives in per-instance SQL `state_hamt_roots` in
+        # both SQL and TiKV mode, so delete it there. The `state_hamt_nodes`
+        # objects themselves (and TiKV `hamt:node:*`) are content-addressed
+        # and may be shared by other, still-live roots, so they are
+        # intentionally retained rather than reference-counted/GC'd here.
+        # This trades some unreachable node storage for avoiding an unsafe
+        # delete of a node another root still points to.
+        txn.execute_batch(
+            "DELETE FROM state_hamt_roots WHERE state_group = ?",
+            [(sg,) for sg in state_groups_to_delete],
+        )
 
         return True
 
