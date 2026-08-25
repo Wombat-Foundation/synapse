@@ -379,6 +379,7 @@ class StateHandler:
                     await self._state_storage_controller.store_state_group(
                         event.event_id,
                         event.room_id,
+                        event.room_version,
                         prev_group=state_group_before_event_prev_group,
                         delta_ids=deltas_to_state_group_before_event,
                         current_state_ids=state_ids_before_event,

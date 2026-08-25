@@ -234,6 +234,7 @@ class PurgeTests(HomeserverTestCase):
             self.state_store.store_state_group(
                 event_id=last["event_id"],
                 room_id=self.room_id,
+                room_version=RoomVersions.V1,
                 prev_group=prev_group,
                 delta_ids={("org.matrix.test", ""): state2["event_id"]},
                 current_state_ids=None,
@@ -334,6 +335,7 @@ class PurgeTests(HomeserverTestCase):
             self.state_store.store_state_group(
                 event_id=last["event_id"],
                 room_id=self.room_id,
+                room_version=RoomVersions.V1,
                 prev_group=None,
                 delta_ids={("org.matrix.test", ""): state1["event_id"]},
                 current_state_ids={("org.matrix.test", ""): ""},
@@ -349,6 +351,7 @@ class PurgeTests(HomeserverTestCase):
             self.state_store.store_state_group(
                 event_id=last["event_id"],
                 room_id=self.room_id,
+                room_version=RoomVersions.V1,
                 prev_group=prev_group,
                 delta_ids={("org.matrix.test", ""): state1["event_id"]},
                 current_state_ids=None,
@@ -358,6 +361,7 @@ class PurgeTests(HomeserverTestCase):
             self.state_store.store_state_group(
                 event_id=last["event_id"],
                 room_id=self.room_id,
+                room_version=RoomVersions.V1,
                 prev_group=unreferenced_end_state_group,
                 delta_ids={("org.matrix.test", ""): state1["event_id"]},
                 current_state_ids=None,
@@ -371,6 +375,7 @@ class PurgeTests(HomeserverTestCase):
             self.state_store.store_state_group(
                 event_id=last["event_id"],
                 room_id=self.room_id,
+                room_version=RoomVersions.V1,
                 prev_group=None,
                 delta_ids={("org.matrix.test", ""): ""},
                 current_state_ids={("org.matrix.test", ""): ""},
@@ -380,6 +385,7 @@ class PurgeTests(HomeserverTestCase):
             self.state_store.store_state_group(
                 event_id=last["event_id"],
                 room_id=self.room_id,
+                room_version=RoomVersions.V1,
                 prev_group=chain_state_group,
                 delta_ids={("org.matrix.test", ""): ""},
                 current_state_ids=None,
@@ -389,6 +395,7 @@ class PurgeTests(HomeserverTestCase):
             self.state_store.store_state_group(
                 event_id=last["event_id"],
                 room_id=self.room_id,
+                room_version=RoomVersions.V1,
                 prev_group=chain_state_group_2,
                 delta_ids={("org.matrix.test", ""): ""},
                 current_state_ids=None,

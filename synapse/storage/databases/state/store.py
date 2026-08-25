@@ -29,6 +29,7 @@ from typing import (
 )
 
 from synapse.api.constants import EventTypes
+from synapse.api.room_versions import RoomVersion
 from synapse.events import EventBase
 from synapse.events.snapshot import (
     UnpersistedEventContext,
@@ -565,6 +566,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         self,
         state_group: int,
         room_id: str,
+        room_version: RoomVersion,
         root_structural_hash: bytes,
         nodes: list[tuple[bytes, bytes]],
     ) -> None:
@@ -595,13 +597,21 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         from synapse.synapse_rust import state_hamt
 
         # The room-scoped TiKV key prefix depends on the room's version (see
-        # `room_tikv_prefix` in the Rust `state_hamt` module), which lives in
-        # the main datastore -- possibly a different physical database than
-        # this one. We resolve it here, once, before handing off to the
-        # worker thread, so the write side is the only place that ever needs
-        # this lookup: it's bundled into the stored root value (see
-        # `put_state_hamt_objects`) so reads never need it again.
-        room_version = await self.hs.get_datastores().main.get_room_version(room_id)
+        # `room_tikv_prefix` in the Rust `state_hamt` module). `room_version`
+        # is passed in by the caller (who already has it from the event being
+        # persisted) rather than looked up here by room_id: `main` and `state`
+        # are separate database connections/pools even in a single monolith
+        # process, so a fresh read of `main.rooms` here had no transactional
+        # guarantee of observing a `store_room` write from moments earlier in
+        # the same request -- an intermittent cross-connection race, observed
+        # in practice for MSC4291 rooms specifically (their `rooms` row is
+        # inserted partway through room creation, after the create event's
+        # own state has already started persisting, leaving less margin
+        # before this runs). This would only get worse under a real worker
+        # split, where "not yet visible" means "not yet replicated". Passing
+        # the already-known room_version needs no read at all, so there's no
+        # race to have. It's bundled into the stored root value (see
+        # `put_state_hamt_objects`) so reads never need to resolve it again.
         room_prefix = state_hamt.room_tikv_prefix(
             self._state_hamt_secret(),
             room_id,
@@ -644,6 +654,14 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             prev_group: the state group of the last event persisted before the batched events
             were created
         """
+
+        # All events in the batch are in the same room (and hence share the
+        # same, immutable room_version) -- see the linear-chain requirement
+        # above. Read it off the first event rather than looking it up by
+        # room_id, for the same reason as store_state_group: no DB read, no
+        # race against a `rooms` row that may not be visible on this
+        # connection yet.
+        room_version = events_and_context[0][0].room_version
 
         def insert_deltas_group_txn(
             txn: LoggingTransaction,
@@ -725,7 +743,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
 
         for state_group, root_structural_hash, nodes in hamt_writes:
             await self._put_state_hamt_objects_after_txn(
-                state_group, room_id, root_structural_hash, nodes
+                state_group, room_id, room_version, root_structural_hash, nodes
             )
 
         return events_and_context
@@ -736,6 +754,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         self,
         event_id: str,
         room_id: str,
+        room_version: RoomVersion,
         prev_group: int | None,
         delta_ids: StateMap[str] | None,
         current_state_ids: StateMap[str] | None,
@@ -747,6 +766,10 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         Args:
             event_id: The event ID for which the state was calculated
             room_id
+            room_version: The version of the room `room_id` is in. Passed
+                explicitly rather than looked up, to avoid a lookup that can
+                race the `rooms` row for a room not yet visible here -- see
+                _put_state_hamt_objects_after_txn.
             prev_group: A previous state group for the room.
             delta_ids: The delta between state at `prev_group` and
                 `current_state_ids`, if `prev_group` was given. Same format as
@@ -801,7 +824,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         )
 
         await self._put_state_hamt_objects_after_txn(
-            state_group, room_id, root_structural_hash, nodes
+            state_group, room_id, room_version, root_structural_hash, nodes
         )
 
         return state_group

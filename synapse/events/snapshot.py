@@ -441,6 +441,7 @@ class UnpersistedEventContext(UnpersistedEventContextBase):
             state_group_before_event = await self._storage.state.store_state_group(
                 event.event_id,
                 event.room_id,
+                event.room_version,
                 prev_group=self.prev_group_for_state_group_before_event,
                 delta_ids=self.delta_ids_to_state_group_before_event,
                 current_state_ids=self.state_map_before_event,
@@ -456,6 +457,7 @@ class UnpersistedEventContext(UnpersistedEventContextBase):
             self.state_group_after_event = await self._storage.state.store_state_group(
                 event.event_id,
                 event.room_id,
+                event.room_version,
                 prev_group=self.state_group_before_event,
                 delta_ids=self.state_delta_due_to_event,
                 current_state_ids=None,

@@ -153,6 +153,7 @@ class StateStoreTestCase(HomeserverTestCase):
             self.state_datastore.store_state_group(
                 event_id="$empty-state-group",
                 room_id=self.room.to_string(),
+                room_version=RoomVersions.V1,
                 prev_group=None,
                 delta_ids=None,
                 current_state_ids={},
