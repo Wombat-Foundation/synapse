@@ -488,15 +488,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         root_structural_hash: bytes,
         nodes: list[tuple[bytes, bytes]],
     ) -> None:
-        self.db_pool.simple_insert_txn(
-            txn,
-            table="state_hamt_roots",
-            values={
-                "state_group": state_group,
-                "root_structural_hash": bytearray(root_structural_hash),
-            },
-        )
-
         txn.executemany(
             """
             INSERT INTO state_hamt_nodes (structural_hash, node_bytes)
@@ -507,6 +498,15 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 (bytearray(structural_hash), bytearray(node_bytes))
                 for structural_hash, node_bytes in nodes
             ],
+        )
+
+        self.db_pool.simple_insert_txn(
+            txn,
+            table="state_hamt_roots",
+            values={
+                "state_group": state_group,
+                "root_structural_hash": bytearray(root_structural_hash),
+            },
         )
 
     def _persist_state_group_snapshot_txn(

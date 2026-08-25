@@ -11,12 +11,13 @@
 -- See the GNU Affero General Public License for more details:
 -- <https://www.gnu.org/licenses/agpl-3.0.html>.
 
-CREATE TABLE IF NOT EXISTS state_hamt_roots (
-    state_group BIGINT PRIMARY KEY,
-    root_structural_hash BYTEA NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS state_hamt_nodes (
     structural_hash BYTEA PRIMARY KEY,
     node_bytes BYTEA NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS state_hamt_roots (
+    state_group BIGINT PRIMARY KEY,
+    root_structural_hash BYTEA NOT NULL,
+    FOREIGN KEY (root_structural_hash) REFERENCES state_hamt_nodes(structural_hash)
 );
