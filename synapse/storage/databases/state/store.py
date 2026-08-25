@@ -192,7 +192,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 return [
                     group
                     for group in empty_groups
-                    if self._get_state_hamt_root_txn(txn, group, use_tikv) is None
+                    if not self._state_hamt_root_exists_txn(txn, group, use_tikv)
                 ]
 
             missing_groups = await self.db_pool.runInteraction(
@@ -564,6 +564,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
     async def _put_state_hamt_objects_after_txn(
         self,
         state_group: int,
+        room_id: str,
         root_structural_hash: bytes,
         nodes: list[tuple[bytes, bytes]],
     ) -> None:
@@ -577,11 +578,28 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         if not self.tikv_pd_endpoints:
             return
 
+        from synapse.synapse_rust import state_hamt
+
+        # The room-scoped TiKV key prefix depends on the room's version (see
+        # `room_tikv_prefix` in the Rust `state_hamt` module), which lives in
+        # the main datastore -- possibly a different physical database than
+        # this one. We resolve it here, once, before handing off to the
+        # worker thread, so the write side is the only place that ever needs
+        # this lookup: it's bundled into the stored root value (see
+        # `put_state_hamt_objects`) so reads never need it again.
+        room_version = await self.hs.get_datastores().main.get_room_version(room_id)
+        room_prefix = state_hamt.room_tikv_prefix(
+            self._state_hamt_secret(),
+            room_id,
+            room_version.msc4291_room_ids_as_hashes,
+        )
+
         try:
             await defer_to_thread(
                 self.hs.get_reactor(),
                 put_state_hamt_objects,
                 state_group,
+                room_prefix,
                 root_structural_hash,
                 nodes,
                 bool(self.tikv_pd_endpoints),
@@ -692,7 +710,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
 
         for state_group, root_structural_hash, nodes in hamt_writes:
             await self._put_state_hamt_objects_after_txn(
-                state_group, root_structural_hash, nodes
+                state_group, room_id, root_structural_hash, nodes
             )
 
         return events_and_context
@@ -768,7 +786,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         )
 
         await self._put_state_hamt_objects_after_txn(
-            state_group, root_structural_hash, nodes
+            state_group, room_id, root_structural_hash, nodes
         )
 
         return state_group

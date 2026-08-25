@@ -43,6 +43,50 @@ fn room_structural_key_raw(server_secret: &[u8; 32], room_id: &str) -> [u8; 32] 
     mac.finalize().into_bytes().into()
 }
 
+/// Derive a fixed-width, room-scoped prefix used to lay out this room's HAMT
+/// nodes contiguously in TiKV's flat sorted keyspace (see `tikv_engine.rs`).
+///
+/// For MSC4291-style room versions the room ID *is* `!` + base64url(hash(create
+/// event)) -- already a uniformly-distributed digest -- so we decode it directly
+/// rather than hashing it again. For pre-MSC4291 versions the room ID is an
+/// opaque, low-entropy string (`!<random localpart>:<server_name>`), so we reuse
+/// the same HMAC-SHA256 derivation as `room_structural_key_raw` and truncate.
+///
+/// Callers must pass the real `room_version.msc4291_room_ids_as_hashes` flag
+/// (the official per-room-version marker) rather than comparing version
+/// numbers, since which versions get hash-based room IDs is not simply "v12
+/// and above" (e.g. experimental/Hydra versions).
+pub(crate) fn room_tikv_prefix_raw(
+    server_secret: &[u8; 32],
+    room_id: &str,
+    msc4291_room_ids_as_hashes: bool,
+) -> Result<[u8; 16], String> {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+
+    const PREFIX_LEN: usize = 16;
+    let mut prefix = [0u8; PREFIX_LEN];
+
+    if msc4291_room_ids_as_hashes {
+        let body = room_id.strip_prefix('!').unwrap_or(room_id);
+        let decoded = URL_SAFE_NO_PAD
+            .decode(body)
+            .map_err(|e| format!("Failed to decode MSC4291 room id as base64url: {e}"))?;
+        if decoded.len() < PREFIX_LEN {
+            return Err(format!(
+                "Decoded MSC4291 room id hash is only {} bytes, expected at least {}",
+                decoded.len(),
+                PREFIX_LEN
+            ));
+        }
+        prefix.copy_from_slice(&decoded[..PREFIX_LEN]);
+    } else {
+        let full_key = room_structural_key_raw(server_secret, room_id);
+        prefix.copy_from_slice(&full_key[..PREFIX_LEN]);
+    }
+
+    Ok(prefix)
+}
+
 fn root_handle_parts(root_handle: &RootHandle) -> RootHandleParts {
     (root_handle.structural_hash, root_handle.state_group_id)
 }
@@ -93,13 +137,53 @@ fn build_root_handle_and_nodes(
     Ok((root_handle_parts(&root_handle), nodes))
 }
 
-fn decode_persisted_node(node_bytes: &[u8]) -> Result<Arc<HamtNode<String, String>>, String> {
+pub(crate) fn decode_persisted_node(
+    node_bytes: &[u8],
+) -> Result<Arc<HamtNode<String, String>>, String> {
     let persisted = PersistedInternalNode::<String, String>::decode_v1(node_bytes)
         .map_err(|e| format!("Failed to decode persisted HAMT node: {e}"))?;
     let node: HamtNode<String, String> = persisted
         .try_into()
         .map_err(|e| format!("Failed to reconstruct HAMT node: {e}"))?;
     Ok(Arc::new(node))
+}
+
+/// Decode just enough of a persisted node to read its children's hashes,
+/// without reconstructing the full node. Used to drive BFS traversal.
+pub(crate) fn node_child_hashes_raw(node_bytes: &[u8]) -> Result<Vec<StructuralHash>, String> {
+    let node = PersistedInternalNode::<String, String>::decode_v1(node_bytes)
+        .map_err(|e| format!("Failed to decode persisted HAMT node: {e}"))?;
+    Ok(node.child_hashes)
+}
+
+/// Walk a fully-resolved HAMT (every reachable node present in `node_map`)
+/// starting at `root_hash`, emitting `(event_type, state_key, event_id)`
+/// triples for every entry.
+pub(crate) fn materialize_from_node_map(
+    root_hash: &StructuralHash,
+    node_map: &HashMap<StructuralHash, Arc<HamtNode<String, String>>>,
+) -> Result<Vec<(String, String, String)>, String> {
+    let root_node = node_map
+        .get(root_hash)
+        .cloned()
+        .ok_or_else(|| format!("Missing persisted HAMT root node: {:02x?}", root_hash))?;
+
+    let mut entries = Vec::new();
+    let mut resolver = |hash: &StructuralHash| -> Result<Arc<HamtNode<String, String>>, String> {
+        node_map
+            .get(hash)
+            .cloned()
+            .ok_or_else(|| format!("Missing persisted HAMT node: {:02x?}", hash))
+    };
+
+    root_node.visit_entries(&mut resolver, &mut |key, value| {
+        let (event_type, state_key): (String, String) = serde_json::from_str(key)
+            .map_err(|e| format!("Failed to decode HAMT state key: {e}"))?;
+        entries.push((event_type, state_key, value.clone()));
+        Ok::<(), String>(())
+    })?;
+
+    Ok(entries)
 }
 
 fn structural_hash_from_bytes(hash_bytes: Vec<u8>) -> Result<StructuralHash, PyErr> {
@@ -115,6 +199,23 @@ pub fn room_structural_key(server_secret: Vec<u8>, room_id: &str) -> PyResult<Ve
         .try_into()
         .map_err(|_| pyo3::exceptions::PyValueError::new_err("server_secret must be 32 bytes"))?;
     Ok(room_structural_key_raw(&server_secret, room_id).to_vec())
+}
+
+/// See `room_tikv_prefix_raw` for the derivation. `msc4291_room_ids_as_hashes`
+/// must come from the caller's real `RoomVersion.msc4291_room_ids_as_hashes`.
+#[pyfunction]
+#[pyo3(text_signature = "(server_secret, room_id, msc4291_room_ids_as_hashes, /)")]
+pub fn room_tikv_prefix(
+    server_secret: Vec<u8>,
+    room_id: &str,
+    msc4291_room_ids_as_hashes: bool,
+) -> PyResult<Vec<u8>> {
+    let server_secret: [u8; 32] = server_secret
+        .try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("server_secret must be 32 bytes"))?;
+    room_tikv_prefix_raw(&server_secret, room_id, msc4291_room_ids_as_hashes)
+        .map(|prefix| prefix.to_vec())
+        .map_err(pyo3::exceptions::PyValueError::new_err)
 }
 
 #[pyfunction]
@@ -147,7 +248,9 @@ pub fn materialize_state_entries(
 ) -> PyResult<Vec<PyStateEntry>> {
     let root_node = decode_persisted_node(&root_node_bytes)
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    let root_hash = root_node.structural_hash;
     let mut node_map: HashMap<StructuralHash, Arc<HamtNode<String, String>>> = HashMap::new();
+    node_map.insert(root_hash, root_node);
 
     for (hash_bytes, node_bytes) in nodes {
         let hash = structural_hash_from_bytes(hash_bytes)?;
@@ -156,39 +259,16 @@ pub fn materialize_state_entries(
         node_map.insert(hash, node);
     }
 
-    let mut entries = Vec::new();
-    let mut resolver = |hash: &StructuralHash| -> Result<Arc<HamtNode<String, String>>, String> {
-        node_map
-            .get(hash)
-            .cloned()
-            .ok_or_else(|| format!("Missing persisted HAMT node: {:02x?}", hash))
-    };
-
-    root_node
-        .visit_entries(&mut resolver, &mut |key, value| {
-            let (event_type, state_key): (String, String) = serde_json::from_str(key)
-                .map_err(|e| format!("Failed to decode HAMT state key: {e}"))?;
-            entries.push((event_type, state_key, value.clone()));
-            Ok::<(), String>(())
-        })
-        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
-
-    Ok(entries)
+    materialize_from_node_map(&root_hash, &node_map)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
 }
 
 #[pyfunction]
 #[pyo3(text_signature = "(node_bytes, /)")]
 pub fn node_child_hashes(node_bytes: Vec<u8>) -> PyResult<Vec<Vec<u8>>> {
-    let node = PersistedInternalNode::<String, String>::decode_v1(&node_bytes).map_err(|e| {
-        pyo3::exceptions::PyRuntimeError::new_err(format!(
-            "Failed to decode persisted HAMT node: {e}"
-        ))
-    })?;
-    Ok(node
-        .child_hashes
-        .into_iter()
-        .map(|hash| hash.to_vec())
-        .collect())
+    let hashes =
+        node_child_hashes_raw(&node_bytes).map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    Ok(hashes.into_iter().map(|hash| hash.to_vec()).collect())
 }
 
 #[pyfunction]
@@ -283,6 +363,7 @@ pub fn unreachable_node_hashes(
 pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     let child_module = PyModule::new(py, "state_hamt")?;
     child_module.add_function(wrap_pyfunction!(room_structural_key, &child_module)?)?;
+    child_module.add_function(wrap_pyfunction!(room_tikv_prefix, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(build_root_handle, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(materialize_state_entries, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(node_child_hashes, &child_module)?)?;
@@ -313,6 +394,44 @@ mod tests {
         assert_eq!(key1, key2);
         assert_ne!(key1, other_key);
         assert_eq!(key1.len(), 32);
+    }
+
+    #[test]
+    fn room_tikv_prefix_is_deterministic_and_room_scoped() {
+        let server_secret = [7u8; 32];
+        let room_id = "!AbCdEfGhIjKlMnOpQr:test.example";
+        let other_room_id = "!ZyXwVuTsRqPoNmLkJi:test.example";
+
+        let prefix1 = room_tikv_prefix_raw(&server_secret, room_id, false).unwrap();
+        let prefix2 = room_tikv_prefix_raw(&server_secret, room_id, false).unwrap();
+        let other_prefix = room_tikv_prefix_raw(&server_secret, other_room_id, false).unwrap();
+
+        assert_eq!(prefix1, prefix2);
+        assert_ne!(prefix1, other_prefix);
+        assert_eq!(prefix1.len(), 16);
+    }
+
+    #[test]
+    fn room_tikv_prefix_decodes_msc4291_room_ids_without_rehashing() {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+
+        let server_secret = [7u8; 32];
+        // A 32-byte "create event reference hash", as msc4291 room IDs encode.
+        let create_event_hash = [42u8; 32];
+        let room_id = format!("!{}", URL_SAFE_NO_PAD.encode(create_event_hash));
+
+        let prefix = room_tikv_prefix_raw(&server_secret, &room_id, true).unwrap();
+
+        // The prefix should be exactly the leading 16 bytes of the decoded
+        // hash -- i.e. derived directly from the room ID, not re-hashed
+        // through the (server-secret-salted) v1-v11 path.
+        assert_eq!(prefix, create_event_hash[..16]);
+    }
+
+    #[test]
+    fn room_tikv_prefix_rejects_invalid_msc4291_room_id() {
+        let server_secret = [7u8; 32];
+        assert!(room_tikv_prefix_raw(&server_secret, "!not-valid-base64!!!", true).is_err());
     }
 
     #[test]
