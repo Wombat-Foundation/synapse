@@ -174,7 +174,11 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
 
         groups = missing_groups
 
-        logger.debug("Falling back to legacy state-group reads for %s", groups)
+        logger.warning(
+            "Falling back to legacy state-group reads for %s (state_groups_state is "
+            "not populated on this branch; expect empty results)",
+            groups,
+        )
 
         if isinstance(self.database_engine, PostgresEngine):
             # Temporarily disable sequential scans in this transaction. This is
@@ -332,6 +336,13 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
                     )
 
         # The results shouldn't be considered mutable.
+        if missing_groups:
+            logger.warning(
+                "[gg-state] legacy fallback for %s returned %s state entries "
+                "(state_groups_state is empty on this branch)",
+                missing_groups,
+                {group: len(results[group]) for group in missing_groups},
+            )
         return results
 
     def _state_hamt_root_exists_txn(
@@ -421,6 +432,11 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
             allow_none=True,
         )
         if root is None:
+            logger.warning(
+                "[gg-state] SQL HAMT materialization: no state_hamt_roots row for "
+                "state_group %s -> falls through to empty legacy fallback",
+                state_group,
+            )
             return None
         root_structural_hash = bytes(root)
 
@@ -432,6 +448,12 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
             allow_none=True,
         )
         if root_node is None:
+            logger.warning(
+                "[gg-state] SQL HAMT materialization: state_hamt_roots row exists for "
+                "state_group %s but root node %s is missing from state_hamt_nodes",
+                state_group,
+                root_structural_hash.hex(),
+            )
             raise RuntimeError(
                 "Missing HAMT root node for state group "
                 f"{state_group}: {root_structural_hash.hex()}"
@@ -476,10 +498,17 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
                             seen_hashes.add(child_hash)
                             to_fetch.add(child_hash)
 
-        return state_hamt.materialize_state_entries(
+        entries = state_hamt.materialize_state_entries(
             node_bytes_by_hash[root_structural_hash],
             list(node_bytes_by_hash.items()),
         )
+        logger.info(
+            "[gg-state] SQL HAMT materialization succeeded for state_group %s "
+            "(%d entries)",
+            state_group,
+            len(entries),
+        )
+        return entries
 
 
 class StateBackgroundUpdateStore(StateGroupBackgroundUpdateStore):

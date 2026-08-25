@@ -179,6 +179,13 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 results.update(res)
 
             if not state_filter.is_full():
+                empty_groups = [group for group in groups if not results[group]]
+                if empty_groups:
+                    logger.warning(
+                        "[gg-state] _get_state_groups_from_groups returning early on "
+                        "non-full filter WITHOUT retry; empty groups: %s",
+                        empty_groups,
+                    )
                 return results
 
             empty_groups = [group for group in groups if not results[group]]
