@@ -573,6 +573,20 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         We wait for this after the SQL transaction commits so callers don't
         observe a state group before its trie root exists in TiKV or the
         SQL transaction has committed.
+
+        Raises if the TiKV write fails. When TiKV is in use, it is the only
+        place this state_group's HAMT data lives (the SQL-backed
+        state_hamt_nodes/state_hamt_roots tables are only written when TiKV
+        is *not* configured -- see _persist_state_hamt_txn). A failure here
+        after the SQL transaction has already committed the state_group
+        itself means the state_group now exists but is unreadable: silently
+        swallowing that (as this used to do, just logging and returning)
+        left it permanently and invisibly broken -- exactly the dangling
+        state the state_hamt_roots -> state_hamt_nodes foreign key
+        (4a9a931bb2) exists to prevent on the read side. Propagating the
+        error at least surfaces the failure immediately to the caller
+        (typically event persistence), rather than the event appearing to
+        succeed while its state is silently unreadable forever after.
         """
 
         if not self.tikv_pd_endpoints:
@@ -609,6 +623,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 "Failed to persist HAMT state objects for state group %s",
                 state_group,
             )
+            raise
 
     @trace
     @tag_args
