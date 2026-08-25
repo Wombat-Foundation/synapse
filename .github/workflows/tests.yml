@@ -514,6 +514,63 @@ jobs:
           -exec echo "::endgroup::" \;
           || true
 
+  trial-tikv:
+    # Runs the trial suite with a real TiKV backend for HAMT state storage
+    # (see tikv_pd_endpoints in synapse/config/database.py), so tests that
+    # exercise it -- e.g. test_state_group_hamt_corruption_does_not_fallback_to_sql_tikv
+    # in tests/storage/test_state.py -- actually run against TiKV rather
+    # than being skipped. Sqlite only; TiKV is the variable under test here,
+    # not the SQL backend.
+    if: ${{ !cancelled() && !failure() && needs.changes.outputs.trial == 'true' }} # Allow previous steps to be skipped, but not fail
+    needs:
+      - linting-done
+      - changes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Start TiKV (PD & TiKV nodes)
+        run: .ci/scripts/start_tikv.sh
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+      - name: Set up uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          version: "0.5.31"
+          enable-cache: true
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          for i in 1 2 3 4 5; do
+            uv sync --all-extras --locked && break
+            echo "uv sync failed. Retrying ($i/5)..."
+            sleep 2
+            if [ $i -eq 5 ]; then exit 1; fi
+          done
+      - run: uv run trial --jobs=6 tests
+        env:
+          SYNAPSE_TEST_TIKV_PD_ENDPOINTS: 172.17.0.1:2379
+      - name: Dump logs
+        # Logs are most useful when the command fails, always include them.
+        if: ${{ always() }}
+        # Note: Dumps to workflow logs instead of using actions/upload-artifact
+        #       This keeps logs colocated with failing jobs
+        #       It also ignores find's exit code; this is a best effort affair
+        run: >-
+          find _trial_temp -name '*.log'
+          -exec echo "::group::{}" \;
+          -exec cat {} \;
+          -exec echo "::endgroup::" \;
+          || true
+
   trial-olddeps:
     # Note: sqlite only; no postgres
     if: ${{ !cancelled() && !failure() && needs.changes.outputs.trial == 'true' }} # Allow previous steps to be skipped, but not fail
@@ -858,6 +915,7 @@ jobs:
     if: ${{ always() }}
     needs:
       - trial
+      - trial-tikv
       - trial-olddeps
       - sytest
       - export-data
@@ -876,6 +934,7 @@ jobs:
           # The newsfile lint may be skipped on non PR builds.
           skippable: |
             trial
+            trial-tikv
             trial-olddeps
             sytest
             portdb

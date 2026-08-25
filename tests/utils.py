@@ -66,6 +66,16 @@ POSTGRES_BASE_DB = "_synapse_unit_tests_base_%s" % (os.getpid(),)
 # DB to disk and query it with the sqlite CLI.
 SQLITE_PERSIST_DB = os.environ.get("SYNAPSE_TEST_PERSIST_SQLITE_DB") is not None
 
+# A comma-separated list of TiKV PD endpoints (e.g. "127.0.0.1:2379"). When
+# set, tests run with a real TiKV backend for HAMT state storage instead of
+# the SQL-backed state_hamt_nodes/state_hamt_roots tables -- see
+# tikv_pd_endpoints in synapse/config/database.py.
+TIKV_PD_ENDPOINTS = [
+    endpoint.strip()
+    for endpoint in os.environ.get("SYNAPSE_TEST_TIKV_PD_ENDPOINTS", "").split(",")
+    if endpoint.strip()
+] or None
+
 # the dbname we will connect to in order to create the base database.
 POSTGRES_DBNAME_FOR_INITIAL_CREATE = "postgres"
 
@@ -220,6 +230,9 @@ def default_config(
         "caches": {"global_factor": 1, "sync_response_cache_duration": 0},
         "listeners": [{"port": 0, "type": "http"}],
     }
+
+    if TIKV_PD_ENDPOINTS:
+        config_dict["tikv"] = {"pd_endpoints": TIKV_PD_ENDPOINTS}
 
     if parse:
         config = HomeServerConfig()
