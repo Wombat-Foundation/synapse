@@ -191,8 +191,10 @@ class StateStoreTestCase(HomeserverTestCase):
             self.store.db_pool.simple_insert(
                 table="state_hamt_nodes",
                 values={
-                    "structural_hash": garbage_structural_hash,
-                    "node_bytes": b"not a valid persisted HAMT node",
+                    # Postgres rejects raw `bytes` (c.f. matrix-org/synapse#6186);
+                    # wrap in `bytearray`, matching the rest of this codebase.
+                    "structural_hash": bytearray(garbage_structural_hash),
+                    "node_bytes": bytearray(b"not a valid persisted HAMT node"),
                 },
                 desc="test_state_group_hamt_corruption.insert_garbage_node",
             )
@@ -201,7 +203,7 @@ class StateStoreTestCase(HomeserverTestCase):
             self.store.db_pool.simple_update_one(
                 table="state_hamt_roots",
                 keyvalues={"state_group": state_group},
-                updatevalues={"root_structural_hash": garbage_structural_hash},
+                updatevalues={"root_structural_hash": bytearray(garbage_structural_hash)},
                 desc="test_state_group_hamt_corruption.repoint_root",
             )
         )
