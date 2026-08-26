@@ -42,6 +42,31 @@ def materialize(
     return {(typ, state_key): event_id for typ, state_key, event_id in result}
 
 
+def selective_lookup(
+    fixture: StateFixture,
+    root_hash: bytes,
+    nodes: list[tuple[bytes, bytes]],
+    keys: tuple[tuple[str, str], ...],
+) -> tuple[dict[tuple[str, str], str], int]:
+    all_nodes = dict(nodes)
+    loaded = {root_hash: all_nodes[root_hash]}
+    while True:
+        result, missing = state_hamt.lookup_state_entries(
+            SERVER_SECRET,
+            fixture.room_id,
+            loaded[root_hash],
+            list(loaded.items()),
+            keys,
+        )
+        missing = [bytes(node_hash) for node_hash in missing if node_hash not in loaded]
+        if not missing:
+            return (
+                {(typ, state_key): event_id for typ, state_key, event_id in result},
+                len(loaded),
+            )
+        loaded.update((node_hash, all_nodes[node_hash]) for node_hash in missing)
+
+
 def time_case(
     name: str, iterations: int, operation: Callable[[], object]
 ) -> dict[str, object]:
@@ -85,6 +110,9 @@ def main() -> None:
         state = materialize(root_hash, nodes)
         return {key: state[key] for key in fixture.auth_keys}
 
+    def exact_auth_selective() -> tuple[dict[tuple[str, str], str], int]:
+        return selective_lookup(fixture, root_hash, nodes, fixture.auth_keys)
+
     def all_members() -> dict[tuple[str, str], str]:
         state = materialize(root_hash, nodes)
         return {
@@ -103,6 +131,7 @@ def main() -> None:
     results = [
         time_case("full_materialize", args.iterations, full),
         time_case("exact_auth_5_current_path", args.iterations, exact_auth),
+        time_case("exact_auth_5_selective", args.iterations, exact_auth_selective),
         time_case("all_members_current_path", args.iterations, all_members),
         time_case("rebuild_one_key_current_path", args.iterations, rebuild_one_key),
     ]
@@ -111,6 +140,7 @@ def main() -> None:
         "entries": len(fixture.state),
         "nodes": len(nodes),
         "node_bytes": sum(len(blob) for _, blob in nodes),
+        "selective_auth_nodes": exact_auth_selective()[1],
     }
     print(json.dumps({"metadata": metadata, "results": results}, indent=2))
 

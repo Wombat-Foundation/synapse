@@ -148,6 +148,41 @@ class StateStoreTestCase(HomeserverTestCase):
             {(EventTypes.Create, ""): e1.event_id, (EventTypes.Name, ""): e2.event_id},
         )
 
+    def test_exact_state_filter_uses_selective_hamt_lookup(self) -> None:
+        self.inject_state_event(self.room, self.u_alice, EventTypes.Create, "", {})
+        name = self.inject_state_event(
+            self.room, self.u_alice, EventTypes.Name, "", {"name": "test room"}
+        )
+        state_group = self.get_success(
+            self.store._get_state_group_for_event(name.event_id)
+        )
+        assert state_group is not None
+
+        materialize_method = (
+            "_materialize_state_hamt_from_tikv"
+            if self.state_datastore.tikv_pd_endpoints
+            else "_materialize_state_hamt_from_postgres_txn"
+        )
+        with patch.object(
+            self.state_datastore,
+            materialize_method,
+            side_effect=AssertionError("exact filters must not materialize full state"),
+        ):
+            result = self.get_success(
+                self.store.db_pool.runInteraction(
+                    "test_exact_state_filter_uses_selective_hamt_lookup",
+                    self.state_datastore._get_state_groups_from_groups_txn,
+                    [state_group],
+                    StateFilter.from_types(
+                        [(EventTypes.Name, ""), (EventTypes.Topic, "")]
+                    ),
+                )
+            )
+
+        self.assertDictEqual(
+            result[state_group], {(EventTypes.Name, ""): name.event_id}
+        )
+
     def test_empty_state_group_does_not_retry(self) -> None:
         state_group = self.get_success(
             self.state_datastore.store_state_group(

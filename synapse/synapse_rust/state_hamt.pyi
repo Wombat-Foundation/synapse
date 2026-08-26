@@ -15,6 +15,13 @@ def materialize_state_entries(
     root_node_bytes: bytes,
     nodes: Sequence[tuple[bytes, bytes]],
 ) -> list[tuple[str, str, str]]: ...
+def lookup_state_entries(
+    server_secret: bytes,
+    room_id: str,
+    root_node_bytes: bytes,
+    nodes: Sequence[tuple[bytes, bytes]],
+    keys: Sequence[tuple[str, str]],
+) -> tuple[list[tuple[str, str, str]], list[bytes]]: ...
 def node_child_hashes(node_bytes: bytes) -> list[bytes]: ...
 def reachability_audit(
     root_node_bytes: bytes,

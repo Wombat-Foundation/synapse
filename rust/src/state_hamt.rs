@@ -34,6 +34,7 @@ type PyPersistedNodeBytes = (Vec<u8>, Vec<u8>);
 type PyBuiltRoot = (PyRootHandleParts, Vec<PyPersistedNodeBytes>);
 type PyStateEntry = (String, String, String);
 type PyReachabilityAudit = (Vec<Vec<u8>>, Vec<Vec<u8>>);
+type PyStateLookup = (Vec<PyStateEntry>, Vec<Vec<u8>>);
 
 #[must_use]
 fn room_structural_key_raw(server_secret: &[u8; 32], room_id: &str) -> [u8; 32] {
@@ -186,6 +187,35 @@ pub(crate) fn materialize_from_node_map(
     Ok(entries)
 }
 
+pub(crate) fn lookup_from_node_map(
+    root_hash: &StructuralHash,
+    structural_key: &[u8],
+    keys: &[(String, String)],
+    node_map: &HashMap<StructuralHash, Arc<HamtNode<String, String>>>,
+) -> Result<(Vec<PyStateEntry>, HashSet<StructuralHash>), String> {
+    let root_node = node_map
+        .get(root_hash)
+        .cloned()
+        .ok_or_else(|| format!("Missing persisted HAMT root node: {:02x?}", root_hash))?;
+    let mut entries = Vec::new();
+    let mut missing = HashSet::new();
+
+    for (event_type, state_key) in keys {
+        let key = serde_json::to_string(&(event_type, state_key))
+            .map_err(|e| format!("Failed to encode HAMT state key: {e}"))?;
+        let mut resolver = |hash: &StructuralHash| {
+            node_map.get(hash).cloned().ok_or_else(|| {
+                missing.insert(*hash);
+            })
+        };
+        if let Ok(Some(event_id)) = root_node.search(structural_key, &key, &mut resolver) {
+            entries.push((event_type.clone(), state_key.clone(), event_id));
+        }
+    }
+
+    Ok((entries, missing))
+}
+
 fn structural_hash_from_bytes(hash_bytes: Vec<u8>) -> Result<StructuralHash, PyErr> {
     hash_bytes
         .try_into()
@@ -261,6 +291,37 @@ pub fn materialize_state_entries(
 
     materialize_from_node_map(&root_hash, &node_map)
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+}
+
+#[pyfunction]
+#[pyo3(text_signature = "(server_secret, room_id, root_node_bytes, nodes, keys, /)")]
+pub fn lookup_state_entries(
+    server_secret: Vec<u8>,
+    room_id: &str,
+    root_node_bytes: Vec<u8>,
+    nodes: Vec<(Vec<u8>, Vec<u8>)>,
+    keys: Vec<(String, String)>,
+) -> PyResult<PyStateLookup> {
+    let server_secret: [u8; 32] = server_secret
+        .try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("server_secret must be 32 bytes"))?;
+    let structural_key = room_structural_key_raw(&server_secret, room_id);
+    let root_node = decode_persisted_node(&root_node_bytes)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    let root_hash = root_node.structural_hash;
+    let mut node_map = HashMap::from([(root_hash, root_node)]);
+    for (hash_bytes, node_bytes) in nodes {
+        let hash = structural_hash_from_bytes(hash_bytes)?;
+        let node = decode_persisted_node(&node_bytes)
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        node_map.insert(hash, node);
+    }
+    let (entries, missing) = lookup_from_node_map(&root_hash, &structural_key, &keys, &node_map)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    Ok((
+        entries,
+        missing.into_iter().map(|hash| hash.to_vec()).collect(),
+    ))
 }
 
 #[pyfunction]
@@ -366,6 +427,7 @@ pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     child_module.add_function(wrap_pyfunction!(room_tikv_prefix, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(build_root_handle, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(materialize_state_entries, &child_module)?)?;
+    child_module.add_function(wrap_pyfunction!(lookup_state_entries, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(node_child_hashes, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(reachability_audit, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(unreachable_node_hashes, &child_module)?)?;
@@ -495,6 +557,68 @@ mod tests {
                 && event_id == "$1"));
         assert!(recovered.iter().any(|(_, _, event_id)| event_id == "$2"));
         assert_eq!(root_hash.len(), 16);
+    }
+
+    #[test]
+    fn lookup_state_entries_fetches_only_requested_paths() {
+        let server_secret = [11u8; 32];
+        let room_id = "!room:test.example";
+        let entries = (0..1_000)
+            .map(|i| {
+                (
+                    "m.room.member".to_owned(),
+                    format!("@user-{i}:test.example"),
+                    format!("${i}"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let ((root_hash, _), nodes) = build_root_handle_and_nodes(&server_secret, room_id, entries)
+            .expect("HAMT root should build");
+        let all_nodes = nodes
+            .into_iter()
+            .map(|(hash, bytes)| {
+                decode_persisted_node(&bytes)
+                    .map(|node| (hash, node))
+                    .expect("node should decode")
+            })
+            .collect::<HashMap<_, _>>();
+        let root_only = HashMap::from([(
+            root_hash,
+            all_nodes
+                .get(&root_hash)
+                .cloned()
+                .expect("root should exist"),
+        )]);
+        let keys = vec![
+            (
+                "m.room.member".to_owned(),
+                "@user-42:test.example".to_owned(),
+            ),
+            (
+                "m.room.member".to_owned(),
+                "@missing:test.example".to_owned(),
+            ),
+        ];
+        let structural_key = room_structural_key_raw(&server_secret, room_id);
+
+        let (partial, missing) =
+            lookup_from_node_map(&root_hash, &structural_key, &keys, &root_only)
+                .expect("partial lookup should identify missing nodes");
+        assert!(partial.is_empty());
+        assert!(!missing.is_empty());
+        assert!(missing.len() < all_nodes.len());
+
+        let (found, missing) = lookup_from_node_map(&root_hash, &structural_key, &keys, &all_nodes)
+            .expect("complete lookup should work");
+        assert!(missing.is_empty());
+        assert_eq!(
+            found,
+            vec![(
+                "m.room.member".to_owned(),
+                "@user-42:test.example".to_owned(),
+                "$42".to_owned()
+            )]
+        );
     }
 
     #[test]

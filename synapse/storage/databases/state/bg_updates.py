@@ -19,6 +19,7 @@
 #
 #
 
+import hashlib
 import logging
 from typing import (
     TYPE_CHECKING,
@@ -70,10 +71,15 @@ def put_state_hamt_objects(
     # Synapse instances sharing one cluster (each instance's state_groups
     # sequence restarts at 1). Keying by the per-instance id in shared TiKV
     # let two instances overwrite each other's root pointer.
-    pairs = [
-        (_state_hamt_node_tikv_key(room_prefix, structural_hash), node_bytes)
-        for structural_hash, node_bytes in nodes
-    ]
+    # A linear event batch contains many adjacent snapshots and therefore many
+    # repeated, unchanged node hashes. Collapse them before sending the batch to
+    # TiKV rather than overwriting the same immutable object repeatedly.
+    pairs = list(
+        {
+            _state_hamt_node_tikv_key(room_prefix, structural_hash): node_bytes
+            for structural_hash, node_bytes in nodes
+        }.items()
+    )
 
     if use_tikv:
         from synapse.synapse_rust import tikv_engine
@@ -373,13 +379,25 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         results: dict[int, MutableStateMap[str]] = {}
         missing_groups: list[int] = []
         use_tikv = bool(getattr(self, "tikv_pd_endpoints", None))
+        exact_keys = (
+            state_filter.concrete_types() if not state_filter.has_wildcards() else None
+        )
 
         for group in groups:
-            entries = (
-                self._materialize_state_hamt_from_tikv(txn, group)
-                if use_tikv
-                else self._materialize_state_hamt_from_postgres_txn(txn, group)
-            )
+            if exact_keys is not None:
+                entries = (
+                    self._lookup_state_hamt_from_tikv(txn, group, exact_keys)
+                    if use_tikv
+                    else self._lookup_state_hamt_from_postgres_txn(
+                        txn, group, exact_keys
+                    )
+                )
+            else:
+                entries = (
+                    self._materialize_state_hamt_from_tikv(txn, group)
+                    if use_tikv
+                    else self._materialize_state_hamt_from_postgres_txn(txn, group)
+                )
             if entries is None:
                 missing_groups.append(group)
                 continue
@@ -418,6 +436,67 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         root_structural_hash = bytes(row[1])
 
         return tikv_engine.materialize_state_hamt(room_prefix, root_structural_hash)
+
+    def _lookup_state_hamt_from_tikv(
+        self,
+        txn: LoggingTransaction,
+        state_group: int,
+        keys: list[tuple[str, str]],
+    ) -> list[tuple[str, str, str]] | None:
+        from synapse.synapse_rust import state_hamt, tikv_engine
+
+        row = self.db_pool.simple_select_one_txn(
+            txn,
+            table="state_hamt_roots",
+            keyvalues={"state_group": state_group},
+            retcols=("room_prefix", "root_structural_hash"),
+            allow_none=True,
+        )
+        if row is None:
+            return None
+        room_prefix, root_hash = bytes(row[0]), bytes(row[1])
+        room_id = self.db_pool.simple_select_one_onecol_txn(
+            txn,
+            table="state_groups",
+            keyvalues={"id": state_group},
+            retcol="room_id",
+            allow_none=False,
+        )
+
+        root_key = _state_hamt_node_tikv_key(room_prefix, root_hash)
+        root_bytes = tikv_engine.get(root_key)
+        if root_bytes is None:
+            raise RuntimeError(
+                f"Missing HAMT root node for state group {state_group}: {root_hash.hex()}"
+            )
+        nodes: dict[bytes, bytes] = {root_hash: bytes(root_bytes)}
+
+        while True:
+            entries, missing = state_hamt.lookup_state_entries(
+                hashlib.sha256(self.hs.config.key.macaroon_secret_key).digest(),
+                room_id,
+                root_bytes,
+                list(nodes.items()),
+                keys,
+            )
+            missing = [
+                bytes(node_hash) for node_hash in missing if node_hash not in nodes
+            ]
+            if not missing:
+                return entries
+            key_to_hash = {
+                _state_hamt_node_tikv_key(room_prefix, node_hash): node_hash
+                for node_hash in missing
+            }
+            rows = tikv_engine.batch_get(list(key_to_hash))
+            for node_key, node_bytes in rows:
+                nodes[key_to_hash[bytes(node_key)]] = bytes(node_bytes)
+            unresolved = set(missing) - nodes.keys()
+            if unresolved:
+                raise RuntimeError(
+                    "Missing HAMT child nodes for state group "
+                    f"{state_group}: {[node_hash.hex() for node_hash in unresolved]}"
+                )
 
     def _materialize_state_hamt_from_postgres_txn(
         self, txn: LoggingTransaction, state_group: int
@@ -509,6 +588,76 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
             len(entries),
         )
         return entries
+
+    def _lookup_state_hamt_from_postgres_txn(
+        self,
+        txn: LoggingTransaction,
+        state_group: int,
+        keys: list[tuple[str, str]],
+    ) -> list[tuple[str, str, str]] | None:
+        from synapse.synapse_rust import state_hamt
+
+        root = self.db_pool.simple_select_one_onecol_txn(
+            txn,
+            table="state_hamt_roots",
+            keyvalues={"state_group": state_group},
+            retcol="root_structural_hash",
+            allow_none=True,
+        )
+        if root is None:
+            return None
+        root_hash = bytes(root)
+        room_id = self.db_pool.simple_select_one_onecol_txn(
+            txn,
+            table="state_groups",
+            keyvalues={"id": state_group},
+            retcol="room_id",
+            allow_none=False,
+        )
+        root_node = self.db_pool.simple_select_one_onecol_txn(
+            txn,
+            table="state_hamt_nodes",
+            keyvalues={"structural_hash": bytearray(root_hash)},
+            retcol="node_bytes",
+            allow_none=True,
+        )
+        if root_node is None:
+            raise RuntimeError(
+                f"Missing HAMT root node for state group {state_group}: {root_hash.hex()}"
+            )
+        root_bytes = bytes(root_node)
+        nodes: dict[bytes, bytes] = {root_hash: root_bytes}
+
+        while True:
+            entries, missing = state_hamt.lookup_state_entries(
+                hashlib.sha256(self.hs.config.key.macaroon_secret_key).digest(),
+                room_id,
+                root_bytes,
+                list(nodes.items()),
+                keys,
+            )
+            missing = [
+                bytes(node_hash) for node_hash in missing if node_hash not in nodes
+            ]
+            if not missing:
+                return entries
+            rows = self.db_pool.simple_select_many_txn(
+                txn,
+                table="state_hamt_nodes",
+                column="structural_hash",
+                iterable=[bytearray(node_hash) for node_hash in missing],
+                keyvalues={},
+                retcols=("structural_hash", "node_bytes"),
+            )
+            nodes.update(
+                (bytes(node_hash), bytes(node_bytes)) for node_hash, node_bytes in rows
+            )
+            unresolved = set(missing) - nodes.keys()
+            if unresolved:
+                raise RuntimeError(
+                    "Missing HAMT child nodes for state group "
+                    f"{state_group}: {[node_hash.hex() for node_hash in unresolved]}"
+                )
 
 
 class StateBackgroundUpdateStore(StateGroupBackgroundUpdateStore):
