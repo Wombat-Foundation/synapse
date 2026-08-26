@@ -35,6 +35,9 @@ type PyBuiltRoot = (PyRootHandleParts, Vec<PyPersistedNodeBytes>);
 type PyTypedRootDirEntry = (String, Vec<u8>);
 type PyBuiltTypedRoot = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<PyPersistedNodeBytes>);
 type PyDecodedTypedRoot = (Vec<u8>, Vec<u8>, Vec<PyTypedRootDirEntry>);
+type PyBuiltRootWithLattice = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<PyPersistedNodeBytes>);
+type PyStateUpdate = (String, String, Option<String>);
+type PyAppliedStateUpdate = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<PyPersistedNodeBytes>);
 type PyStateEntry = (String, String, String);
 type PyReachabilityAudit = (Vec<Vec<u8>>, Vec<Vec<u8>>);
 type PyStateLookup = (Vec<PyStateEntry>, Vec<Vec<u8>>);
@@ -263,6 +266,22 @@ fn build_root_handle_and_nodes(
     room_id: &str,
     entries: Vec<(String, String, String)>,
 ) -> Result<BuiltRoot, String> {
+    let (root_handle, lattice, nodes) =
+        build_root_handle_nodes_and_lattice(server_secret, room_id, entries)?;
+    let _ = lattice;
+    Ok((root_handle_parts(&root_handle), nodes))
+}
+
+/// Same as [`build_root_handle_and_nodes`], but also returns the full,
+/// retained `LtHash` lattice — not just its collapsed `state_group_id`
+/// digest — so a caller can later apply incremental updates against this
+/// root via [`apply_flat_state_updates_impl`] without recomputing the
+/// lattice from scratch. See docs/development-gg/persistent-typed-hamt-architecture.md.
+fn build_root_handle_nodes_and_lattice(
+    server_secret: &[u8; 32],
+    room_id: &str,
+    entries: Vec<(String, String, String)>,
+) -> Result<(RootHandle, LtHash, Vec<PersistedNodeBytes>), String> {
     let structural_key = room_structural_key_raw(server_secret, room_id);
     let mut lattice = LtHash::default();
     for (event_type, state_key, event_id) in &entries {
@@ -285,7 +304,183 @@ fn build_root_handle_and_nodes(
     let mut nodes = Vec::new();
     collect_persisted_nodes(root_node, &mut seen, &mut nodes);
 
-    Ok((root_handle_parts(&root_handle), nodes))
+    Ok((root_handle, lattice, nodes))
+}
+
+/// Encodes an `LtHash` lattice as 2048 little-endian bytes (1024 u16 lanes).
+/// This is our own persistence format for the *retained* lattice — distinct
+/// from `LtHash::digest()`, which collapses it to the 32-byte
+/// `state_group_id`. The retained bytes are what a caller must pass back
+/// into [`apply_flat_state_updates_impl`] to apply further incremental
+/// updates; the digest alone cannot be "un-collapsed".
+fn lattice_to_bytes(lattice: &LtHash) -> Vec<u8> {
+    let mut out = Vec::with_capacity(2048);
+    for lane in lattice.0.iter() {
+        out.extend_from_slice(&lane.to_le_bytes());
+    }
+    out
+}
+
+fn lattice_from_bytes(bytes: &[u8]) -> Result<LtHash, String> {
+    if bytes.len() != 2048 {
+        return Err(format!(
+            "LtHash lattice must be exactly 2048 bytes, got {}",
+            bytes.len()
+        ));
+    }
+    let mut lanes = [0u16; 1024];
+    for (lane, chunk) in lanes.iter_mut().zip(bytes.chunks_exact(2)) {
+        *lane = u16::from_le_bytes([chunk[0], chunk[1]]);
+    }
+    Ok(LtHash(lanes))
+}
+
+/// Like [`collect_persisted_nodes`], but skips any subtree whose structural
+/// hash is already in `known` — i.e. already durable, from the caller's
+/// perspective — without even recursing into its children. Because node
+/// identity is content-addressed, an unchanged subtree keeps its old hash,
+/// so this is exactly the set of nodes an incremental update actually needs
+/// to write: the O(changed-path) node set, not the whole reachable tree.
+fn collect_new_persisted_nodes(
+    node: Arc<HamtNode<String, String>>,
+    known: &HashSet<StructuralHash>,
+    seen: &mut HashSet<StructuralHash>,
+    nodes: &mut Vec<PersistedNodeBytes>,
+) {
+    if known.contains(&node.structural_hash) {
+        return;
+    }
+    if !seen.insert(node.structural_hash) {
+        return;
+    }
+
+    for child in &node.children {
+        if let NodeRef::Resolved(child_node) = child {
+            collect_new_persisted_nodes(child_node.clone(), known, seen, nodes);
+        }
+    }
+
+    let persisted: PersistedInternalNode<String, String> = node.as_ref().into();
+    nodes.push((persisted.structural_hash, persisted.encode_v1()));
+}
+
+fn structural_hash_from_slice(hash_bytes: &[u8]) -> Result<StructuralHash, String> {
+    hash_bytes
+        .try_into()
+        .map_err(|_| "structural hash must be 16 bytes".to_owned())
+}
+
+/// The result of applying one or more single-key changes to an existing
+/// flat HAMT root, without rebuilding or even fully materializing the tree.
+///
+/// This is the "load-bearing piece" from
+/// docs/development-gg/persistent-typed-hamt-architecture.md: a normal state
+/// PDU changes one `(event_type, state_key)` entry, and applying it here
+/// costs O(log₃₂ S) path-copied nodes, not O(S) full-map reconstruction.
+struct AppliedStateUpdate {
+    structural_hash: StructuralHash,
+    state_group_id: StateGroupId,
+    lattice_bytes: Vec<u8>,
+    /// Only the newly created nodes — i.e. excluding anything already
+    /// present in the `nodes` the caller supplied. See
+    /// [`collect_new_persisted_nodes`].
+    new_nodes: Vec<PersistedNodeBytes>,
+}
+
+/// Applies a batch of single-key changes to an existing flat HAMT root.
+///
+/// `root_node_bytes` is the current root node. `nodes` are any additional
+/// already-persisted nodes the caller has fetched along the path(s) to the
+/// keys being changed — callers are expected to fetch only what's needed for
+/// the specific keys in `updates`, not the whole tree. If a resolver lookup
+/// misses (the caller didn't supply enough path nodes), this returns an
+/// error naming the missing hash so the caller can fetch it and retry;
+/// nothing is partially applied on error, since nothing is written to `root`
+/// until this function returns successfully.
+///
+/// `lattice_bytes` is the *retained* 2048-byte `LtHash` for the current
+/// root (see [`lattice_to_bytes`]) — not its collapsed `state_group_id` — so
+/// the new lattice can be derived homomorphically (subtract the displaced
+/// value, add the new one) rather than recomputed from a full entry scan.
+///
+/// `updates` is `(event_type, state_key, new_event_id)`, where
+/// `new_event_id: None` means "remove this key".
+fn apply_flat_state_updates_impl(
+    server_secret: &[u8; 32],
+    room_id: &str,
+    root_node_bytes: &[u8],
+    nodes: Vec<(Vec<u8>, Vec<u8>)>,
+    lattice_bytes: &[u8],
+    updates: Vec<(String, String, Option<String>)>,
+) -> Result<AppliedStateUpdate, String> {
+    let structural_key = room_structural_key_raw(server_secret, room_id);
+    let mut lattice = lattice_from_bytes(lattice_bytes)?;
+
+    let root_node = decode_persisted_node(root_node_bytes)?;
+    let mut node_map: HashMap<StructuralHash, Arc<HamtNode<String, String>>> = HashMap::new();
+    node_map.insert(root_node.structural_hash, root_node.clone());
+    for (hash_bytes, node_bytes) in nodes {
+        let hash = structural_hash_from_slice(&hash_bytes)?;
+        let node = decode_persisted_node(&node_bytes)?;
+        node_map.insert(hash, node);
+    }
+    // Everything supplied by the caller is, by definition, already durable —
+    // this is the boundary collect_new_persisted_nodes uses to know what NOT
+    // to re-persist.
+    let known: HashSet<StructuralHash> = node_map.keys().copied().collect();
+
+    let mut root = root_node;
+    for (event_type, state_key, new_event_id) in updates {
+        let key = serde_json::to_string(&(&event_type, &state_key))
+            .map_err(|e| format!("Failed to encode HAMT state key: {e}"))?;
+        let mut resolver = |hash: &StructuralHash| -> Result<Arc<HamtNode<String, String>>, StructuralHash> {
+            node_map.get(hash).cloned().ok_or(*hash)
+        };
+        let describe_mutate_err = |e: rezzy::hamt::HamtMutateError<StructuralHash>| match e {
+            rezzy::hamt::HamtMutateError::HashCollision { depth, bucket_size } => {
+                format!("hash collision at depth {depth} with bucket size {bucket_size}")
+            }
+            rezzy::hamt::HamtMutateError::Resolve(missing_hash) => {
+                format!("missing persisted HAMT node: {:02x?}", missing_hash)
+            }
+        };
+
+        match new_event_id {
+            Some(new_id) => {
+                let (new_root, old_value) =
+                    rezzy::hamt::insert(&root, &structural_key, key, new_id.clone(), &mut resolver)
+                        .map_err(describe_mutate_err)?;
+                match old_value {
+                    Some(old) => lattice.replace(&event_type, &state_key, &old, &new_id),
+                    None => lattice.insert(&event_type, &state_key, &new_id),
+                }
+                root = new_root;
+            }
+            None => {
+                let (new_root, old_value) =
+                    rezzy::hamt::remove(&root, &structural_key, key.as_str(), &mut resolver)
+                        .map_err(describe_mutate_err)?;
+                if let Some(old) = old_value {
+                    lattice.remove(&event_type, &state_key, &old);
+                }
+                root = new_root;
+            }
+        }
+        // Register the freshly minted root so later updates in this same
+        // batch can resolve through it without re-fetching anything.
+        node_map.insert(root.structural_hash, root.clone());
+    }
+
+    let mut seen = HashSet::new();
+    let mut new_nodes = Vec::new();
+    collect_new_persisted_nodes(root.clone(), &known, &mut seen, &mut new_nodes);
+
+    Ok(AppliedStateUpdate {
+        structural_hash: root.structural_hash,
+        state_group_id: rezzy::hamt::state_group_id_from_lthash(&lattice),
+        lattice_bytes: lattice_to_bytes(&lattice),
+        new_nodes,
+    })
 }
 
 pub(crate) fn decode_persisted_node(
@@ -414,6 +609,66 @@ pub fn build_root_handle(
     Ok((
         (root_handle_parts.0.to_vec(), root_handle_parts.1.to_vec()),
         nodes
+            .into_iter()
+            .map(|(hash, bytes)| (hash.to_vec(), bytes))
+            .collect(),
+    ))
+}
+
+#[pyfunction]
+#[pyo3(text_signature = "(server_secret, room_id, entries, /)")]
+pub fn build_root_handle_with_lattice(
+    server_secret: Vec<u8>,
+    room_id: &str,
+    entries: Vec<(String, String, String)>,
+) -> PyResult<PyBuiltRootWithLattice> {
+    let server_secret: [u8; 32] = server_secret
+        .try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("server_secret must be 32 bytes"))?;
+    let (root_handle, lattice, nodes) =
+        build_root_handle_nodes_and_lattice(&server_secret, room_id, entries)
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+
+    Ok((
+        root_handle.structural_hash.to_vec(),
+        root_handle.state_group_id.to_vec(),
+        lattice_to_bytes(&lattice),
+        nodes
+            .into_iter()
+            .map(|(hash, bytes)| (hash.to_vec(), bytes))
+            .collect(),
+    ))
+}
+
+#[pyfunction]
+#[pyo3(text_signature = "(server_secret, room_id, root_node_bytes, nodes, lattice_bytes, updates, /)")]
+pub fn apply_flat_state_updates(
+    server_secret: Vec<u8>,
+    room_id: &str,
+    root_node_bytes: Vec<u8>,
+    nodes: Vec<(Vec<u8>, Vec<u8>)>,
+    lattice_bytes: Vec<u8>,
+    updates: Vec<PyStateUpdate>,
+) -> PyResult<PyAppliedStateUpdate> {
+    let server_secret: [u8; 32] = server_secret
+        .try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("server_secret must be 32 bytes"))?;
+    let applied = apply_flat_state_updates_impl(
+        &server_secret,
+        room_id,
+        &root_node_bytes,
+        nodes,
+        &lattice_bytes,
+        updates,
+    )
+    .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+
+    Ok((
+        applied.structural_hash.to_vec(),
+        applied.state_group_id.to_vec(),
+        applied.lattice_bytes,
+        applied
+            .new_nodes
             .into_iter()
             .map(|(hash, bytes)| (hash.to_vec(), bytes))
             .collect(),
@@ -619,6 +874,11 @@ pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     child_module.add_function(wrap_pyfunction!(room_structural_key, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(room_tikv_prefix, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(build_root_handle, &child_module)?)?;
+    child_module.add_function(wrap_pyfunction!(
+        build_root_handle_with_lattice,
+        &child_module
+    )?)?;
+    child_module.add_function(wrap_pyfunction!(apply_flat_state_updates, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(build_typed_root, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(decode_typed_root, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(materialize_state_entries, &child_module)?)?;
@@ -638,6 +898,188 @@ pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apply_flat_state_updates_matches_full_rebuild_with_few_new_nodes() {
+        // The load-bearing property: a one-key change against an existing
+        // root must (a) converge on exactly what a full rebuild of the
+        // resulting state would produce, and (b) write only a small,
+        // depth-bounded number of new nodes — not O(S). This is what
+        // separates the incremental update path from the "materialize full
+        // state, rebuild everything" cost this whole design exists to avoid.
+        let server_secret = [21u8; 32];
+        let room_id = "!room:test.example";
+        let mut entries: Vec<(String, String, String)> = (0..300)
+            .map(|i| {
+                (
+                    "m.room.member".to_owned(),
+                    format!("@user-{i}:test.example"),
+                    format!("$original-{i}"),
+                )
+            })
+            .collect();
+        entries.push(("m.room.create".to_owned(), String::new(), "$create".to_owned()));
+
+        let (root_handle, lattice, nodes) =
+            build_root_handle_nodes_and_lattice(&server_secret, room_id, entries.clone())
+                .expect("initial root should build");
+        let total_node_count = nodes.len();
+        let root_bytes = nodes
+            .iter()
+            .find(|(hash, _)| *hash == root_handle.structural_hash)
+            .map(|(_, bytes)| bytes.clone())
+            .expect("root node must be among the built nodes");
+
+        // --- Replace one existing key ---
+        let changed_key = "@user-150:test.example".to_owned();
+        let applied = apply_flat_state_updates_impl(
+            &server_secret,
+            room_id,
+            &root_bytes,
+            nodes.iter().map(|(h, b)| (h.to_vec(), b.clone())).collect(),
+            &lattice_to_bytes(&lattice),
+            vec![(
+                "m.room.member".to_owned(),
+                changed_key.clone(),
+                Some("$replaced-150".to_owned()),
+            )],
+        )
+        .expect("incremental replace should apply");
+
+        assert!(
+            applied.new_nodes.len() < 10,
+            "expected a small, depth-bounded number of new nodes for one \
+             changed key out of {}, got {}",
+            entries.len(),
+            applied.new_nodes.len()
+        );
+        assert!(
+            applied.new_nodes.len() < total_node_count,
+            "incremental update must not rewrite the whole tree"
+        );
+
+        let mut rebuilt_entries = entries.clone();
+        let idx = rebuilt_entries
+            .iter()
+            .position(|(_, sk, _)| sk == &changed_key)
+            .expect("changed key must exist in original entries");
+        rebuilt_entries[idx].2 = "$replaced-150".to_owned();
+        let (rebuilt_parts, _) =
+            build_root_handle_and_nodes(&server_secret, room_id, rebuilt_entries.clone())
+                .expect("full rebuild should build");
+
+        assert_eq!(
+            applied.structural_hash, rebuilt_parts.0,
+            "incrementally updated root must have the same structural_hash as a full rebuild \
+             of the resulting state (canonical CHAMP shape)"
+        );
+        assert_eq!(
+            applied.state_group_id, rebuilt_parts.1,
+            "incrementally updated root must have the same cross-server state_group_id as a \
+             full rebuild of the resulting state"
+        );
+
+        // --- Insert a brand-new key on top of the already-updated root ---
+        let applied_root_bytes = applied
+            .new_nodes
+            .iter()
+            .find(|(hash, _)| *hash == applied.structural_hash)
+            .map(|(_, bytes)| bytes.clone())
+            .expect("updated root must be among the newly persisted nodes");
+        let mut combined_nodes = nodes;
+        combined_nodes.extend(applied.new_nodes.clone());
+
+        let applied2 = apply_flat_state_updates_impl(
+            &server_secret,
+            room_id,
+            &applied_root_bytes,
+            combined_nodes.iter().map(|(h, b)| (h.to_vec(), b.clone())).collect(),
+            &applied.lattice_bytes,
+            vec![(
+                "m.room.member".to_owned(),
+                "@user-999:test.example".to_owned(),
+                Some("$new-999".to_owned()),
+            )],
+        )
+        .expect("incremental insert should apply");
+
+        assert!(
+            applied2.new_nodes.len() < 10,
+            "expected a small, depth-bounded number of new nodes for one new key, got {}",
+            applied2.new_nodes.len()
+        );
+
+        let mut rebuilt_entries2 = rebuilt_entries;
+        rebuilt_entries2.push((
+            "m.room.member".to_owned(),
+            "@user-999:test.example".to_owned(),
+            "$new-999".to_owned(),
+        ));
+        let (rebuilt_parts2, _) =
+            build_root_handle_and_nodes(&server_secret, room_id, rebuilt_entries2)
+                .expect("second full rebuild should build");
+
+        assert_eq!(applied2.structural_hash, rebuilt_parts2.0);
+        assert_eq!(applied2.state_group_id, rebuilt_parts2.1);
+    }
+
+    #[test]
+    fn apply_flat_state_updates_remove_matches_full_rebuild() {
+        let server_secret = [22u8; 32];
+        let room_id = "!room:test.example";
+        let entries: Vec<(String, String, String)> = (0..50)
+            .map(|i| {
+                (
+                    "m.room.member".to_owned(),
+                    format!("@user-{i}:test.example"),
+                    format!("${i}"),
+                )
+            })
+            .collect();
+
+        let (root_handle, lattice, nodes) =
+            build_root_handle_nodes_and_lattice(&server_secret, room_id, entries.clone())
+                .expect("initial root should build");
+        let root_bytes = nodes
+            .iter()
+            .find(|(hash, _)| *hash == root_handle.structural_hash)
+            .map(|(_, bytes)| bytes.clone())
+            .expect("root node must be among the built nodes");
+
+        let removed_key = "@user-7:test.example".to_owned();
+        let applied = apply_flat_state_updates_impl(
+            &server_secret,
+            room_id,
+            &root_bytes,
+            nodes.iter().map(|(h, b)| (h.to_vec(), b.clone())).collect(),
+            &lattice_to_bytes(&lattice),
+            vec![("m.room.member".to_owned(), removed_key.clone(), None)],
+        )
+        .expect("incremental remove should apply");
+
+        let rebuilt_entries: Vec<_> = entries
+            .into_iter()
+            .filter(|(_, sk, _)| sk != &removed_key)
+            .collect();
+        let (rebuilt_parts, _) =
+            build_root_handle_and_nodes(&server_secret, room_id, rebuilt_entries)
+                .expect("full rebuild after removal should build");
+
+        assert_eq!(applied.structural_hash, rebuilt_parts.0);
+        assert_eq!(applied.state_group_id, rebuilt_parts.1);
+    }
+
+    #[test]
+    fn lattice_bytes_roundtrip() {
+        let mut lattice = LtHash::default();
+        lattice.insert("m.room.create", "", "$abc");
+        lattice.insert("m.room.member", "@a:test", "$def");
+
+        let bytes = lattice_to_bytes(&lattice);
+        assert_eq!(bytes.len(), 2048);
+        let decoded = lattice_from_bytes(&bytes).expect("lattice should decode");
+        assert_eq!(lattice.digest(), decoded.digest());
+    }
 
     #[test]
     fn structural_key_is_deterministic() {
