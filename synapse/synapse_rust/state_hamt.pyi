@@ -33,15 +33,25 @@ def apply_flat_state_updates(
     nodes: Sequence[tuple[bytes, bytes]],
     lattice_bytes: bytes,
     updates: Sequence[tuple[str, str, str | None]],
-) -> tuple[bytes, bytes, bytes, list[tuple[bytes, bytes]]]:
+) -> tuple[tuple[bytes, bytes, bytes, list[tuple[bytes, bytes]]] | None, list[bytes]]:
     """Applies single-key changes to an existing flat HAMT root via
     O(log S) path-copying, without materializing or rebuilding the whole
     state map.
 
-    Returns (structural_hash, state_group_id, lattice_bytes, new_nodes) for
-    the resulting root. `new_nodes` contains *only* the newly created nodes
-    (i.e. excluding anything already present in `nodes`) — this is the
-    O(changed-path) node set, not the whole reachable tree.
+    Returns `(applied, missing)`. On success, `applied` is
+    `(structural_hash, state_group_id, lattice_bytes, new_nodes)` for the
+    resulting root and `missing` is empty; `new_nodes` contains *only* the
+    newly created nodes (i.e. excluding anything already present in `nodes`)
+    — this is the O(changed-path) node set, not the whole reachable tree.
+
+    If a resolver lookup misses a hash not present in `nodes`, `applied` is
+    `None` and `missing` names the hash(es) to fetch — mirroring
+    `lookup_state_entries`'s retry contract: fetch `missing`, add it to
+    `nodes`, and call again; each retry surfaces one more tree level's worth
+    of missing hashes, same as the existing
+    `_lookup_state_hamt_from_postgres_txn` pattern. Nothing is partially
+    applied either way, since nothing is written to the working root until
+    the whole batch of `updates` resolves successfully.
 
     `nodes` must include the nodes along the path(s) to every key being
     changed, plus the root itself; the caller is expected to fetch only
@@ -52,9 +62,9 @@ def apply_flat_state_updates(
     `updates` is `(event_type, state_key, new_event_id)`, where
     `new_event_id=None` means "remove this key".
 
-    Raises if a resolver lookup misses a hash not present in `nodes` (the
-    error names the missing hash so the caller can fetch it and retry) or on
-    a HAMT hash collision. Nothing is partially applied on error.
+    Raises only on a genuine failure (bad encoding, corrupt bytes, or a HAMT
+    hash collision) — a missing node is reported via the return value, not
+    an exception.
     """
 
 def build_typed_root(

@@ -38,6 +38,7 @@ type PyDecodedTypedRoot = (Vec<u8>, Vec<u8>, Vec<PyTypedRootDirEntry>);
 type PyBuiltRootWithLattice = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<PyPersistedNodeBytes>);
 type PyStateUpdate = (String, String, Option<String>);
 type PyAppliedStateUpdate = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<PyPersistedNodeBytes>);
+type PyApplyOutcome = (Option<PyAppliedStateUpdate>, Vec<Vec<u8>>);
 type PyStateEntry = (String, String, String);
 type PyReachabilityAudit = (Vec<Vec<u8>>, Vec<Vec<u8>>);
 type PyStateLookup = (Vec<PyStateEntry>, Vec<Vec<u8>>);
@@ -387,16 +388,27 @@ struct AppliedStateUpdate {
     new_nodes: Vec<PersistedNodeBytes>,
 }
 
+/// Outcome of [`apply_flat_state_updates_impl`]: either the update fully
+/// applied, or it hit one or more resolver misses along the way — the
+/// caller didn't supply enough already-fetched path nodes. A miss is not an
+/// error: it mirrors the existing `lookup_state_entries` contract (see
+/// `lookup_from_node_map`) so callers can reuse the same "fetch the missing
+/// hashes, retry" loop already used for reads
+/// (`_lookup_state_hamt_from_postgres_txn` et al.), discovering one more
+/// tree level's worth of missing hashes per retry. Nothing is partially
+/// applied either way, since nothing is written to `root` until every
+/// update in the batch has resolved successfully.
+enum ApplyOutcome {
+    Applied(AppliedStateUpdate),
+    Missing(HashSet<StructuralHash>),
+}
+
 /// Applies a batch of single-key changes to an existing flat HAMT root.
 ///
 /// `root_node_bytes` is the current root node. `nodes` are any additional
 /// already-persisted nodes the caller has fetched along the path(s) to the
 /// keys being changed — callers are expected to fetch only what's needed for
-/// the specific keys in `updates`, not the whole tree. If a resolver lookup
-/// misses (the caller didn't supply enough path nodes), this returns an
-/// error naming the missing hash so the caller can fetch it and retry;
-/// nothing is partially applied on error, since nothing is written to `root`
-/// until this function returns successfully.
+/// the specific keys in `updates`, not the whole tree.
 ///
 /// `lattice_bytes` is the *retained* 2048-byte `LtHash` for the current
 /// root (see [`lattice_to_bytes`]) — not its collapsed `state_group_id` — so
@@ -412,7 +424,7 @@ fn apply_flat_state_updates_impl(
     nodes: Vec<(Vec<u8>, Vec<u8>)>,
     lattice_bytes: &[u8],
     updates: Vec<(String, String, Option<String>)>,
-) -> Result<AppliedStateUpdate, String> {
+) -> Result<ApplyOutcome, String> {
     let structural_key = room_structural_key_raw(server_secret, room_id);
     let mut lattice = lattice_from_bytes(lattice_bytes)?;
 
@@ -436,20 +448,32 @@ fn apply_flat_state_updates_impl(
         let mut resolver = |hash: &StructuralHash| -> Result<Arc<HamtNode<String, String>>, StructuralHash> {
             node_map.get(hash).cloned().ok_or(*hash)
         };
-        let describe_mutate_err = |e: rezzy::hamt::HamtMutateError<StructuralHash>| match e {
-            rezzy::hamt::HamtMutateError::HashCollision { depth, bucket_size } => {
-                format!("hash collision at depth {depth} with bucket size {bucket_size}")
-            }
-            rezzy::hamt::HamtMutateError::Resolve(missing_hash) => {
-                format!("missing persisted HAMT node: {:02x?}", missing_hash)
-            }
-        };
+
+        macro_rules! handle_mutate_err {
+            ($result:expr) => {
+                match $result {
+                    Ok(pair) => pair,
+                    Err(rezzy::hamt::HamtMutateError::Resolve(missing_hash)) => {
+                        return Ok(ApplyOutcome::Missing(HashSet::from([missing_hash])));
+                    }
+                    Err(rezzy::hamt::HamtMutateError::HashCollision { depth, bucket_size }) => {
+                        return Err(format!(
+                            "hash collision at depth {depth} with bucket size {bucket_size}"
+                        ));
+                    }
+                }
+            };
+        }
 
         match new_event_id {
             Some(new_id) => {
-                let (new_root, old_value) =
-                    rezzy::hamt::insert(&root, &structural_key, key, new_id.clone(), &mut resolver)
-                        .map_err(describe_mutate_err)?;
+                let (new_root, old_value) = handle_mutate_err!(rezzy::hamt::insert(
+                    &root,
+                    &structural_key,
+                    key,
+                    new_id.clone(),
+                    &mut resolver
+                ));
                 match old_value {
                     Some(old) => lattice.replace(&event_type, &state_key, &old, &new_id),
                     None => lattice.insert(&event_type, &state_key, &new_id),
@@ -457,9 +481,12 @@ fn apply_flat_state_updates_impl(
                 root = new_root;
             }
             None => {
-                let (new_root, old_value) =
-                    rezzy::hamt::remove(&root, &structural_key, key.as_str(), &mut resolver)
-                        .map_err(describe_mutate_err)?;
+                let (new_root, old_value) = handle_mutate_err!(rezzy::hamt::remove(
+                    &root,
+                    &structural_key,
+                    key.as_str(),
+                    &mut resolver
+                ));
                 if let Some(old) = old_value {
                     lattice.remove(&event_type, &state_key, &old);
                 }
@@ -475,12 +502,12 @@ fn apply_flat_state_updates_impl(
     let mut new_nodes = Vec::new();
     collect_new_persisted_nodes(root.clone(), &known, &mut seen, &mut new_nodes);
 
-    Ok(AppliedStateUpdate {
+    Ok(ApplyOutcome::Applied(AppliedStateUpdate {
         structural_hash: root.structural_hash,
         state_group_id: rezzy::hamt::state_group_id_from_lthash(&lattice),
         lattice_bytes: lattice_to_bytes(&lattice),
         new_nodes,
-    })
+    }))
 }
 
 pub(crate) fn decode_persisted_node(
@@ -649,11 +676,11 @@ pub fn apply_flat_state_updates(
     nodes: Vec<(Vec<u8>, Vec<u8>)>,
     lattice_bytes: Vec<u8>,
     updates: Vec<PyStateUpdate>,
-) -> PyResult<PyAppliedStateUpdate> {
+) -> PyResult<PyApplyOutcome> {
     let server_secret: [u8; 32] = server_secret
         .try_into()
         .map_err(|_| pyo3::exceptions::PyValueError::new_err("server_secret must be 32 bytes"))?;
-    let applied = apply_flat_state_updates_impl(
+    let outcome = apply_flat_state_updates_impl(
         &server_secret,
         room_id,
         &root_node_bytes,
@@ -663,16 +690,25 @@ pub fn apply_flat_state_updates(
     )
     .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
 
-    Ok((
-        applied.structural_hash.to_vec(),
-        applied.state_group_id.to_vec(),
-        applied.lattice_bytes,
-        applied
-            .new_nodes
-            .into_iter()
-            .map(|(hash, bytes)| (hash.to_vec(), bytes))
-            .collect(),
-    ))
+    Ok(match outcome {
+        ApplyOutcome::Applied(applied) => (
+            Some((
+                applied.structural_hash.to_vec(),
+                applied.state_group_id.to_vec(),
+                applied.lattice_bytes,
+                applied
+                    .new_nodes
+                    .into_iter()
+                    .map(|(hash, bytes)| (hash.to_vec(), bytes))
+                    .collect(),
+            )),
+            Vec::new(),
+        ),
+        ApplyOutcome::Missing(missing) => (
+            None,
+            missing.into_iter().map(|hash| hash.to_vec()).collect(),
+        ),
+    })
 }
 
 #[pyfunction]
@@ -899,6 +935,65 @@ pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
 mod tests {
     use super::*;
 
+    fn expect_applied(outcome: Result<ApplyOutcome, String>, msg: &str) -> AppliedStateUpdate {
+        match outcome.expect(msg) {
+            ApplyOutcome::Applied(applied) => applied,
+            ApplyOutcome::Missing(missing) => panic!("unexpected missing nodes: {missing:02x?}"),
+        }
+    }
+
+    #[test]
+    fn apply_flat_state_updates_reports_missing_node_for_retry() {
+        // A caller that supplied only the root (no path nodes) must get back
+        // a retryable Missing outcome, not a hard error -- this is what lets
+        // Python reuse the existing lookup_state_entries-style retry loop
+        // (see _lookup_state_hamt_from_postgres_txn) instead of a bespoke
+        // error-handling path.
+        let server_secret = [23u8; 32];
+        let room_id = "!room:test.example";
+        let entries: Vec<(String, String, String)> = (0..200)
+            .map(|i| {
+                (
+                    "m.room.member".to_owned(),
+                    format!("@user-{i}:test.example"),
+                    format!("${i}"),
+                )
+            })
+            .collect();
+        let (root_handle, lattice, nodes) =
+            build_root_handle_nodes_and_lattice(&server_secret, room_id, entries)
+                .expect("initial root should build");
+        let root_bytes = nodes
+            .iter()
+            .find(|(hash, _)| *hash == root_handle.structural_hash)
+            .map(|(_, bytes)| bytes.clone())
+            .expect("root node must be among the built nodes");
+
+        let outcome = apply_flat_state_updates_impl(
+            &server_secret,
+            room_id,
+            &root_bytes,
+            Vec::new(), // deliberately withhold every non-root node
+            &lattice_to_bytes(&lattice),
+            vec![(
+                "m.room.member".to_owned(),
+                "@user-150:test.example".to_owned(),
+                Some("$replaced".to_owned()),
+            )],
+        )
+        .expect("should not be a hard error");
+
+        match outcome {
+            ApplyOutcome::Missing(missing) => assert!(
+                !missing.is_empty(),
+                "expected at least one missing hash to retry with"
+            ),
+            ApplyOutcome::Applied(_) => {
+                panic!("expected a Missing outcome when path nodes were withheld")
+            }
+        }
+    }
+
     #[test]
     fn apply_flat_state_updates_matches_full_rebuild_with_few_new_nodes() {
         // The load-bearing property: a one-key change against an existing
@@ -932,19 +1027,21 @@ mod tests {
 
         // --- Replace one existing key ---
         let changed_key = "@user-150:test.example".to_owned();
-        let applied = apply_flat_state_updates_impl(
-            &server_secret,
-            room_id,
-            &root_bytes,
-            nodes.iter().map(|(h, b)| (h.to_vec(), b.clone())).collect(),
-            &lattice_to_bytes(&lattice),
-            vec![(
-                "m.room.member".to_owned(),
-                changed_key.clone(),
-                Some("$replaced-150".to_owned()),
-            )],
-        )
-        .expect("incremental replace should apply");
+        let applied = expect_applied(
+            apply_flat_state_updates_impl(
+                &server_secret,
+                room_id,
+                &root_bytes,
+                nodes.iter().map(|(h, b)| (h.to_vec(), b.clone())).collect(),
+                &lattice_to_bytes(&lattice),
+                vec![(
+                    "m.room.member".to_owned(),
+                    changed_key.clone(),
+                    Some("$replaced-150".to_owned()),
+                )],
+            ),
+            "incremental replace should apply",
+        );
 
         assert!(
             applied.new_nodes.len() < 10,
@@ -989,19 +1086,21 @@ mod tests {
         let mut combined_nodes = nodes;
         combined_nodes.extend(applied.new_nodes.clone());
 
-        let applied2 = apply_flat_state_updates_impl(
-            &server_secret,
-            room_id,
-            &applied_root_bytes,
-            combined_nodes.iter().map(|(h, b)| (h.to_vec(), b.clone())).collect(),
-            &applied.lattice_bytes,
-            vec![(
-                "m.room.member".to_owned(),
-                "@user-999:test.example".to_owned(),
-                Some("$new-999".to_owned()),
-            )],
-        )
-        .expect("incremental insert should apply");
+        let applied2 = expect_applied(
+            apply_flat_state_updates_impl(
+                &server_secret,
+                room_id,
+                &applied_root_bytes,
+                combined_nodes.iter().map(|(h, b)| (h.to_vec(), b.clone())).collect(),
+                &applied.lattice_bytes,
+                vec![(
+                    "m.room.member".to_owned(),
+                    "@user-999:test.example".to_owned(),
+                    Some("$new-999".to_owned()),
+                )],
+            ),
+            "incremental insert should apply",
+        );
 
         assert!(
             applied2.new_nodes.len() < 10,
@@ -1047,15 +1146,17 @@ mod tests {
             .expect("root node must be among the built nodes");
 
         let removed_key = "@user-7:test.example".to_owned();
-        let applied = apply_flat_state_updates_impl(
-            &server_secret,
-            room_id,
-            &root_bytes,
-            nodes.iter().map(|(h, b)| (h.to_vec(), b.clone())).collect(),
-            &lattice_to_bytes(&lattice),
-            vec![("m.room.member".to_owned(), removed_key.clone(), None)],
-        )
-        .expect("incremental remove should apply");
+        let applied = expect_applied(
+            apply_flat_state_updates_impl(
+                &server_secret,
+                room_id,
+                &root_bytes,
+                nodes.iter().map(|(h, b)| (h.to_vec(), b.clone())).collect(),
+                &lattice_to_bytes(&lattice),
+                vec![("m.room.member".to_owned(), removed_key.clone(), None)],
+            ),
+            "incremental remove should apply",
+        );
 
         let rebuilt_entries: Vec<_> = entries
             .into_iter()
