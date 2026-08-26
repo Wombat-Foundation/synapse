@@ -1,0 +1,107 @@
+###################
+Wed 26 Aug 2026
+###################
+
+This conversation snippet ends on "so is this even possible" with an answer already given — there's no new question in your message, just session context (memory/skills reminders).
+
+Given you're on guru/refactor/rust-hamt-state-res with state_hamt.rs modified, want me to check how the actual Rust implementation currently handles this — i.e., whether state_hamt.rs/state_hamt.pyi already separate point-lookup (HAMT) from range/bulk access, or whether that's the gap this branch is meant to address?
+
+✻ Crunched for 11s · done 5:54 PM
+
+❯ yeah commit what's staged and debate whether we should focus on SQL vs. tikv and how ./ stacks up to ../continuwuity
+
+  Ran 2 shell commands
+
+Good — this is exactly the "typed root" design from the debate: a compact sorted directory of event_type -> HAMT-subtree-hash, letting a bulk read of one event type skip unrelated types without materializing full snapshots. Let me commit it.
+
+  Committed 5f72de8918, searched for 3 patterns, listed 2 directories, ran 1 shell command
+
+This confirms it: continuwuity has a full state_hamt service already in production use — this isn't a hypothetical, it's a live sibling implementation. Let me check its store/lookup shape and whether it does typed/bulk reads or stays point-only.
+
+  Searched for 1 pattern, ran 2 shell commands
+
+Findings, then the actual debate.
+
+Continuwuity's state_hamt (already in prod use):
+- src/service/rooms/state_hamt/store.rs — a Store wrapping a RocksDB Map, keyed purely by StructuralHash, point-lookup only, with an in-process moka cache. No range use of the HAMT CF itself.
+- state_accessor/state.rs has state_full_hamt / load_full_state_hamt — full-state reads walk the entire HAMT tree. There's no typed/per-event-type subtree split — every full-state read (send_join, /state, sync full-state) pays the whole-tree walk, not just the changed subtree.
+- They already keep a separate shortstatekey_statekey / statekey_shortstatekey pair of ordered CFs to intern keys, but that's for compactness, not for bulk-by-type range scans.
+
+So the typed-root commit we just made (5f72de8918) is something continuwuity doesn't have yet — a real point where ./ can end up ahead: state_full_hamt for m.room.member only would traverse one subtree instead of the whole tree.
+
+SQL vs TiKV — my actual read:
+
+Don't split effort. Focus on TiKV, for reasons visible directly in the code, not abstractly:
+
+1. Continuwuity's design is the proof of concept, and it's built entirely on an embedded ordered byte-keyed KV (RocksDB), not SQL. The HAMT nodes, the shortkey interning, everything — all live as CFs with insert(key_bytes, value_bytes) and no joins. TiKV is that same shape (ordered byte KV) distributed. Porting the design there is nearly 1:1 — same key layout, same PersistedInternalNode encode/decode, same point-lookup CF semantics rust side already has via rezzy::hamt.
+2. SQL forces the split we hashed out earlier: HAMT nodes as an opaque point-lookup table, plus a separate relational/persistent-tree structure to get ordered range scans back, because Postgres/SQLite can't range-scan inside serialized blobs. That's a second engine to build and keep consistent — essentially reimplementing what TiKV/RocksDB gives for free via ordered CFs.
+3. This repo already carries the TiKV plumbing (fde71deb77 ci: add TiKV to trial test matrix, 4baf3e6e56 sytest-tikv networking) — the infra investment is already sunk in that direction, unlike a new SQL schema.
+4. SQL (Postgres) still matters as the default/compat backend most deployments run — but the honest scope there is "flat state_hamt_nodes point table + accept O(S) tax on full materialization, or don't put the HAMT experiment there at all yet." Don't try to make Postgres do ordered range scans over HAMT structure; that's the trap we mapped out above.
+
+Net: put the typed-root / bulk-query design energy into the TiKV backend where it's a natural fit and matches continuwuity's validated architecture; keep SQL as the plain point-lookup fallback rather than building a second persistent-tree engine on top of it.
+
+✻ Sautéed for 1m 9s · done 5:57 PM
+
+❯ btw if we have to bulk update every event id under a root, or theoretically partially or partition-based sieving or segment-based rebuilding, how would we accomplish that without tons of writes?
+
+Depends on what "bulk update every event id" actually means — the answer differs by a lot:
+
+Case 1: it's a remap, not a content change (e.g. renumbering short_event_ids, backfill compaction,
+
+Don't touch the tree at all. Add a level of indirection between the HAMT leaf and the thing you're bulk-updating:
+
+HAMT leaf:  state_key -> surrogate_id      (stable, never touched by the remap)
+side table: surrogate_id -> event_id       (small, mutable, this is what changes)
+If the HAMT stores event_id directly as the leaf value, remapping every event_id forces every leaf every ancestor hash to change — genuinely O(S) node writes, no way around it in a purecontent-addressed tree. Breaking that coupling means the bulk update becomes a swap of one small tap is itself a deterministic function you can apply at read time — e.g. a generation/epoch tag
+consulted during lookup instead of rewritten per row).
+
+Case 2: it's actually scoped to a subset (partition/segment/sieve)
+
+This is the general case the typed-root commit is a special case of. Generalize the directory pattern:
+
+root
+ └── directory: partition_key -> subtree_hash
+
+where partition_key is whatever you're segmenting on (event type, as landed; or a hash-prefix shardention bucket — anything with a stable, computable key). Rebuilding one segment:
+
+- touched partitions: rebuild their subtree (O(k log s) where k/s are just that partition's changed
+- untouched partitions: their subtree hash is copied into the new directory unchanged — zero writest partition is
+
+This is the actual lever against "tons of writes": partition granularity determines your write floo(many small subtrees) means a bulk op touching 3 of 200 partitions writes ~1.5% of the tree insteadof the whole thing. build_hamt's structural dedup already gives you this for free at the node level, but explicit partitioning gives it to you at the directory level too, so you don't even have to walk untouched subtrees to know
+they're unchanged.
+
+Case 3: sieving/filtering is read-only
+
+If "sieve" just means "select the subset matching a predicate," that's a traversal, not a write. Noalk it, and if the predicate aligns with a partition key (e.g. "all m.room.member") skip whole
+subtrees via the directory instead of visiting every leaf. Cost is O(matched + directory entries sk
+
+Case 4: genuinely every leaf's content changes with no valid indirection
+ Then O(S) writes is the actual lower bound — you can't produce S different values without S writes.mechanical: batch them into one WriteBatch/TiKV transaction so it's O(S) writes but O(1) round trips, and let build_hamt's dedup catch any leaves that happen to end up unchanged after the transform (if1 changed, this still saves real work).
+
+The practical takeaway: before reaching for case 4, check whether the "every event_id" requirement ion (case 1) or whether the update is actually partition-scoped and just needs a directory (case 2) — most things that sound like "bulk update everything" turn out to be one of those.
+
+
+
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+
+2026/08/21
+
+I reviewed the inline comments and nitpicks against current code, verified each, and applied minimal fixes for the still-valid, contained issues; the rest are genuine but were out of scope for a minimal fix (persisted-format changes, txn-boundary restructuring, or requiring a Rust rebuild).
+
+Fixed:
+1. bg_updates.py — module-level _IN_MEMORY_STATE_HAMT: moved to a per-store instance attribute (self._in_memory_state_hamt), created in StateGroupBackgroundUpdateStore.__init__, backed by LruCache (bounded at 100k entries, uses the existing Synapse cache infra with hs.hostname/hs.get_clock()). All four module functions (put_state_hamt_objects, delete_state_hamt_roots, _get_state_hamt_object(s)) now take the cache explicitly instead of touching module globals. Updated the one test that reached into the internal (tests/storage/test_state.py) to go through self.storage.state.stores.state._in_memory_state_hamt.
+2. store.py:529-535 blocking TiKV write on the reactor: put_state_hamt_objects was called via txn.call_after (synchronous on the reactor thread) with no error handling. Replaced with txn.async_call_after + a new _put_state_hamt_objects_off_thread that uses synapse.logging.context.defer_to_thread and logs failures via logger.exception.
+3. .pyi stub Iterable→Sequence: confirmed the Rust side takes Vec<T> (accepts any sequence, not arbitrary iterables), so Sequence is the more accurate/PyO3-matching annotation. Trivial, no rebuild needed.
+
+Skipped (with reasons):
+- Delta-only store_state_group persistence (store.py:546-560, 717-722): changes the persisted data format/call graph — architecture work, not a contained fix.
+- Orphaned hamt:node GC (store.py:865-884, now ~769): the finding itself offers "document intentional retention" as an alternative — took that branch. Nodes are content-addressed and may be shared by other live roots, so unconditional deletion would be unsafe; added a comment explaining this.
+- defer_to_thread wrap mentioned in the same finding: stale — no defer_to_thread call existed at that site in current code; the actual blocking-call bug was the call_after/put_state_hamt_objects one, which I fixed above under its own comment.
+- Batched cross-group HAMT reads inside the open txn (bg_updates.py:364-374/398-425): confirmed real (remote TiKV round-trips held the DB connection open) but fixing it means restructuring _get_state_groups_from_groups_txn's txn boundary — a call-graph change, deferred.
+- _state_hamt_secret domain separation, HAMT key encoding version marker (store.py:511-512, state_hamt.rs:75-86): both would change the structural-key derivation, silently invalidating already-persisted HAMT roots on this branch (which already moved storage to TiKV). Not a safe minimal fix without a migration plan.
+- room_structural_key unused export: confirmed unused from Python (grep across synapse/, tests/) but removing it requires a Rust rebuild — not worth bundling alone.
+- Metrics for HAMT hits/misses/errors: additive, not a bug fix; skipped to keep changes minimal.
+
+Validated: mypy clean on both edited files; trial tests.storage.test_state tests.storage.test_purge tests.storage.test_state_deletion — 26/26 pass, including the corruption test that directly exercises the new cache and the purge/delete paths that exercise the GC-retention comment.
