@@ -20,7 +20,7 @@ use hmac::{Hmac, Mac};
 use pyo3::prelude::*;
 use pyo3::types::{PyModule, PyModuleMethods};
 use rezzy::{
-    hamt::{HamtNode, NodeRef, PersistedInternalNode, RootHandle, StructuralHash},
+    hamt::{HamtNode, NodeRef, PersistedInternalNode, RootHandle, StateGroupId, StructuralHash},
     LtHash,
 };
 use sha2::Sha256;
@@ -32,6 +32,9 @@ type BuiltRoot = (RootHandleParts, Vec<PersistedNodeBytes>);
 type PyRootHandleParts = (Vec<u8>, Vec<u8>);
 type PyPersistedNodeBytes = (Vec<u8>, Vec<u8>);
 type PyBuiltRoot = (PyRootHandleParts, Vec<PyPersistedNodeBytes>);
+type PyTypedRootDirEntry = (String, Vec<u8>);
+type PyBuiltTypedRoot = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<PyPersistedNodeBytes>);
+type PyDecodedTypedRoot = (Vec<u8>, Vec<u8>, Vec<PyTypedRootDirEntry>);
 type PyStateEntry = (String, String, String);
 type PyReachabilityAudit = (Vec<Vec<u8>>, Vec<Vec<u8>>);
 type PyStateLookup = (Vec<PyStateEntry>, Vec<Vec<u8>>);
@@ -42,7 +45,16 @@ const TYPED_ROOT_FORMAT: u8 = 0x02;
 /// sorted by event type and points at one state_key -> event_id HAMT per type.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TypedRoot {
+    /// Local structural identity of the typed directory itself (server-keyed,
+    /// used only to skip an unchanged directory across reloads — never
+    /// compared across servers and never used as the state-group identity).
     pub structural_hash: StructuralHash,
+    /// The cross-server, deduplicable state-group identifier: the unkeyed
+    /// `LtHash` digest over the same logical `(event_type, state_key,
+    /// event_id)` entries the flat HAMT root would hash, exactly as
+    /// `RootHandle::state_group_id` does for the flat path. This MUST NOT be
+    /// derived from the keyed `structural_hash` of subtrees.
+    pub state_group_id: StateGroupId,
     pub directory: Vec<(String, StructuralHash)>,
 }
 
@@ -53,6 +65,7 @@ impl TypedRoot {
         let mut bytes = Vec::new();
         bytes.push(TYPED_ROOT_FORMAT);
         bytes.extend_from_slice(&self.structural_hash);
+        bytes.extend_from_slice(&self.state_group_id);
         bytes.extend_from_slice(&count.to_le_bytes());
         for (event_type, hash) in &self.directory {
             let event_type_bytes = event_type.as_bytes();
@@ -81,6 +94,7 @@ impl TypedRoot {
             return Err("not a typed HAMT root".to_owned());
         }
         let structural_hash: StructuralHash = take(&mut cursor, 16)?.try_into().unwrap();
+        let state_group_id: StateGroupId = take(&mut cursor, 32)?.try_into().unwrap();
         let count = u16::from_le_bytes(take(&mut cursor, 2)?.try_into().unwrap());
         let mut directory = Vec::with_capacity(count as usize);
         for _ in 0..count {
@@ -99,6 +113,7 @@ impl TypedRoot {
         }
         Ok(Self {
             structural_hash,
+            state_group_id,
             directory,
         })
     }
@@ -131,6 +146,17 @@ fn build_typed_root_and_nodes(
     let room_key = room_structural_key_raw(server_secret, room_id);
     let mut by_type: std::collections::BTreeMap<String, Vec<(String, String)>> =
         std::collections::BTreeMap::new();
+    // The state-group identity is the unkeyed LtHash lattice over every
+    // logical (event_type, state_key, event_id) entry — this must match the
+    // flat path bit-for-bit (see build_root_handle_and_nodes), since LtHash's
+    // addition is commutative/associative: summing it here, partitioned by
+    // type, is provably identical to summing it there over the flat list, as
+    // long as every entry contributes exactly once via the same `insert()`
+    // encoding. It is NOT derived from the (keyed) subtree structural hashes.
+    let mut lattice = LtHash::default();
+    for (event_type, state_key, event_id) in &entries {
+        lattice.insert(event_type, state_key, event_id);
+    }
     for (event_type, state_key, event_id) in entries {
         by_type
             .entry(event_type)
@@ -151,6 +177,7 @@ fn build_typed_root_and_nodes(
     }
     let root = TypedRoot {
         structural_hash: typed_root_hash(&room_key, &directory),
+        state_group_id: rezzy::hamt::state_group_id_from_lthash(&lattice),
         directory,
     };
     Ok((root, nodes))
@@ -237,7 +264,10 @@ fn build_root_handle_and_nodes(
     entries: Vec<(String, String, String)>,
 ) -> Result<BuiltRoot, String> {
     let structural_key = room_structural_key_raw(server_secret, room_id);
-    let lattice = LtHash::default();
+    let mut lattice = LtHash::default();
+    for (event_type, state_key, event_id) in &entries {
+        lattice.insert(event_type, state_key, event_id);
+    }
     let entries = entries
         .into_iter()
         .map(|(event_type, state_key, event_id)| {
@@ -396,7 +426,7 @@ pub fn build_typed_root(
     server_secret: Vec<u8>,
     room_id: &str,
     entries: Vec<(String, String, String)>,
-) -> PyResult<(Vec<u8>, Vec<u8>, Vec<PyPersistedNodeBytes>)> {
+) -> PyResult<PyBuiltTypedRoot> {
     let server_secret: [u8; 32] = server_secret
         .try_into()
         .map_err(|_| pyo3::exceptions::PyValueError::new_err("server_secret must be 32 bytes"))?;
@@ -407,6 +437,7 @@ pub fn build_typed_root(
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
     Ok((
         root.structural_hash.to_vec(),
+        root.state_group_id.to_vec(),
         root_bytes,
         nodes
             .into_iter()
@@ -417,11 +448,14 @@ pub fn build_typed_root(
 
 #[pyfunction]
 #[pyo3(text_signature = "(root_bytes, /)")]
-pub fn decode_typed_root(root_bytes: Vec<u8>) -> PyResult<(Vec<u8>, Vec<(String, Vec<u8>)>)> {
+pub fn decode_typed_root(
+    root_bytes: Vec<u8>,
+) -> PyResult<PyDecodedTypedRoot> {
     let root =
         TypedRoot::decode_v1(&root_bytes).map_err(pyo3::exceptions::PyValueError::new_err)?;
     Ok((
         root.structural_hash.to_vec(),
+        root.state_group_id.to_vec(),
         root.directory
             .into_iter()
             .map(|(event_type, hash)| (event_type, hash.to_vec()))
@@ -708,13 +742,53 @@ mod tests {
     }
 
     #[test]
+    fn typed_root_state_group_id_matches_flat_root() {
+        // Same logical state, built two ways, must converge on the same
+        // cross-server state-group identity. The keyed structural hashes are
+        // expected to differ (flat vs. typed layouts are different local
+        // structures); state_group_id must not.
+        let server_secret = [11u8; 32];
+        let room_id = "!room:test.example";
+        let entries = vec![
+            (
+                "m.room.member".to_owned(),
+                "@alice:test".to_owned(),
+                "$1".to_owned(),
+            ),
+            ("m.room.create".to_owned(), "".to_owned(), "$2".to_owned()),
+            (
+                "m.room.power_levels".to_owned(),
+                "".to_owned(),
+                "$3".to_owned(),
+            ),
+        ];
+
+        let (flat_parts, _) = build_root_handle_and_nodes(&server_secret, room_id, entries.clone())
+            .expect("flat root should build");
+        let (typed_root, _) = build_typed_root_and_nodes(&server_secret, room_id, entries)
+            .expect("typed root should build");
+
+        let (_, flat_state_group_id) = flat_parts;
+        assert_eq!(
+            typed_root.state_group_id, flat_state_group_id,
+            "typed root's state_group_id must equal the flat root's for identical state"
+        );
+        assert_ne!(
+            flat_state_group_id, [0u8; 32],
+            "state_group_id must not be the digest of the zero lattice"
+        );
+    }
+
+    #[test]
     fn typed_root_rejects_unsorted_directory() {
         let root = TypedRoot {
             structural_hash: [0u8; 16],
+            state_group_id: [0u8; 32],
             directory: vec![("z".to_owned(), [1u8; 16]), ("a".to_owned(), [2u8; 16])],
         };
         let mut encoded = vec![TYPED_ROOT_FORMAT];
         encoded.extend_from_slice(&root.structural_hash);
+        encoded.extend_from_slice(&root.state_group_id);
         encoded.extend_from_slice(&2u16.to_le_bytes());
         for (event_type, hash) in root.directory {
             encoded.extend_from_slice(&(event_type.len() as u16).to_le_bytes());

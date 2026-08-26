@@ -15,10 +15,20 @@ def build_typed_root(
     server_secret: bytes,
     room_id: str,
     entries: Sequence[tuple[str, str, str]],
-) -> tuple[bytes, bytes, list[tuple[bytes, bytes]]]: ...
+) -> tuple[bytes, bytes, bytes, list[tuple[bytes, bytes]]]:
+    """Returns (structural_hash, state_group_id, root_bytes, nodes).
+
+    `state_group_id` is the unkeyed, cross-server-comparable LtHash-derived
+    identity (matches `build_root_handle`'s second tuple element for the same
+    logical state); `structural_hash` is the typed directory's local, keyed
+    structural identity and must not be used as a state-group identifier.
+    """
+
 def decode_typed_root(
     root_bytes: bytes,
-) -> tuple[bytes, list[tuple[str, bytes]]]: ...
+) -> tuple[bytes, bytes, list[tuple[str, bytes]]]:
+    """Returns (structural_hash, state_group_id, directory)."""
+
 def materialize_state_entries(
     root_node_bytes: bytes,
     nodes: Sequence[tuple[bytes, bytes]],
