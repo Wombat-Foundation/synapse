@@ -697,7 +697,7 @@ jobs:
         ASYNCIO_REACTOR: ${{ (matrix.job.reactor == 'asyncio') || '' }}
         WORKERS: ${{ matrix.job.workers && 1 }}
         BLACKLIST: ${{ matrix.job.workers && 'synapse-blacklist-with-workers' }}
-        SYNAPSE_TIKV_PD_ENDPOINTS: ${{ matrix.job.tikv && '172.17.0.1:2379' }}
+        SYNAPSE_TIKV_PD_ENDPOINTS: ${{ matrix.job.tikv && 'pd:2379' }}
         TOP: ${{ github.workspace }}
 
     strategy:
