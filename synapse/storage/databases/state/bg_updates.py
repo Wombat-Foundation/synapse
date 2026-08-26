@@ -383,6 +383,12 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
             state_filter.concrete_types() if not state_filter.has_wildcards() else None
         )
 
+        bulk_results: dict[int, list[tuple[str, str, str]] | None] | None = None
+        if len(groups) > 1 and exact_keys is None and not use_tikv:
+            bulk_results = self._materialize_state_hamt_from_postgres_many_txn(
+                txn, groups
+            )
+
         for group in groups:
             if exact_keys is not None:
                 entries = (
@@ -394,7 +400,9 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
                 )
             else:
                 entries = (
-                    self._materialize_state_hamt_from_tikv(txn, group)
+                    bulk_results[group]
+                    if bulk_results is not None
+                    else self._materialize_state_hamt_from_tikv(txn, group)
                     if use_tikv
                     else self._materialize_state_hamt_from_postgres_txn(txn, group)
                 )
@@ -588,6 +596,66 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
             len(entries),
         )
         return entries
+
+    def _materialize_state_hamt_from_postgres_many_txn(
+        self, txn: LoggingTransaction, groups: list[int]
+    ) -> dict[int, list[tuple[str, str, str]] | None]:
+        """Materialize multiple SQL HAMT roots while sharing node fetches."""
+        from synapse.synapse_rust import state_hamt
+
+        root_rows = self.db_pool.simple_select_many_txn(
+            txn,
+            table="state_hamt_roots",
+            column="state_group",
+            iterable=groups,
+            keyvalues={},
+            retcols=("state_group", "root_structural_hash"),
+        )
+        roots = {int(group): bytes(root_hash) for group, root_hash in root_rows}
+        results: dict[int, list[tuple[str, str, str]] | None] = dict.fromkeys(
+            groups, None
+        )
+        if not roots:
+            return results
+
+        to_fetch = set(roots.values())
+        node_bytes_by_hash: dict[bytes, bytes] = {}
+        while to_fetch:
+            current_batch = list(to_fetch)
+            to_fetch = set()
+            for chunk in batch_iter(current_batch, 100):
+                rows = [
+                    (bytes(node_hash), bytes(node_bytes))
+                    for node_hash, node_bytes in self.db_pool.simple_select_many_txn(
+                        txn,
+                        table="state_hamt_nodes",
+                        column="structural_hash",
+                        iterable=[bytearray(node_hash) for node_hash in chunk],
+                        keyvalues={},
+                        retcols=("structural_hash", "node_bytes"),
+                    )
+                ]
+                missing = set(chunk) - {node_hash for node_hash, _ in rows}
+                if missing:
+                    raise RuntimeError(
+                        "Missing HAMT nodes for state groups "
+                        f"{groups}: {[node_hash.hex() for node_hash in missing]}"
+                    )
+                for node_hash, node_bytes in rows:
+                    if node_hash in node_bytes_by_hash:
+                        continue
+                    node_bytes_by_hash[node_hash] = node_bytes
+                    for child_hash in state_hamt.node_child_hashes(node_bytes):
+                        if child_hash not in node_bytes_by_hash:
+                            to_fetch.add(child_hash)
+
+        for group, root_hash in roots.items():
+            root_bytes = node_bytes_by_hash[root_hash]
+            results[group] = state_hamt.materialize_state_entries(
+                root_bytes,
+                list(node_bytes_by_hash.items()),
+            )
+        return results
 
     def _lookup_state_hamt_from_postgres_txn(
         self,
