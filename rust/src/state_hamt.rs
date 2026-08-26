@@ -36,6 +36,126 @@ type PyStateEntry = (String, String, String);
 type PyReachabilityAudit = (Vec<Vec<u8>>, Vec<Vec<u8>>);
 type PyStateLookup = (Vec<PyStateEntry>, Vec<Vec<u8>>);
 
+const TYPED_ROOT_FORMAT: u8 = 0x02;
+
+/// The compact directory at the root of a typed state HAMT. The directory is
+/// sorted by event type and points at one state_key -> event_id HAMT per type.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TypedRoot {
+    pub structural_hash: StructuralHash,
+    pub directory: Vec<(String, StructuralHash)>,
+}
+
+impl TypedRoot {
+    pub(crate) fn encode_v1(&self) -> Result<Vec<u8>, String> {
+        let count = u16::try_from(self.directory.len())
+            .map_err(|_| "typed root has too many event types".to_owned())?;
+        let mut bytes = Vec::new();
+        bytes.push(TYPED_ROOT_FORMAT);
+        bytes.extend_from_slice(&self.structural_hash);
+        bytes.extend_from_slice(&count.to_le_bytes());
+        for (event_type, hash) in &self.directory {
+            let event_type_bytes = event_type.as_bytes();
+            let len = u16::try_from(event_type_bytes.len())
+                .map_err(|_| "event type is too long for typed root".to_owned())?;
+            bytes.extend_from_slice(&len.to_le_bytes());
+            bytes.extend_from_slice(event_type_bytes);
+            bytes.extend_from_slice(hash);
+        }
+        Ok(bytes)
+    }
+
+    pub(crate) fn decode_v1(bytes: &[u8]) -> Result<Self, String> {
+        let mut cursor = 0usize;
+        let take = |cursor: &mut usize, count: usize| -> Result<&[u8], String> {
+            let end = cursor
+                .checked_add(count)
+                .ok_or_else(|| "typed root length overflow".to_owned())?;
+            let value = bytes
+                .get(*cursor..end)
+                .ok_or_else(|| "truncated typed root".to_owned())?;
+            *cursor = end;
+            Ok(value)
+        };
+        if take(&mut cursor, 1)?[0] != TYPED_ROOT_FORMAT {
+            return Err("not a typed HAMT root".to_owned());
+        }
+        let structural_hash: StructuralHash = take(&mut cursor, 16)?.try_into().unwrap();
+        let count = u16::from_le_bytes(take(&mut cursor, 2)?.try_into().unwrap());
+        let mut directory = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            let len = u16::from_le_bytes(take(&mut cursor, 2)?.try_into().unwrap());
+            let event_type = std::str::from_utf8(take(&mut cursor, len as usize)?)
+                .map_err(|_| "typed root event type is not UTF-8".to_owned())?
+                .to_owned();
+            let hash: StructuralHash = take(&mut cursor, 16)?.try_into().unwrap();
+            directory.push((event_type, hash));
+        }
+        if cursor != bytes.len() {
+            return Err("trailing bytes in typed root".to_owned());
+        }
+        if directory.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
+            return Err("typed root directory is not strictly sorted".to_owned());
+        }
+        Ok(Self {
+            structural_hash,
+            directory,
+        })
+    }
+}
+
+fn typed_subtree_key(room_key: &[u8; 32], event_type: &str) -> [u8; 32] {
+    let mut mac = <HmacSha256 as Mac>::new_from_slice(room_key).expect("HMAC key is valid");
+    mac.update(b"typed-state-subtree:");
+    mac.update(event_type.as_bytes());
+    mac.finalize().into_bytes().into()
+}
+
+fn typed_root_hash(room_key: &[u8; 32], directory: &[(String, StructuralHash)]) -> StructuralHash {
+    let mut mac = <HmacSha256 as Mac>::new_from_slice(room_key).expect("HMAC key is valid");
+    mac.update(b"typed-state-root:");
+    for (event_type, hash) in directory {
+        mac.update(&(event_type.len() as u32).to_le_bytes());
+        mac.update(event_type.as_bytes());
+        mac.update(hash);
+    }
+    let digest = mac.finalize().into_bytes();
+    digest[..16].try_into().unwrap()
+}
+
+fn build_typed_root_and_nodes(
+    server_secret: &[u8; 32],
+    room_id: &str,
+    entries: Vec<(String, String, String)>,
+) -> Result<(TypedRoot, Vec<PersistedNodeBytes>), String> {
+    let room_key = room_structural_key_raw(server_secret, room_id);
+    let mut by_type: std::collections::BTreeMap<String, Vec<(String, String)>> =
+        std::collections::BTreeMap::new();
+    for (event_type, state_key, event_id) in entries {
+        by_type
+            .entry(event_type)
+            .or_default()
+            .push((state_key, event_id));
+    }
+
+    let mut directory = Vec::with_capacity(by_type.len());
+    let mut nodes = Vec::new();
+    let mut seen = HashSet::new();
+    for (event_type, type_entries) in by_type {
+        let subtree_key = typed_subtree_key(&room_key, &event_type);
+        let subtree = rezzy::hamt::build_hamt(&subtree_key, type_entries)
+            .map_err(|e| format!("Failed to build typed HAMT subtree: {e:?}"))?;
+        let subtree_hash = subtree.structural_hash;
+        collect_persisted_nodes(subtree, &mut seen, &mut nodes);
+        directory.push((event_type, subtree_hash));
+    }
+    let root = TypedRoot {
+        structural_hash: typed_root_hash(&room_key, &directory),
+        directory,
+    };
+    Ok((root, nodes))
+}
+
 #[must_use]
 fn room_structural_key_raw(server_secret: &[u8; 32], room_id: &str) -> [u8; 32] {
     let mut mac =
@@ -271,6 +391,45 @@ pub fn build_root_handle(
 }
 
 #[pyfunction]
+#[pyo3(text_signature = "(server_secret, room_id, entries, /)")]
+pub fn build_typed_root(
+    server_secret: Vec<u8>,
+    room_id: &str,
+    entries: Vec<(String, String, String)>,
+) -> PyResult<(Vec<u8>, Vec<u8>, Vec<PyPersistedNodeBytes>)> {
+    let server_secret: [u8; 32] = server_secret
+        .try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("server_secret must be 32 bytes"))?;
+    let (root, nodes) = build_typed_root_and_nodes(&server_secret, room_id, entries)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    let root_bytes = root
+        .encode_v1()
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    Ok((
+        root.structural_hash.to_vec(),
+        root_bytes,
+        nodes
+            .into_iter()
+            .map(|(hash, bytes)| (hash.to_vec(), bytes))
+            .collect(),
+    ))
+}
+
+#[pyfunction]
+#[pyo3(text_signature = "(root_bytes, /)")]
+pub fn decode_typed_root(root_bytes: Vec<u8>) -> PyResult<(Vec<u8>, Vec<(String, Vec<u8>)>)> {
+    let root =
+        TypedRoot::decode_v1(&root_bytes).map_err(pyo3::exceptions::PyValueError::new_err)?;
+    Ok((
+        root.structural_hash.to_vec(),
+        root.directory
+            .into_iter()
+            .map(|(event_type, hash)| (event_type, hash.to_vec()))
+            .collect(),
+    ))
+}
+
+#[pyfunction]
 #[pyo3(text_signature = "(root_node_bytes, nodes, /)")]
 pub fn materialize_state_entries(
     root_node_bytes: Vec<u8>,
@@ -426,6 +585,8 @@ pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     child_module.add_function(wrap_pyfunction!(room_structural_key, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(room_tikv_prefix, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(build_root_handle, &child_module)?)?;
+    child_module.add_function(wrap_pyfunction!(build_typed_root, &child_module)?)?;
+    child_module.add_function(wrap_pyfunction!(decode_typed_root, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(materialize_state_entries, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(lookup_state_entries, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(node_child_hashes, &child_module)?)?;
@@ -520,6 +681,47 @@ mod tests {
         assert!(nodes
             .iter()
             .all(|(hash, bytes)| hash.len() == 16 && !bytes.is_empty()));
+    }
+
+    #[test]
+    fn typed_root_roundtrips_sorted_directory() {
+        let server_secret = [11u8; 32];
+        let entries = vec![
+            (
+                "m.room.member".to_owned(),
+                "@alice:test".to_owned(),
+                "$1".to_owned(),
+            ),
+            ("m.room.create".to_owned(), "".to_owned(), "$2".to_owned()),
+        ];
+        let (root, nodes) = build_typed_root_and_nodes(&server_secret, "!room:test", entries)
+            .expect("typed root should build");
+        assert_eq!(root.directory[0].0, "m.room.create");
+        assert_eq!(root.directory[1].0, "m.room.member");
+        assert!(!nodes.is_empty());
+        let encoded = root.encode_v1().expect("typed root should encode");
+        assert_eq!(
+            TypedRoot::decode_v1(&encoded).expect("typed root should decode"),
+            root
+        );
+        assert_eq!(encoded[0], TYPED_ROOT_FORMAT);
+    }
+
+    #[test]
+    fn typed_root_rejects_unsorted_directory() {
+        let root = TypedRoot {
+            structural_hash: [0u8; 16],
+            directory: vec![("z".to_owned(), [1u8; 16]), ("a".to_owned(), [2u8; 16])],
+        };
+        let mut encoded = vec![TYPED_ROOT_FORMAT];
+        encoded.extend_from_slice(&root.structural_hash);
+        encoded.extend_from_slice(&2u16.to_le_bytes());
+        for (event_type, hash) in root.directory {
+            encoded.extend_from_slice(&(event_type.len() as u16).to_le_bytes());
+            encoded.extend_from_slice(event_type.as_bytes());
+            encoded.extend_from_slice(&hash);
+        }
+        assert!(TypedRoot::decode_v1(&encoded).is_err());
     }
 
     #[test]

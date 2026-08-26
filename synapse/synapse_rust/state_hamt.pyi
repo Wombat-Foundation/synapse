@@ -11,6 +11,14 @@ def build_root_handle(
     room_id: str,
     entries: Sequence[tuple[str, str, str]],
 ) -> tuple[tuple[bytes, bytes], list[tuple[bytes, bytes]]]: ...
+def build_typed_root(
+    server_secret: bytes,
+    room_id: str,
+    entries: Sequence[tuple[str, str, str]],
+) -> tuple[bytes, bytes, list[tuple[bytes, bytes]]]: ...
+def decode_typed_root(
+    root_bytes: bytes,
+) -> tuple[bytes, list[tuple[str, bytes]]]: ...
 def materialize_state_entries(
     root_node_bytes: bytes,
     nodes: Sequence[tuple[bytes, bytes]],
