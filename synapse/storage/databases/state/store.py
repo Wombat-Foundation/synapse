@@ -55,6 +55,7 @@ from synapse.storage.types import Cursor
 from synapse.storage.util.sequence import build_sequence_generator
 from synapse.types import MutableStateMap, StateKey, StateMap
 from synapse.types.state import StateFilter
+from synapse.util.caches import intern_string
 from synapse.util.caches.dictionary_cache import DictionaryCache
 from synapse.util.cancellation import cancellable
 from synapse.util.duration import Duration
@@ -170,6 +171,11 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             Dict of state group to state map.
         """
         chunks = [groups[i : i + 100] for i in range(0, len(groups), 100)]
+
+        if self.tikv_pd_endpoints:
+            tikv_results = await self._read_tikv_state_groups(groups, state_filter)
+            if tikv_results is not None:
+                return tikv_results
 
         for attempt in range(10):
             results: dict[int, StateMap[str]] = {}
@@ -550,6 +556,42 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             state_group,
             room_id,
             updates,
+        )
+
+    def _read_tikv_state_groups_blocking(
+        self, groups: list[int], state_filter: StateFilter
+    ) -> dict[int, StateMap[str]] | None:
+        """Materialize complete TiKV-backed state without a SQL transaction."""
+        from synapse.synapse_rust import tikv_engine
+
+        results: dict[int, StateMap[str]] = {}
+        for group in groups:
+            root_value = tikv_engine.get(
+                _state_hamt_root_tikv_key(self.server_name, group)
+            )
+            if root_value is None:
+                return None
+            room_prefix, root_hash, _lattice = _decode_state_hamt_root(root_value)
+            entries = tikv_engine.materialize_state_hamt(room_prefix, root_hash)
+            if entries is None:
+                raise RuntimeError(
+                    f"Missing HAMT nodes while reading state group {group}"
+                )
+            state_map: StateMap[str] = {
+                (intern_string(typ), intern_string(state_key)): event_id
+                for typ, state_key, event_id in entries
+            }
+            results[group] = dict(state_filter.filter_state(state_map))
+        return results
+
+    async def _read_tikv_state_groups(
+        self, groups: list[int], state_filter: StateFilter
+    ) -> dict[int, StateMap[str]] | None:
+        return await defer_to_thread(
+            self.hs.get_reactor(),
+            self._read_tikv_state_groups_blocking,
+            groups,
+            state_filter,
         )
 
     def _persist_state_hamt_txn(
