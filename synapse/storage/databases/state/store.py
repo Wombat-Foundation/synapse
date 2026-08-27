@@ -170,13 +170,137 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         Returns:
             Dict of state group to state map.
         """
-        chunks = [groups[i : i + 100] for i in range(0, len(groups), 100)]
-
         if self.tikv_pd_endpoints:
-            tikv_results = await self._read_tikv_state_groups(groups, state_filter)
-            if tikv_results is not None:
-                return tikv_results
+            exact_keys = (
+                state_filter.concrete_types()
+                if not state_filter.has_wildcards()
+                else None
+            )
 
+            group_to_room: dict[int, str] = {}
+            if exact_keys is not None:
+                rows = await self.db_pool.simple_select_many_batch(
+                    table="state_groups",
+                    column="id",
+                    iterable=groups,
+                    retcols=("id", "room_id"),
+                    desc="_get_state_groups_from_groups.get_rooms",
+                )
+                group_to_room = dict(rows)
+
+            tikv_results: dict[int, StateMap[str]] = {}
+            remaining_groups = list(groups)
+
+            for attempt in range(10):
+
+                def fetch_from_tikv_blocking(
+                    target_groups: list[int],
+                ) -> tuple[dict[int, StateMap[str]], list[int]]:
+                    res: dict[int, StateMap[str]] = {}
+                    missing: list[int] = []
+                    for group in target_groups:
+                        if exact_keys is not None:
+                            room_id = group_to_room.get(group)
+                            if room_id is None:
+                                missing.append(group)
+                                continue
+                            entries = self._lookup_state_hamt_from_tikv_direct(
+                                group, room_id, exact_keys
+                            )
+                        else:
+                            entries = self._materialize_state_hamt_from_tikv_direct(
+                                group
+                            )
+
+                        if entries is None:
+                            missing.append(group)
+                            continue
+
+                        state_map: MutableStateMap[str] = {}
+                        for typ, state_key, event_id in entries:
+                            key = (intern_string(typ), intern_string(state_key))
+                            state_map[key] = event_id
+                        res[group] = dict(state_filter.filter_state(state_map))
+                    return res, missing
+
+                fetched, missing_groups = await defer_to_thread(
+                    self.hs.get_reactor(),
+                    fetch_from_tikv_blocking,
+                    remaining_groups,
+                )
+                tikv_results.update(fetched)
+
+                if not missing_groups:
+                    return tikv_results
+
+                existing_rows = await self.db_pool.simple_select_many_batch(
+                    table="state_groups",
+                    column="id",
+                    iterable=missing_groups,
+                    retcols=("id",),
+                    desc="_get_state_groups_from_groups.check_state_groups",
+                )
+                existing_groups = {group for (group,) in existing_rows}
+                retry_groups = [
+                    group for group in missing_groups if group in existing_groups
+                ]
+
+                if not retry_groups:
+                    for group in missing_groups:
+                        tikv_results[group] = {}
+                    return tikv_results
+
+                if attempt < 9:
+                    logger.debug(
+                        "State group HAMT root not ready yet in TiKV for %s; retrying (%d/10)",
+                        retry_groups,
+                        attempt + 1,
+                    )
+                    remaining_groups = retry_groups
+                    await self.hs.get_clock().sleep(
+                        Duration(milliseconds=50 * (attempt + 1))
+                    )
+                else:
+                    for chunk in [
+                        retry_groups[i : i + 100]
+                        for i in range(0, len(retry_groups), 100)
+                    ]:
+                        sql_res = await self.db_pool.runInteraction(
+                            "_get_state_groups_from_groups.fallback_sql",
+                            self._get_state_groups_from_groups_txn,
+                            chunk,
+                            state_filter,
+                            use_tikv=False,
+                        )
+                        tikv_results.update(sql_res)
+
+                    def verify_roots_txn(txn: LoggingTransaction) -> list[int]:
+                        unresolved = []
+                        for group in retry_groups:
+                            if not tikv_results.get(group):
+                                if not self._state_hamt_root_exists_txn(
+                                    txn, group, use_tikv=False
+                                ):
+                                    unresolved.append(group)
+                        return unresolved
+
+                    corrupt_groups = await self.db_pool.runInteraction(
+                        "_get_state_groups_from_groups.verify_roots",
+                        verify_roots_txn,
+                    )
+                    if corrupt_groups:
+                        raise RuntimeError(
+                            f"State groups {corrupt_groups} exist in database but have no TiKV root or legacy SQL state"
+                        )
+
+                    for group in missing_groups:
+                        if group not in tikv_results:
+                            tikv_results[group] = {}
+                    return tikv_results
+
+            return tikv_results
+
+        chunks = [groups[i : i + 100] for i in range(0, len(groups), 100)]
         for attempt in range(10):
             results: dict[int, StateMap[str]] = {}
             for chunk in chunks:
@@ -556,42 +680,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             state_group,
             room_id,
             updates,
-        )
-
-    def _read_tikv_state_groups_blocking(
-        self, groups: list[int], state_filter: StateFilter
-    ) -> dict[int, StateMap[str]] | None:
-        """Materialize complete TiKV-backed state without a SQL transaction."""
-        from synapse.synapse_rust import tikv_engine
-
-        results: dict[int, StateMap[str]] = {}
-        for group in groups:
-            root_value = tikv_engine.get(
-                _state_hamt_root_tikv_key(self.server_name, group)
-            )
-            if root_value is None:
-                return None
-            room_prefix, root_hash, _lattice = _decode_state_hamt_root(root_value)
-            entries = tikv_engine.materialize_state_hamt(room_prefix, root_hash)
-            if entries is None:
-                raise RuntimeError(
-                    f"Missing HAMT nodes while reading state group {group}"
-                )
-            state_map: StateMap[str] = {
-                (intern_string(typ), intern_string(state_key)): event_id
-                for typ, state_key, event_id in entries
-            }
-            results[group] = dict(state_filter.filter_state(state_map))
-        return results
-
-    async def _read_tikv_state_groups(
-        self, groups: list[int], state_filter: StateFilter
-    ) -> dict[int, StateMap[str]] | None:
-        return await defer_to_thread(
-            self.hs.get_reactor(),
-            self._read_tikv_state_groups_blocking,
-            groups,
-            state_filter,
         )
 
     def _persist_state_hamt_txn(

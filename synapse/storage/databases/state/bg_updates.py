@@ -197,6 +197,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         txn: LoggingTransaction,
         groups: list[int],
         state_filter: StateFilter | None = None,
+        use_tikv: bool | None = None,
     ) -> Mapping[int, StateMap[str]]:
         """
         Given a number of state groups, fetch the latest state for each group.
@@ -205,6 +206,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
             txn: The transaction object.
             groups: The given state groups that you want to fetch the latest state for.
             state_filter: The state filter to apply the state we fetch state from the database.
+            use_tikv: Whether to query TiKV (defaults to self.tikv_pd_endpoints). Set False for pure SQL fallback.
 
         Returns:
             Map from state_group to a StateMap at that point.
@@ -216,7 +218,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         results: dict[int, MutableStateMap[str]] = {group: {} for group in groups}
 
         hamt_results, missing_groups = self._get_state_groups_from_hamt_txn(
-            txn, groups, state_filter
+            txn, groups, state_filter, use_tikv=use_tikv
         )
         results.update(hamt_results)
 
@@ -397,15 +399,14 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         return results
 
     def _state_hamt_root_exists_txn(
-        self, txn: LoggingTransaction, state_group: int, use_tikv: bool
+        self,
+        txn: LoggingTransaction,
+        state_group: int,
+        use_tikv: bool | None = None,
     ) -> bool:
-        """Cheap existence check for a state_group's HAMT root pointer, without
-        fetching or decoding it. Used while waiting for a state group written
-        elsewhere (e.g. on another worker) to become visible.
-
-        The root pointer always lives in per-instance SQL `state_hamt_roots`
-        (in both SQL and TiKV mode), so this is a plain SQL existence check.
-        """
+        """Check whether a state group HAMT root exists."""
+        if use_tikv is None:
+            use_tikv = bool(getattr(self, "tikv_pd_endpoints", None))
         if use_tikv:
             from synapse.synapse_rust import tikv_engine
 
@@ -430,10 +431,12 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         txn: LoggingTransaction,
         groups: list[int],
         state_filter: StateFilter,
+        use_tikv: bool | None = None,
     ) -> tuple[dict[int, MutableStateMap[str]], list[int]]:
         results: dict[int, MutableStateMap[str]] = {}
         missing_groups: list[int] = []
-        use_tikv = bool(getattr(self, "tikv_pd_endpoints", None))
+        if use_tikv is None:
+            use_tikv = bool(getattr(self, "tikv_pd_endpoints", None))
         exact_keys = (
             state_filter.concrete_types() if not state_filter.has_wildcards() else None
         )
@@ -474,15 +477,14 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
 
         return results, missing_groups
 
-    def _materialize_state_hamt_from_tikv(
-        self, txn: LoggingTransaction, state_group: int
+    def _materialize_state_hamt_from_tikv_direct(
+        self, state_group: int
     ) -> list[tuple[str, str, str]] | None:
-        """Materialize a state_group's HAMT against TiKV.
+        """Materialize a state_group's HAMT against TiKV directly without a SQL transaction.
 
         The root pointer (`state_group -> room_prefix + root_hash`) is read
-        from per-instance SQL `state_hamt_roots`, then the content-addressed
-        node tree is BFS-fetched, decoded, and walked entirely in Rust (see
-        `materialize_state_hamt` in `rust/src/tikv_engine.rs`).
+        from TiKV, then the content-addressed node tree is BFS-fetched, decoded,
+        and walked entirely in Rust (see `materialize_state_hamt` in `rust/src/tikv_engine.rs`).
         """
         from synapse.synapse_rust import tikv_engine
 
@@ -496,12 +498,18 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         )
         return tikv_engine.materialize_state_hamt(room_prefix, root_structural_hash)
 
-    def _lookup_state_hamt_from_tikv(
+    def _materialize_state_hamt_from_tikv(
+        self, txn: LoggingTransaction, state_group: int
+    ) -> list[tuple[str, str, str]] | None:
+        return self._materialize_state_hamt_from_tikv_direct(state_group)
+
+    def _lookup_state_hamt_from_tikv_direct(
         self,
-        txn: LoggingTransaction,
         state_group: int,
+        room_id: str,
         keys: list[tuple[str, str]],
     ) -> list[tuple[str, str, str]] | None:
+        """Selective HAMT key lookup directly against TiKV without a SQL transaction."""
         from synapse.synapse_rust import state_hamt, tikv_engine
 
         root_value = tikv_engine.get(
@@ -510,13 +518,6 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         if root_value is None:
             return None
         room_prefix, root_hash, _lattice = _decode_state_hamt_root(root_value)
-        room_id = self.db_pool.simple_select_one_onecol_txn(
-            txn,
-            table="state_groups",
-            keyvalues={"id": state_group},
-            retcol="room_id",
-            allow_none=False,
-        )
 
         root_key = _state_hamt_node_tikv_key(room_prefix, root_hash)
         root_bytes = tikv_engine.get(root_key)
@@ -552,6 +553,21 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
                     "Missing HAMT child nodes for state group "
                     f"{state_group}: {[node_hash.hex() for node_hash in unresolved]}"
                 )
+
+    def _lookup_state_hamt_from_tikv(
+        self,
+        txn: LoggingTransaction,
+        state_group: int,
+        keys: list[tuple[str, str]],
+    ) -> list[tuple[str, str, str]] | None:
+        room_id = self.db_pool.simple_select_one_onecol_txn(
+            txn,
+            table="state_groups",
+            keyvalues={"id": state_group},
+            retcol="room_id",
+            allow_none=False,
+        )
+        return self._lookup_state_hamt_from_tikv_direct(state_group, room_id, keys)
 
     def _materialize_state_hamt_from_postgres_txn(
         self, txn: LoggingTransaction, state_group: int

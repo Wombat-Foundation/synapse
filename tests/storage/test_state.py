@@ -334,6 +334,330 @@ class StateStoreTestCase(HomeserverTestCase):
             str(failure.value),
         )
 
+    def test_prefetch_tikv_hamt_blocking_missing_child_raises(self) -> None:
+        """Verify that _prefetch_tikv_hamt_blocking raises RuntimeError on missing child nodes."""
+        from unittest.mock import patch
+
+        from synapse.storage.databases.state.bg_updates import (
+            _encode_state_hamt_root,
+            _state_hamt_node_tikv_key,
+            _state_hamt_root_tikv_key,
+        )
+        from synapse.synapse_rust import state_hamt
+
+        room_prefix = b"01234567"
+        room_id = "!test:test"
+        server_secret = self.state_datastore._state_hamt_secret()
+        # Build a multi-entry state HAMT with enough events to force child nodes
+        entries = [
+            (f"org.matrix.test.{i}", f"key_{i}", f"$event_{i}:test") for i in range(100)
+        ]
+        root_hash, _sg, lattice, nodes = state_hamt.build_root_handle_with_lattice(
+            server_secret, room_id, entries
+        )
+        nodes_dict = dict(nodes)
+        self.assertGreater(len(nodes_dict), 1, "Expected multi-node HAMT tree")
+        root_bytes = nodes_dict[root_hash]
+        encoded_root = _encode_state_hamt_root(room_prefix, root_hash, lattice)
+
+        def mock_get(key: bytes) -> bytes | None:
+            if key == _state_hamt_root_tikv_key(self.hs.hostname, 1234):
+                return encoded_root
+            return None
+
+        # Return ONLY the root node, simulating missing child nodes in TiKV
+        def mock_batch_get(keys: list[bytes]) -> list[tuple[bytes, bytes]]:
+            res = []
+            for k in keys:
+                if k == _state_hamt_node_tikv_key(room_prefix, root_hash):
+                    res.append((k, root_bytes))
+            return res
+
+        with patch("synapse.synapse_rust.tikv_engine.get", side_effect=mock_get):
+            with patch(
+                "synapse.synapse_rust.tikv_engine.batch_get", side_effect=mock_batch_get
+            ):
+                with self.assertRaises(RuntimeError) as ctx:
+                    self.state_datastore._prefetch_tikv_hamt_blocking(
+                        room_prefix,
+                        1234,
+                        room_id,
+                        [("org.matrix.test.0", "key_0", "$new_event_0:test")],
+                    )
+                self.assertIn(
+                    "Missing HAMT nodes while prefetching", str(ctx.exception)
+                )
+
+    def test_direct_tikv_reads_selective_and_full_mocked(self) -> None:
+        """Verify direct TiKV read helpers for selective key lookups and full materialization."""
+        from unittest.mock import patch
+
+        from synapse.storage.databases.state.bg_updates import (
+            _encode_state_hamt_root,
+            _state_hamt_node_tikv_key,
+            _state_hamt_root_tikv_key,
+        )
+        from synapse.synapse_rust import state_hamt
+
+        room_prefix = b"01234567"
+        room_id = "!test:test"
+        server_secret = self.state_datastore._state_hamt_secret()
+        entries = [
+            (EventTypes.Create, "", "$create:test"),
+            (EventTypes.Name, "", "$name:test"),
+        ]
+        root_hash, _sg, lattice, nodes = state_hamt.build_root_handle_with_lattice(
+            server_secret, room_id, entries
+        )
+        nodes_dict = dict(nodes)
+        root_bytes = nodes_dict[root_hash]
+        encoded_root = _encode_state_hamt_root(room_prefix, root_hash, lattice)
+
+        def mock_get(key: bytes) -> bytes | None:
+            if key == _state_hamt_root_tikv_key(self.hs.hostname, 1234):
+                return encoded_root
+            if key == _state_hamt_node_tikv_key(room_prefix, root_hash):
+                return root_bytes
+            return None
+
+        def mock_batch_get(keys: list[bytes]) -> list[tuple[bytes, bytes]]:
+            res = []
+            for k in keys:
+                for h, nb in nodes:
+                    if k == _state_hamt_node_tikv_key(room_prefix, h):
+                        res.append((k, nb))
+            return res
+
+        with patch("synapse.synapse_rust.tikv_engine.get", side_effect=mock_get):
+            with patch(
+                "synapse.synapse_rust.tikv_engine.batch_get", side_effect=mock_batch_get
+            ):
+                # 1. Selective key lookup
+                entries_selective = (
+                    self.state_datastore._lookup_state_hamt_from_tikv_direct(
+                        1234, room_id, [(EventTypes.Name, "")]
+                    )
+                )
+                self.assertIsNotNone(entries_selective)
+                assert entries_selective is not None
+                self.assertEqual(
+                    entries_selective, [(EventTypes.Name, "", "$name:test")]
+                )
+
+                # 2. Absent root returns None
+                entries_absent = (
+                    self.state_datastore._lookup_state_hamt_from_tikv_direct(
+                        9999, room_id, [(EventTypes.Name, "")]
+                    )
+                )
+                self.assertIsNone(entries_absent)
+
+                # 3. Full materialization
+                with patch(
+                    "synapse.synapse_rust.tikv_engine.materialize_state_hamt",
+                    return_value=entries,
+                ):
+                    entries_full = (
+                        self.state_datastore._materialize_state_hamt_from_tikv_direct(
+                            1234
+                        )
+                    )
+                    self.assertIsNotNone(entries_full)
+                    assert entries_full is not None
+                    self.assertIn((EventTypes.Create, "", "$create:test"), entries_full)
+                    self.assertIn((EventTypes.Name, "", "$name:test"), entries_full)
+
+    def test_fallback_sql_does_not_call_tikv_in_transaction(self) -> None:
+        """Verify that pure SQL fallback mode (use_tikv=False) makes zero TiKV calls inside runInteraction."""
+        from unittest.mock import patch
+
+        event = self.inject_state_event(
+            self.room, self.u_alice, EventTypes.Create, "", {}
+        )
+        state_group = self.get_success(
+            self.store._get_state_group_for_event(event.event_id)
+        )
+        assert state_group is not None
+
+        with (
+            patch("synapse.synapse_rust.tikv_engine.get") as mock_get,
+            patch("synapse.synapse_rust.tikv_engine.batch_get") as mock_batch_get,
+            patch(
+                "synapse.synapse_rust.tikv_engine.materialize_state_hamt"
+            ) as mock_mat,
+        ):
+            # Temporarily simulate TiKV being configured on the store
+            self.state_datastore.tikv_pd_endpoints = ["127.0.0.1:2379"]
+            try:
+                sql_res = self.get_success(
+                    self.store.db_pool.runInteraction(
+                        "test_fallback_sql",
+                        self.state_datastore._get_state_groups_from_groups_txn,
+                        [state_group],
+                        StateFilter.all(),
+                        use_tikv=False,
+                    )
+                )
+                self.assertIn(state_group, sql_res)
+                mock_get.assert_not_called()
+                mock_batch_get.assert_not_called()
+                mock_mat.assert_not_called()
+            finally:
+                self.state_datastore.tikv_pd_endpoints = []
+
+    def test_exact_filter_read_avoids_run_interaction(self) -> None:
+        """Verify that exact-filter reads under TiKV avoid SQL state read transactions."""
+        from unittest.mock import patch
+
+        event = self.inject_state_event(
+            self.room, self.u_alice, EventTypes.Create, "", {}
+        )
+        state_group = self.get_success(
+            self.store._get_state_group_for_event(event.event_id)
+        )
+        assert state_group is not None
+
+        self.state_datastore.tikv_pd_endpoints = ["127.0.0.1:2379"]
+        try:
+            with (
+                patch.object(
+                    self.state_datastore,
+                    "_lookup_state_hamt_from_tikv_direct",
+                    return_value=[(EventTypes.Create, "", event.event_id)],
+                ),
+                patch.object(
+                    self.store.db_pool,
+                    "runInteraction",
+                    wraps=self.store.db_pool.runInteraction,
+                ) as spy_run_interaction,
+            ):
+                res = self.get_success(
+                    self.state_datastore._get_state_groups_from_groups(
+                        [state_group],
+                        StateFilter.from_types([(EventTypes.Create, "")]),
+                    )
+                )
+                self.assertEqual(
+                    res[state_group], {(EventTypes.Create, ""): event.event_id}
+                )
+                # Verify that only the room-ID lookup query ran; no state fetch transaction was run
+                called_descs = [
+                    call.args[0] for call in spy_run_interaction.call_args_list
+                ]
+                self.assertNotIn("_get_state_groups_from_groups", called_descs)
+                self.assertNotIn(
+                    "_get_state_groups_from_groups.fallback_sql", called_descs
+                )
+        finally:
+            self.state_datastore.tikv_pd_endpoints = []
+
+    def test_transient_missing_tikv_root_retries_and_succeeds(self) -> None:
+        """Verify that when a TiKV root is temporarily absent (cross-worker race), it retries and succeeds."""
+        from unittest.mock import patch
+
+        from twisted.internet import defer
+
+        event = self.inject_state_event(
+            self.room, self.u_alice, EventTypes.Create, "", {}
+        )
+        state_group = self.get_success(
+            self.store._get_state_group_for_event(event.event_id)
+        )
+        assert state_group is not None
+
+        # Return None on attempt 0, then return valid entries on attempt 1
+        responses = [None, [(EventTypes.Create, "", event.event_id)]]
+
+        def mock_mat(sg: int) -> list[tuple[str, str, str]] | None:
+            if responses:
+                return responses.pop(0)
+            return [(EventTypes.Create, "", event.event_id)]
+
+        self.state_datastore.tikv_pd_endpoints = ["127.0.0.1:2379"]
+        try:
+            with (
+                patch.object(
+                    self.state_datastore,
+                    "_materialize_state_hamt_from_tikv_direct",
+                    side_effect=mock_mat,
+                ),
+                patch.object(
+                    self.state_datastore.hs.get_clock(),
+                    "sleep",
+                    return_value=defer.succeed(None),
+                ) as mock_sleep,
+                patch.object(
+                    self.store.db_pool,
+                    "runInteraction",
+                    wraps=self.store.db_pool.runInteraction,
+                ) as spy_run_interaction,
+            ):
+                res = self.get_success(
+                    self.state_datastore._get_state_groups_from_groups(
+                        [state_group], StateFilter.all()
+                    )
+                )
+                self.assertEqual(
+                    res[state_group], {(EventTypes.Create, ""): event.event_id}
+                )
+                # Verified retry with backoff occurred without SQL fallback
+                self.assertEqual(mock_sleep.call_count, 1)
+                called_descs = [
+                    call.args[0] for call in spy_run_interaction.call_args_list
+                ]
+                self.assertNotIn(
+                    "_get_state_groups_from_groups.fallback_sql", called_descs
+                )
+        finally:
+            self.state_datastore.tikv_pd_endpoints = []
+
+    def test_missing_tikv_root_with_no_legacy_payload_raises(self) -> None:
+        """Verify that an existing state group with missing TiKV root and no legacy state raises RuntimeError."""
+        from unittest.mock import patch
+
+        from twisted.internet import defer
+
+        # Insert a state_group entry directly without HAMT root or legacy state
+        state_group = 999998
+        self.get_success(
+            self.store.db_pool.simple_insert(
+                table="state_groups",
+                values={
+                    "id": state_group,
+                    "room_id": self.room.to_string(),
+                    "event_id": "$fake:test",
+                },
+                desc="test_missing_root.insert_sg",
+            )
+        )
+
+        self.state_datastore.tikv_pd_endpoints = ["127.0.0.1:2379"]
+        try:
+            with (
+                patch.object(
+                    self.state_datastore,
+                    "_materialize_state_hamt_from_tikv_direct",
+                    return_value=None,
+                ),
+                patch.object(
+                    self.state_datastore.hs.get_clock(),
+                    "sleep",
+                    return_value=defer.succeed(None),
+                ) as mock_sleep,
+            ):
+                failure = self.get_failure(
+                    self.state_datastore._get_state_groups_from_groups(
+                        [state_group], StateFilter.all()
+                    ),
+                    RuntimeError,
+                )
+                self.assertIn(
+                    "have no TiKV root or legacy SQL state", str(failure.value)
+                )
+                self.assertEqual(mock_sleep.call_count, 9)
+        finally:
+            self.state_datastore.tikv_pd_endpoints = []
+
     def test_get_state_groups(self) -> None:
         e1 = self.inject_state_event(self.room, self.u_alice, EventTypes.Create, "", {})
         e2 = self.inject_state_event(
