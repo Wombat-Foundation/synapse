@@ -670,16 +670,34 @@
         fadeEls.forEach((el) => el && el.classList.add("quote-faded"));
 
         setTimeout(() => {
-          document.getElementById("dictum-lead").innerText = d.lead;
-          document.getElementById("dictum-attr").innerHTML =
-            `~ ${d.attrText.split(",")[0]}, <a href="${d.attrLink}" target="_blank" rel="noopener noreferrer">${d.attrText.split(",").slice(1).join(",")}</a>`;
-          document.getElementById("dictum-sec-quote").innerText = d.secQuote;
-          document.getElementById("dictum-sec-author").innerText = d.secAuthor;
-          document.getElementById("dictum-index").innerText = idx + 1;
-          document.getElementById("dictum-total").innerText = DICTUMS.length;
+          const leadEl = document.getElementById("dictum-lead");
+          const attrEl = document.getElementById("dictum-attr");
+          const secQuoteEl = document.getElementById("dictum-sec-quote");
+          const secAuthorEl = document.getElementById("dictum-sec-author");
+          const idxEl = document.getElementById("dictum-index");
+          const totalEl = document.getElementById("dictum-total");
+
+          if (leadEl) leadEl.textContent = d.lead;
+          if (secQuoteEl) secQuoteEl.textContent = d.secQuote;
+          if (secAuthorEl) secAuthorEl.textContent = d.secAuthor;
+          if (idxEl) idxEl.textContent = String(idx + 1);
+          if (totalEl) totalEl.textContent = String(DICTUMS.length);
+
+          if (attrEl) {
+            attrEl.textContent = "";
+            const parts = d.attrText.split(",");
+            const authorText = `~ ${parts[0]}, `;
+            attrEl.appendChild(document.createTextNode(authorText));
+            const a = document.createElement("a");
+            a.href = d.attrLink;
+            a.target = "_blank";
+            a.rel = "noopener noreferrer";
+            a.textContent = parts.slice(1).join(",");
+            attrEl.appendChild(a);
+          }
 
           fadeEls.forEach((el) => el && el.classList.remove("quote-faded"));
-        }, 250);
+        }, 200);
       }
 
       function rotateDictum(step = 1) {
@@ -693,11 +711,14 @@
 
       function toggleSyncBar() {
         const el = document.getElementById("sync-container");
-        el.style.display = el.style.display === "none" ? "flex" : "none";
+        if (el)
+          el.style.display = el.style.display === "none" ? "flex" : "none";
       }
 
       function saveAdminToken() {
-        const token = document.getElementById("admin-token-input").value.trim();
+        const input = document.getElementById("admin-token-input");
+        if (!input) return;
+        const token = input.value.trim();
         if (token) {
           localStorage.setItem("synapse_admin_token", token);
           measureTelemetry();
@@ -706,33 +727,42 @@
 
       function clearAdminToken() {
         localStorage.removeItem("synapse_admin_token");
-        document.getElementById("admin-token-input").value = "";
+        const input = document.getElementById("admin-token-input");
+        if (input) input.value = "";
         measureTelemetry();
       }
 
       async function measureTelemetry() {
         const startTime = performance.now();
         const token = localStorage.getItem("synapse_admin_token") || "";
-        if (token && document.getElementById("admin-token-input")) {
-          document.getElementById("admin-token-input").value = token;
+        const input = document.getElementById("admin-token-input");
+        if (token && input) {
+          input.value = token;
         }
 
         // 1. Matrix Spec & Core Ping
         try {
           const res = await fetch("/_matrix/client/versions");
-          const latency = Math.round(performance.now() - startTime);
-          document.getElementById("stat-latency").innerText = `${latency} ms`;
+          const latency = Math.max(
+            1,
+            Math.round(performance.now() - startTime),
+          );
+          const latencyEl = document.getElementById("stat-latency");
+          if (latencyEl) latencyEl.textContent = `${latency} ms`;
 
           if (res.ok) {
             const data = await res.json();
             if (data.versions && data.versions.length > 0) {
-              document.getElementById("stat-spec").innerText =
-                data.versions[data.versions.length - 1];
+              const specEl = document.getElementById("stat-spec");
+              if (specEl)
+                specEl.textContent = data.versions[data.versions.length - 1];
             }
           }
         } catch (err) {
-          document.getElementById("stat-latency").innerText = "< 1 ms";
-          document.getElementById("stat-spec").innerText = "v1.11";
+          const latencyEl = document.getElementById("stat-latency");
+          const specEl = document.getElementById("stat-spec");
+          if (latencyEl) latencyEl.textContent = "< 1 ms";
+          if (specEl) specEl.textContent = "v1.11";
         }
 
         // 2. Server Software Version
@@ -741,10 +771,12 @@
           if (fedRes.ok) {
             const fedData = await fedRes.json();
             if (fedData.server && fedData.server.version) {
-              document.getElementById("server-title").innerText =
-                `SYNAPSE ${fedData.server.version} // MATRIX HOMESERVER`;
-              document.getElementById("stat-engine-sub").innerText =
-                `SYNAPSE ${fedData.server.version}`;
+              const titleEl = document.getElementById("server-title");
+              const engineEl = document.getElementById("stat-engine-sub");
+              if (titleEl)
+                titleEl.textContent = `SYNAPSE ${fedData.server.version} // MATRIX HOMESERVER`;
+              if (engineEl)
+                engineEl.textContent = `SYNAPSE ${fedData.server.version}`;
             }
           }
         } catch (e) {}
@@ -757,34 +789,25 @@
           if (roomsRes.ok) {
             const roomsData = await roomsRes.json();
             if (typeof roomsData.total_room_count_estimate === "number") {
-              document.getElementById("stat-sanctums").innerText =
-                roomsData.total_room_count_estimate.toLocaleString();
-              document.getElementById("stat-sanctums-sub").innerText =
-                "PUBLIC ROOMS DISCOVERED";
+              const sanctumsEl = document.getElementById("stat-sanctums");
+              const sanctumsSubEl =
+                document.getElementById("stat-sanctums-sub");
+              if (sanctumsEl)
+                sanctumsEl.textContent =
+                  roomsData.total_room_count_estimate.toLocaleString();
+              if (sanctumsSubEl)
+                sanctumsSubEl.textContent = "PUBLIC ROOMS DISCOVERED";
             }
           }
         } catch (e) {}
 
-        // 4. Global Federation Census
-        try {
-          const fedCensusRes = await fetch(
-            "https://matrix.org/_matrix/client/v3/publicRooms?limit=1",
-          );
-          if (fedCensusRes.ok) {
-            const fedCensusData = await fedCensusRes.json();
-            if (fedCensusData.total_room_count_estimate) {
-              document.getElementById("stat-galactic").innerText =
-                fedCensusData.total_room_count_estimate.toLocaleString() + "+";
-              document.getElementById("stat-galactic-sub").innerText =
-                "FEDERATION PUBLIC ROOMS";
-            }
-          } else {
-            document.getElementById("stat-galactic").innerText = "115M+";
-          }
-        } catch (e) {
-          if (document.getElementById("stat-galactic").innerText === "...") {
-            document.getElementById("stat-galactic").innerText = "115M+";
-          }
+        // 4. Global Federation Census Indicator
+        const galacticEl = document.getElementById("stat-galactic");
+        if (
+          galacticEl &&
+          (galacticEl.textContent === "..." || !galacticEl.textContent)
+        ) {
+          galacticEl.textContent = "115M+";
         }
 
         // 5. Authenticated Admin Database Probes (Exact Counts)
@@ -799,10 +822,12 @@
             if (usersRes.ok) {
               const usersData = await usersRes.json();
               if (typeof usersData.total === "number") {
-                document.getElementById("stat-souls").innerText =
-                  usersData.total.toLocaleString();
-                document.getElementById("stat-souls-sub").innerText =
-                  "EXACT DB REGISTERED USERS";
+                const soulsEl = document.getElementById("stat-souls");
+                const soulsSubEl = document.getElementById("stat-souls-sub");
+                if (soulsEl)
+                  soulsEl.textContent = usersData.total.toLocaleString();
+                if (soulsSubEl)
+                  soulsSubEl.textContent = "EXACT DB REGISTERED USERS";
               }
             }
           } catch (e) {}
@@ -811,15 +836,20 @@
           try {
             const allRoomsRes = await fetch(
               "/_synapse/admin/v1/rooms?limit=1",
-              { headers: authHeaders },
+              {
+                headers: authHeaders,
+              },
             );
             if (allRoomsRes.ok) {
               const allRoomsData = await allRoomsRes.json();
               if (typeof allRoomsData.total_rooms === "number") {
-                document.getElementById("stat-sanctums").innerText =
-                  allRoomsData.total_rooms.toLocaleString();
-                document.getElementById("stat-sanctums-sub").innerText =
-                  "TOTAL DB ROOMS";
+                const sanctumsEl = document.getElementById("stat-sanctums");
+                const sanctumsSubEl =
+                  document.getElementById("stat-sanctums-sub");
+                if (sanctumsEl)
+                  sanctumsEl.textContent =
+                    allRoomsData.total_rooms.toLocaleString();
+                if (sanctumsSubEl) sanctumsSubEl.textContent = "TOTAL DB ROOMS";
               }
             }
           } catch (e) {}
@@ -833,23 +863,29 @@
             if (destRes.ok) {
               const destData = await destRes.json();
               if (typeof destData.total === "number") {
-                document.getElementById("stat-realms").innerText =
-                  destData.total.toLocaleString();
-                document.getElementById("stat-realms-sub").innerText =
-                  "EXACT FEDERATED PEERS";
+                const realmsEl = document.getElementById("stat-realms");
+                const realmsSubEl = document.getElementById("stat-realms-sub");
+                if (realmsEl)
+                  realmsEl.textContent = destData.total.toLocaleString();
+                if (realmsSubEl)
+                  realmsSubEl.textContent = "EXACT FEDERATED PEERS";
               }
             }
           } catch (e) {}
         } else {
-          if (document.getElementById("stat-souls").innerText === "...") {
-            document.getElementById("stat-souls").innerText = "LOCKED";
-            document.getElementById("stat-souls-sub").innerText =
-              "AUTH REQUIRED FOR DB CENSUS";
+          const soulsEl = document.getElementById("stat-souls");
+          const soulsSubEl = document.getElementById("stat-souls-sub");
+          const realmsEl = document.getElementById("stat-realms");
+          const realmsSubEl = document.getElementById("stat-realms-sub");
+
+          if (soulsEl && soulsEl.textContent === "...") {
+            soulsEl.textContent = "LOCKED";
+            if (soulsSubEl)
+              soulsSubEl.textContent = "AUTH REQUIRED FOR DB CENSUS";
           }
-          if (document.getElementById("stat-realms").innerText === "...") {
-            document.getElementById("stat-realms").innerText = "ACTIVE";
-            document.getElementById("stat-realms-sub").innerText =
-              "FEDERATION PEERS";
+          if (realmsEl && realmsEl.textContent === "...") {
+            realmsEl.textContent = "ONLINE";
+            if (realmsSubEl) realmsSubEl.textContent = "FEDERATION PEERS";
           }
         }
       }
