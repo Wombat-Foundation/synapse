@@ -471,6 +471,87 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
     def _state_hamt_secret(self) -> bytes:
         return hashlib.sha256(self.hs.config.key.macaroon_secret_key).digest()
 
+    def _prefetch_tikv_hamt_blocking(
+        self,
+        room_prefix: bytes,
+        state_group: int,
+        room_id: str,
+        updates: list[tuple[str, str, str]],
+    ) -> tuple[dict[bytes, bytes], dict[int, tuple[bytes, bytes]]]:
+        """Fetch a HAMT tree before starting a SQL transaction."""
+        from synapse.synapse_rust import state_hamt, tikv_engine
+
+        root_value = tikv_engine.get(
+            _state_hamt_root_tikv_key(self.server_name, state_group)
+        )
+        if root_value is None:
+            return {}, {}
+
+        stored_prefix, root_hash, lattice = _decode_state_hamt_root(root_value)
+        if stored_prefix != room_prefix:
+            raise RuntimeError(
+                f"HAMT root for state group {state_group} has the wrong room prefix"
+            )
+
+        root_key = _state_hamt_node_tikv_key(room_prefix, root_hash)
+        root_rows = tikv_engine.batch_get([root_key])
+        if not root_rows:
+            raise RuntimeError(
+                f"Missing HAMT root node while prefetching state group {state_group}"
+            )
+        nodes = {root_hash: bytes(root_rows[0][1])}
+
+        while True:
+            _applied, missing = state_hamt.apply_flat_state_updates(
+                self._state_hamt_secret(),
+                room_id,
+                nodes[root_hash],
+                list(nodes.items()),
+                lattice,
+                updates,
+            )
+            missing_hashes = {
+                bytes(node_hash)
+                for node_hash in missing
+                if bytes(node_hash) not in nodes
+            }
+            if not missing_hashes:
+                break
+            key_to_hash = {
+                _state_hamt_node_tikv_key(room_prefix, node_hash): node_hash
+                for node_hash in missing_hashes
+            }
+            rows = tikv_engine.batch_get(list(key_to_hash))
+            found = {
+                key_to_hash[bytes(node_key)]: bytes(node_bytes)
+                for node_key, node_bytes in rows
+            }
+            unresolved = missing_hashes - found.keys()
+            if unresolved:
+                raise RuntimeError(
+                    "Missing HAMT nodes while prefetching state group "
+                    f"{state_group}: {[node_hash.hex() for node_hash in unresolved]}"
+                )
+            nodes.update(found)
+
+        return nodes, {state_group: (root_hash, lattice)}
+
+    async def _prefetch_tikv_hamt(
+        self,
+        room_prefix: bytes,
+        state_group: int,
+        room_id: str,
+        updates: list[tuple[str, str, str]],
+    ) -> tuple[dict[bytes, bytes], dict[int, tuple[bytes, bytes]]]:
+        return await defer_to_thread(
+            self.hs.get_reactor(),
+            self._prefetch_tikv_hamt_blocking,
+            room_prefix,
+            state_group,
+            room_id,
+            updates,
+        )
+
     def _persist_state_hamt_txn(
         self,
         txn: LoggingTransaction,
@@ -923,6 +1004,18 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             room_version.msc4291_room_ids_as_hashes,
         )
 
+        initial_nodes: dict[bytes, bytes] = {}
+        initial_roots: dict[int, tuple[bytes, bytes]] = {}
+        if self.tikv_pd_endpoints:
+            batch_updates = [
+                (event.type, event.state_key, event.event_id)
+                for event, _context in events_and_context
+                if event.is_state()
+            ]
+            initial_nodes, initial_roots = await self._prefetch_tikv_hamt(
+                room_prefix, prev_group, room_id, batch_updates
+            )
+
         def insert_deltas_group_txn(
             txn: LoggingTransaction,
             events_and_context: list[tuple[EventBase, UnpersistedEventContext]],
@@ -969,8 +1062,8 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             # commits (see below) -- so a later group's incremental update
             # needs this in-memory cache to find its predecessor's root,
             # rather than reading (nothing) back from TiKV mid-transaction.
-            local_nodes: dict[bytes, bytes] = {}
-            local_roots: dict[int, tuple[bytes, bytes]] = {}
+            local_nodes = dict(initial_nodes)
+            local_roots = dict(initial_roots)
 
             for event, context in events_and_context:
                 if not event.is_state():
@@ -1104,6 +1197,13 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             room_version.msc4291_room_ids_as_hashes,
         )
 
+        initial_nodes: dict[bytes, bytes] = {}
+        initial_roots: dict[int, tuple[bytes, bytes]] = {}
+        if self.tikv_pd_endpoints and prev_group is not None and updates is not None:
+            initial_nodes, initial_roots = await self._prefetch_tikv_hamt(
+                room_prefix, prev_group, room_id, updates
+            )
+
         def insert_full_state_txn(
             txn: LoggingTransaction, current_state_ids: StateMap[str]
         ) -> tuple[int, bytes, bytes, list[tuple[bytes, bytes]]]:
@@ -1129,6 +1229,8 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     current_state_ids,
                     prev_group=prev_group,
                     updates=updates,
+                    local_nodes=initial_nodes,
+                    local_roots=initial_roots,
                 )
             )
 
