@@ -445,9 +445,10 @@ fn apply_flat_state_updates_impl(
     for (event_type, state_key, new_event_id) in updates {
         let key = serde_json::to_string(&(&event_type, &state_key))
             .map_err(|e| format!("Failed to encode HAMT state key: {e}"))?;
-        let mut resolver = |hash: &StructuralHash| -> Result<Arc<HamtNode<String, String>>, StructuralHash> {
-            node_map.get(hash).cloned().ok_or(*hash)
-        };
+        let mut resolver =
+            |hash: &StructuralHash| -> Result<Arc<HamtNode<String, String>>, StructuralHash> {
+                node_map.get(hash).cloned().ok_or(*hash)
+            };
 
         macro_rules! handle_mutate_err {
             ($result:expr) => {
@@ -668,7 +669,9 @@ pub fn build_root_handle_with_lattice(
 }
 
 #[pyfunction]
-#[pyo3(text_signature = "(server_secret, room_id, root_node_bytes, nodes, lattice_bytes, updates, /)")]
+#[pyo3(
+    text_signature = "(server_secret, room_id, root_node_bytes, nodes, lattice_bytes, updates, /)"
+)]
 pub fn apply_flat_state_updates(
     server_secret: Vec<u8>,
     room_id: &str,
@@ -739,9 +742,7 @@ pub fn build_typed_root(
 
 #[pyfunction]
 #[pyo3(text_signature = "(root_bytes, /)")]
-pub fn decode_typed_root(
-    root_bytes: Vec<u8>,
-) -> PyResult<PyDecodedTypedRoot> {
+pub fn decode_typed_root(root_bytes: Vec<u8>) -> PyResult<PyDecodedTypedRoot> {
     let root =
         TypedRoot::decode_v1(&root_bytes).map_err(pyo3::exceptions::PyValueError::new_err)?;
     Ok((
@@ -1013,7 +1014,11 @@ mod tests {
                 )
             })
             .collect();
-        entries.push(("m.room.create".to_owned(), String::new(), "$create".to_owned()));
+        entries.push((
+            "m.room.create".to_owned(),
+            String::new(),
+            "$create".to_owned(),
+        ));
 
         let (root_handle, lattice, nodes) =
             build_root_handle_nodes_and_lattice(&server_secret, room_id, entries.clone())
@@ -1091,7 +1096,10 @@ mod tests {
                 &server_secret,
                 room_id,
                 &applied_root_bytes,
-                combined_nodes.iter().map(|(h, b)| (h.to_vec(), b.clone())).collect(),
+                combined_nodes
+                    .iter()
+                    .map(|(h, b)| (h.to_vec(), b.clone()))
+                    .collect(),
                 &applied.lattice_bytes,
                 vec![(
                     "m.room.member".to_owned(),

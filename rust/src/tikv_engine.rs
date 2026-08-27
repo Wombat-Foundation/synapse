@@ -192,6 +192,30 @@ pub fn batch_delete(py: Python<'_>, keys: Vec<Vec<u8>>) -> PyResult<()> {
     Ok(())
 }
 
+/// Computes the exclusive upper bound of a byte-string prefix range: `prefix`
+/// incremented as a big-endian number. Strips any trailing 0xFF bytes (they
+/// can't be incremented in place) and increments the first byte, from the
+/// end, that isn't 0xFF -- e.g. `[0x01, 0xFF] -> [0x02]`, not `[0x01]` (which
+/// would sort *before* `prefix`, producing an inverted, empty scan range).
+///
+/// Returns an empty `Vec` if every byte in `prefix` is 0xFF (or `prefix` is
+/// itself empty): there is no finite successor in that case, so the caller
+/// must scan with no upper bound and filter results by prefix explicitly.
+fn prefix_scan_upper_bound(prefix: &[u8]) -> Vec<u8> {
+    let mut end = prefix.to_vec();
+    loop {
+        match end.pop() {
+            None => break,
+            Some(0xFF) => continue,
+            Some(b) => {
+                end.push(b + 1);
+                break;
+            }
+        }
+    }
+    end
+}
+
 #[pyfunction]
 pub fn scan_prefix(
     py: Python<'_>,
@@ -206,30 +230,32 @@ pub fn scan_prefix(
     let rt = get_runtime();
 
     let start = prefix.clone();
-    let mut end = prefix.clone();
-    if let Some(last) = end.last_mut() {
-        if *last == 255 {
-            end.pop();
-        } else {
-            *last += 1;
-        }
-    } else {
-        end.push(255);
-    }
+    let end = prefix_scan_upper_bound(&prefix);
 
-    let pairs = py
-        .detach(|| {
+    let pairs = if end.is_empty() {
+        py.detach(|| {
+            rt.block_on(async { client.scan(start.., limit).await })
+                .map_err(|e| e.to_string())
+        })
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?
+    } else {
+        py.detach(|| {
             rt.block_on(async { client.scan(start..end, limit).await })
                 .map_err(|e| e.to_string())
         })
-        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?
+    };
 
     let results: Vec<(Vec<u8>, Vec<u8>)> = pairs
         .into_iter()
         .map(|pair| {
             let (k, v): (tikv_client::Key, tikv_client::Value) = pair.into();
-            (k.into(), v)
+            let key_bytes: Vec<u8> = k.into();
+            (key_bytes, v)
         })
+        // Only matters for the unbounded (all-0xFF-prefix) branch above --
+        // an incremented finite end bound already scopes the range exactly.
+        .filter(|(k, _): &(Vec<u8>, Vec<u8>)| k.starts_with(&prefix))
         .collect();
     Ok(results)
 }
@@ -375,4 +401,34 @@ pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
         .set_item("synapse.synapse_rust.tikv_engine", &child_module)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prefix_scan_upper_bound_increments_last_non_ff_byte() {
+        assert_eq!(prefix_scan_upper_bound(&[0x01]), vec![0x02]);
+        assert_eq!(prefix_scan_upper_bound(&[0x01, 0x02]), vec![0x01, 0x03]);
+    }
+
+    #[test]
+    fn prefix_scan_upper_bound_carries_past_trailing_ff_bytes() {
+        // The bug this guards against: naively popping a single trailing
+        // 0xFF byte gives [0x01], which sorts *before* [0x01, 0xFF] --
+        // an inverted, empty range. The correct successor carries into
+        // the preceding byte instead.
+        let end = prefix_scan_upper_bound(&[0x01, 0xFF]);
+        assert_eq!(end, vec![0x02]);
+        assert!(end.as_slice() > [0x01, 0xFF].as_slice());
+
+        assert_eq!(prefix_scan_upper_bound(&[0x01, 0xFF, 0xFF]), vec![0x02]);
+    }
+
+    #[test]
+    fn prefix_scan_upper_bound_has_no_successor_for_all_ff_or_empty() {
+        assert_eq!(prefix_scan_upper_bound(&[0xFF, 0xFF]), Vec::<u8>::new());
+        assert_eq!(prefix_scan_upper_bound(&[]), Vec::<u8>::new());
+    }
 }
