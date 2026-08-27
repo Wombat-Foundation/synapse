@@ -477,7 +477,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         state_group: int,
         room_id: str,
         room_prefix: bytes,
-        current_state_ids: StateMap[str],
+        current_state_ids: StateMap[str] | None,
         prev_state_group: int | None = None,
         updates: list[tuple[str, str, str]] | None = None,
         local_nodes: dict[bytes, bytes] | None = None,
@@ -522,6 +522,22 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             )
         if incremental is not None:
             return incremental
+
+        if current_state_ids is None:
+            if prev_state_group is None:
+                raise RuntimeError("A state map is required for an initial state group")
+            current_state_ids = dict(
+                self._get_state_groups_from_groups_txn(txn, [prev_state_group])[
+                    prev_state_group
+                ]
+            )
+            if updates:
+                current_state_ids.update(
+                    {
+                        (event_type, state_key): event_id
+                        for event_type, state_key, event_id in updates
+                    }
+                )
 
         from synapse.synapse_rust import state_hamt
 
@@ -740,7 +756,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         room_id: str,
         room_prefix: bytes,
         event_id: str,
-        current_state_ids: StateMap[str],
+        current_state_ids: StateMap[str] | None,
         prev_group: int | None = None,
         updates: list[tuple[str, str, str]] | None = None,
         local_nodes: dict[bytes, bytes] | None = None,
@@ -764,25 +780,30 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 },
             )
 
-        current_member_state_ids = {
-            s: ev for (s, ev) in current_state_ids.items() if s[0] == EventTypes.Member
-        }
-        txn.call_after(
-            self._state_group_members_cache.update,
-            self._state_group_members_cache.sequence,
-            key=state_group,
-            value=current_member_state_ids,
-        )
+        if current_state_ids is not None:
+            current_member_state_ids = {
+                s: ev
+                for (s, ev) in current_state_ids.items()
+                if s[0] == EventTypes.Member
+            }
+            txn.call_after(
+                self._state_group_members_cache.update,
+                self._state_group_members_cache.sequence,
+                key=state_group,
+                value=current_member_state_ids,
+            )
 
-        current_non_member_state_ids = {
-            s: ev for (s, ev) in current_state_ids.items() if s[0] != EventTypes.Member
-        }
-        txn.call_after(
-            self._state_group_cache.update,
-            self._state_group_cache.sequence,
-            key=state_group,
-            value=current_non_member_state_ids,
-        )
+            current_non_member_state_ids = {
+                s: ev
+                for (s, ev) in current_state_ids.items()
+                if s[0] != EventTypes.Member
+            }
+            txn.call_after(
+                self._state_group_cache.update,
+                self._state_group_cache.sequence,
+                key=state_group,
+                value=current_non_member_state_ids,
+            )
 
         return self._persist_state_hamt_txn(
             txn,
@@ -923,10 +944,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     % (prev_group,)
                 )
 
-            current_state_ids = dict(
-                self._get_state_groups_from_groups_txn(txn, [prev_group])[prev_group]
-            )
-
             num_state_groups = sum(
                 1 for event, _ in events_and_context if event.is_state()
             )
@@ -958,14 +975,13 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 context.state_delta_due_to_event = {
                     (event.type, event.state_key): event.event_id
                 }
-                current_state_ids[(event.type, event.state_key)] = event.event_id
                 root_hash, lattice, nodes = self._persist_state_group_snapshot_txn(
                     txn,
                     sg_after,
                     room_id,
                     room_prefix,
                     event.event_id,
-                    current_state_ids,
+                    None,
                     prev_group=sg_before,
                     # A linear batch changes exactly one (type, state_key)
                     # per state event -- this is the delta
@@ -1060,47 +1076,14 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 for (event_type, state_key), event_id in delta_ids.items()
             ]
         elif prev_group is not None:
-            if delta_ids is not None:
-                updates = [
-                    (event_type, state_key, event_id)
-                    for (event_type, state_key), event_id in delta_ids.items()
-                ]
-            else:
-                # The caller handed us a full current_state_ids map with no
-                # explicit delta -- e.g. a state-resolution/merge result it
-                # computed independently. current_state_ids overwhelmingly
-                # overlaps prev_group's state in the common case (resolution
-                # only actually changes the keys that were in conflict), so
-                # in principle diffing against prev_group's state would let
-                # us apply an incremental update instead of a full rebuild.
-                #
-                # But the full-rebuild path this replaces reads nothing from
-                # storage -- current_state_ids is already fully in memory --
-                # so computing that diff is only a win if it's free. Peek the
-                # two DictionaryCaches synchronously (zero I/O, no awaiting)
-                # rather than calling _get_state_for_groups, which would
-                # transparently fall through to a real SQL/TiKV HAMT
-                # materialize on a miss: a genuinely new O(S) read the full
-                # rebuild never paid, stacked on top of the O(K log S)
-                # writes that follow it. Only take the diff when both halves
-                # report the complete dict is already cache-resident;
-                # otherwise fall through to the full rebuild exactly as
-                # before, rather than gambling an uncached read against it.
-                non_member_entry = self._state_group_cache.get(prev_group)
-                member_entry = self._state_group_members_cache.get(prev_group)
-                if non_member_entry.full and member_entry.full:
-                    prev_state_ids: StateMap[str] = {
-                        **non_member_entry.value,
-                        **member_entry.value,
-                    }
-                    updates = [
-                        (event_type, state_key, event_id)
-                        for (
-                            event_type,
-                            state_key,
-                        ), event_id in current_state_ids.items()
-                        if prev_state_ids.get((event_type, state_key)) != event_id
-                    ]
+            if delta_ids is None:
+                raise ValueError(
+                    "A state-group delta is required when prev_group is provided"
+                )
+            updates = [
+                (event_type, state_key, event_id)
+                for (event_type, state_key), event_id in delta_ids.items()
+            ]
 
         from synapse.synapse_rust import state_hamt
 
@@ -1112,7 +1095,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
 
         def insert_full_state_txn(
             txn: LoggingTransaction, current_state_ids: StateMap[str]
-        ) -> tuple[int, bytes, list[tuple[bytes, bytes]]]:
+        ) -> tuple[int, bytes, bytes, list[tuple[bytes, bytes]]]:
             if prev_group is not None:
                 is_missing = self._state_deletion_store._check_state_groups_and_bump_deletion_txn(
                     txn,

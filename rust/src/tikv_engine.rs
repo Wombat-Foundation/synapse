@@ -85,8 +85,12 @@ pub fn open_client(py: Python<'_>, pd_endpoints: Vec<String>) -> PyResult<()> {
         pyo3::exceptions::PyRuntimeError::new_err("Failed to set TiKV Client instance")
     })?;
     let tx_client = py
-        .detach(|| get_runtime().block_on(TransactionClient::new(pd_endpoints)))
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        .detach(|| {
+            get_runtime()
+                .block_on(TransactionClient::new(pd_endpoints))
+                .map_err(|e| e.to_string())
+        })
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
     TX_CLIENT.set(tx_client).map_err(|_| {
         pyo3::exceptions::PyRuntimeError::new_err("Failed to set TiKV transaction client")
     })?;
