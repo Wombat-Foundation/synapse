@@ -44,6 +44,7 @@ from synapse.storage.database import (
 )
 from synapse.storage.databases.state.bg_updates import (
     StateBackgroundUpdateStore,
+    _state_hamt_node_tikv_key,
     put_state_hamt_objects,
 )
 from synapse.storage.engines import PostgresEngine
@@ -474,29 +475,32 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         room_prefix: bytes,
         current_state_ids: StateMap[str],
         prev_state_group: int | None = None,
-        delta_due_to_event: tuple[str, str, str] | None = None,
+        updates: list[tuple[str, str, str]] | None = None,
     ) -> tuple[bytes, list[tuple[bytes, bytes]]]:
         """Persist a new state_group's HAMT root and nodes.
 
         If `prev_state_group` has a usable stored root+lattice and
-        `delta_due_to_event` names the single `(event_type, state_key,
-        event_id)` change that produces `current_state_ids` from
-        `prev_state_group`'s state, this applies that one change via
-        O(log S) path-copying (`apply_flat_state_updates`) instead of
-        rebuilding the whole tree from `current_state_ids`. Otherwise (no
-        prev root/lattice, TiKV mode, or no single-key delta given -- e.g.
-        an arbitrary/merged state from state resolution) this falls back to
-        a full rebuild, exactly as before.
+        `updates` names the `(event_type, state_key, event_id)` changes
+        that produce `current_state_ids` from `prev_state_group`'s state
+        (a delta of any size -- one key for a plain state event, several
+        for a state-resolution/merge result whose delta the caller already
+        computed), this applies them via O(K log S) path-copying
+        (`apply_flat_state_updates`) instead of rebuilding the whole tree
+        from `current_state_ids` -- for either backend (SQL or TiKV).
+        Otherwise (no prev root/lattice -- e.g. a room's first state
+        group -- or no delta given, i.e. the caller only has a full
+        current_state_ids map with no known relationship to prev_group)
+        this falls back to a full rebuild, exactly as before.
         """
         incremental = None
-        if prev_state_group is not None and delta_due_to_event is not None:
+        if prev_state_group is not None and updates is not None:
             incremental = self._persist_state_hamt_incremental_txn(
                 txn,
                 state_group,
                 room_id,
                 room_prefix,
                 prev_state_group,
-                delta_due_to_event,
+                updates,
             )
         if incremental is not None:
             return incremental
@@ -548,24 +552,27 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         room_id: str,
         room_prefix: bytes,
         prev_state_group: int,
-        delta_due_to_event: tuple[str, str, str],
+        updates: list[tuple[str, str, str]],
     ) -> tuple[bytes, list[tuple[bytes, bytes]]] | None:
-        """Apply one (event_type, state_key) -> event_id change against
-        `prev_state_group`'s HAMT root via O(log S) path-copying, instead of
-        materializing and rebuilding the whole state map -- the fix for the
-        O(S)-per-PDU tax described in
-        docs/development-gg/persistent-typed-hamt-architecture.md.
+        """Apply `updates` -- a delta of any size, from a single state event
+        to a whole state-resolution/merge result the caller already computed
+        as a delta -- against `prev_state_group`'s HAMT root via O(K log S)
+        path-copying, instead of materializing and rebuilding the whole
+        state map. This is the fix for the O(S)-per-update tax described in
+        docs/development-gg/persistent-typed-hamt-architecture.md: cost is
+        proportional to len(updates), not to the room's total state size.
 
         Returns None -- signalling the caller to fall back to a full
         rebuild -- if `prev_state_group` has no stored root+lattice to
-        update from (a pre-existing root written before this column
-        existed, or a room's very first state group), or if incremental
-        updates aren't wired for the active backend (TiKV mode: node
-        storage/fetch for this path isn't implemented there yet).
-        """
-        if self.tikv_pd_endpoints:
-            return None
+        update from: a pre-existing root written before this column
+        existed, or a room's very first state group.
 
+        Works for both backends. In TiKV mode, node bytes are fetched from
+        and (implicitly, via the returned `new_nodes`) flushed to TiKV --
+        mirroring `_lookup_state_hamt_from_tikv_txn`'s fetch pattern and
+        `_persist_state_hamt_txn`'s existing "SQL stores nodes in-txn, TiKV
+        gets them after commit" split -- rather than `state_hamt_nodes`.
+        """
         from synapse.synapse_rust import state_hamt
 
         prev_root = self.db_pool.simple_select_one_txn(
@@ -579,13 +586,21 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             return None
         prev_root_hash, prev_lattice = bytes(prev_root[0]), bytes(prev_root[1])
 
-        root_node_bytes = self.db_pool.simple_select_one_onecol_txn(
-            txn,
-            table="state_hamt_nodes",
-            keyvalues={"structural_hash": bytearray(prev_root_hash)},
-            retcol="node_bytes",
-            allow_none=True,
-        )
+        use_tikv = bool(self.tikv_pd_endpoints)
+        if use_tikv:
+            from synapse.synapse_rust import tikv_engine
+
+            root_node_bytes = tikv_engine.get(
+                _state_hamt_node_tikv_key(room_prefix, prev_root_hash)
+            )
+        else:
+            root_node_bytes = self.db_pool.simple_select_one_onecol_txn(
+                txn,
+                table="state_hamt_nodes",
+                keyvalues={"structural_hash": bytearray(prev_root_hash)},
+                retcol="node_bytes",
+                allow_none=True,
+            )
         if root_node_bytes is None:
             raise RuntimeError(
                 "Missing HAMT root node for state group "
@@ -593,11 +608,11 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             )
         root_bytes = bytes(root_node_bytes)
         nodes: dict[bytes, bytes] = {prev_root_hash: root_bytes}
-        updates = [delta_due_to_event]
 
-        # Mirrors _lookup_state_hamt_from_postgres_txn's retry loop: each
-        # round trip surfaces one more tree level's worth of missing hashes,
-        # rather than fetching the whole reachable tree up front.
+        # Mirrors _lookup_state_hamt_from_postgres_txn /
+        # _lookup_state_hamt_from_tikv_txn's retry loop: each round trip
+        # surfaces one more tree level's worth of missing hashes, rather
+        # than fetching the whole reachable tree up front.
         while True:
             applied, missing = state_hamt.apply_flat_state_updates(
                 self._state_hamt_secret(),
@@ -609,21 +624,39 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             )
             if applied is not None:
                 break
-            missing = [bytes(node_hash) for node_hash in missing if bytes(node_hash) not in nodes]
+            missing = [
+                bytes(node_hash)
+                for node_hash in missing
+                if bytes(node_hash) not in nodes
+            ]
             if not missing:
                 raise RuntimeError(
                     "apply_flat_state_updates reported no progress for state group "
                     f"{prev_state_group}"
                 )
-            rows = self.db_pool.simple_select_many_txn(
-                txn,
-                table="state_hamt_nodes",
-                column="structural_hash",
-                iterable=[bytearray(node_hash) for node_hash in missing],
-                keyvalues={},
-                retcols=("structural_hash", "node_bytes"),
-            )
-            found = {bytes(node_hash): bytes(node_bytes) for node_hash, node_bytes in rows}
+            if use_tikv:
+                from synapse.synapse_rust import tikv_engine
+
+                key_to_hash = {
+                    _state_hamt_node_tikv_key(room_prefix, node_hash): node_hash
+                    for node_hash in missing
+                }
+                rows = [
+                    (key_to_hash[bytes(node_key)], bytes(node_bytes))
+                    for node_key, node_bytes in tikv_engine.batch_get(list(key_to_hash))
+                ]
+            else:
+                rows = self.db_pool.simple_select_many_txn(
+                    txn,
+                    table="state_hamt_nodes",
+                    column="structural_hash",
+                    iterable=[bytearray(node_hash) for node_hash in missing],
+                    keyvalues={},
+                    retcols=("structural_hash", "node_bytes"),
+                )
+            found = {
+                bytes(node_hash): bytes(node_bytes) for node_hash, node_bytes in rows
+            }
             nodes.update(found)
             unresolved = set(missing) - found.keys()
             if unresolved:
@@ -634,7 +667,11 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
 
         new_root_hash, _new_state_group_id, new_lattice, new_nodes = applied
 
-        self._store_state_hamt_nodes_txn(txn, new_nodes)
+        if not use_tikv:
+            # In TiKV mode, nodes are flushed post-commit by the caller via
+            # _put_state_hamt_objects_after_txn -- same split as the
+            # full-rebuild path in _persist_state_hamt_txn.
+            self._store_state_hamt_nodes_txn(txn, new_nodes)
         self.db_pool.simple_insert_txn(
             txn,
             table="state_hamt_roots",
@@ -673,7 +710,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         event_id: str,
         current_state_ids: StateMap[str],
         prev_group: int | None = None,
-        delta_due_to_event: tuple[str, str, str] | None = None,
+        updates: list[tuple[str, str, str]] | None = None,
     ) -> tuple[bytes, list[tuple[bytes, bytes]]]:
         self.db_pool.simple_insert_txn(
             txn,
@@ -721,7 +758,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             room_prefix,
             current_state_ids,
             prev_state_group=prev_group,
-            delta_due_to_event=delta_due_to_event,
+            updates=updates,
         )
 
     async def _put_state_hamt_objects_after_txn(
@@ -888,15 +925,11 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     current_state_ids,
                     prev_group=sg_before,
                     # A linear batch changes exactly one (type, state_key)
-                    # per state event -- this is the single-key delta
+                    # per state event -- this is the delta
                     # _persist_state_hamt_txn needs to try an O(log S)
                     # incremental update against sg_before's HAMT root
                     # instead of rebuilding from all of current_state_ids.
-                    delta_due_to_event=(
-                        event.type,
-                        event.state_key,
-                        event.event_id,
-                    ),
+                    updates=[(event.type, event.state_key, event.event_id)],
                 )
                 hamt_writes.append((sg_after, nodes))
                 sg_before = sg_after
@@ -969,6 +1002,22 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             room_version.msc4291_room_ids_as_hashes,
         )
 
+        # When the caller already knows the delta from prev_group (the
+        # common case: a single state event, or a state-resolution/merge
+        # result the caller diffed itself), apply it via O(K log S)
+        # path-copying instead of rebuilding the whole tree from
+        # current_state_ids. Falls back to a full rebuild inside
+        # _persist_state_hamt_txn if prev_group has no usable stored
+        # root+lattice (e.g. the room's first state group).
+        updates = (
+            [
+                (event_type, state_key, event_id)
+                for (event_type, state_key), event_id in delta_ids.items()
+            ]
+            if prev_group is not None and delta_ids is not None
+            else None
+        )
+
         def insert_full_state_txn(
             txn: LoggingTransaction, current_state_ids: StateMap[str]
         ) -> tuple[int, bytes, list[tuple[bytes, bytes]]]:
@@ -992,6 +1041,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 event_id,
                 current_state_ids,
                 prev_group=prev_group,
+                updates=updates,
             )
 
             return state_group, root_structural_hash, nodes
