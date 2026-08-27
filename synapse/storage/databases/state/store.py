@@ -34,7 +34,6 @@ from synapse.events import EventBase
 from synapse.events.snapshot import (
     UnpersistedEventContext,
 )
-from synapse.logging.context import defer_to_thread
 from synapse.logging.opentracing import tag_args, trace
 from synapse.storage._base import SQLBaseStore
 from synapse.storage.database import (
@@ -783,17 +782,19 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             local_nodes=local_nodes,
         )
 
-    async def _put_state_hamt_objects_after_txn(
+    def _put_state_hamt_objects_before_txn_commit(
         self,
-        room_id: str,
-        room_version: RoomVersion,
+        room_prefix: bytes,
         nodes: list[tuple[bytes, bytes]],
     ) -> None:
-        """Persist the HAMT node objects for a single state group to TiKV.
+        """Persist HAMT nodes before publishing their SQL root pointers.
 
-        We wait for this after the SQL transaction commits so callers don't
-        observe a state group before its trie nodes exist in TiKV or the SQL
-        transaction has committed.
+        The root pointer is written to SQL in the same transaction as the
+        state group.  TiKV is a separate store, so writing the nodes after
+        that transaction commits creates a window in which another worker
+        can observe the root but cannot materialize the state.  Immutable,
+        content-addressed nodes may safely be left behind if the SQL
+        transaction subsequently rolls back.
 
         Only the content-addressed HAMT nodes are stored in TiKV (keyed by
         `hamt:node:<room_prefix>:<structural_hash>`); the root *pointer*
@@ -803,46 +804,14 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         derived from the per-instance `state_group` id, which is not globally
         unique across Synapse instances sharing one cluster.
 
-        Raises if the TiKV write fails. A failure here after the SQL
-        transaction has already committed the state_group itself means the
-        state_group now exists but is unreadable: silently swallowing that (as
-        this used to do, just logging and returning) left it permanently and
-        invisibly broken. Propagating the error at least surfaces the failure
-        immediately to the caller (typically event persistence).
+        This runs inside the database interaction thread, so the blocking
+        TiKV call does not block the reactor.
         """
 
         if not self.tikv_pd_endpoints:
             return
 
-        from synapse.synapse_rust import state_hamt
-
-        # The room-scoped TiKV key prefix depends on the room's version (see
-        # `room_tikv_prefix` in the Rust `state_hamt` module). `room_version`
-        # is passed in by the caller (who already has it from the event being
-        # persisted) rather than looked up here by room_id: `main` and `state`
-        # are separate database connections/pools even in a single monolith
-        # process, so a fresh read of `main.rooms` here had no transactional
-        # guarantee of observing a `store_room` write from moments earlier in
-        # the same request -- an intermittent cross-connection race, observed
-        # in practice for MSC4291 rooms specifically. Passing the already-known
-        # room_version needs no read at all, so there's no race to have.
-        room_prefix = state_hamt.room_tikv_prefix(
-            self._state_hamt_secret(),
-            room_id,
-            room_version.msc4291_room_ids_as_hashes,
-        )
-
-        try:
-            await defer_to_thread(
-                self.hs.get_reactor(),
-                put_state_hamt_objects,
-                room_prefix,
-                nodes,
-                bool(self.tikv_pd_endpoints),
-            )
-        except Exception:
-            logger.exception("Failed to persist HAMT state objects to TiKV")
-            raise
+        put_state_hamt_objects(room_prefix, nodes, True)
 
     @trace
     @tag_args
@@ -884,16 +853,12 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             txn: LoggingTransaction,
             events_and_context: list[tuple[EventBase, UnpersistedEventContext]],
             prev_group: int,
-        ) -> tuple[
-            list[tuple[EventBase, UnpersistedEventContext]],
-            list[tuple[int, list[tuple[bytes, bytes]]]],
-        ]:
+        ) -> list[tuple[EventBase, UnpersistedEventContext]]:
             """Generate and store state groups for the provided events and contexts.
 
             Requires that we have the state as a delta from the last persisted state group.
 
-            Returns:
-                A list of state groups
+            Returns the events and contexts with their state-group IDs filled in.
             """
 
             # We need to check that the prev group isn't about to be deleted
@@ -925,11 +890,9 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             state_group_iter = iter(state_groups)
             hamt_writes: list[tuple[int, list[tuple[bytes, bytes]]]] = []
             # Nodes for state groups persisted earlier *in this same batch*
-            # aren't necessarily visible in TiKV yet -- TiKV writes are
-            # deferred to a single flush after this whole transaction
-            # commits (see below) -- so a later group's incremental update
-            # needs this in-memory cache to find its predecessor's root,
-            # rather than reading (nothing) back from TiKV mid-transaction.
+            # aren't visible in TiKV until the final flush below, so a later
+            # group's incremental update needs this in-memory cache to find
+            # its predecessor's root rather than reading it back from TiKV.
             local_nodes: dict[bytes, bytes] = {}
 
             for event, context in events_and_context:
@@ -965,20 +928,22 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 local_nodes.update(nodes)
                 sg_before = sg_after
 
-            return events_and_context, hamt_writes
+            # Make all nodes visible before the SQL transaction publishes any
+            # of the root pointers above.  Otherwise another worker can read
+            # a committed root and race the post-transaction TiKV flush.
+            self._put_state_hamt_objects_before_txn_commit(
+                room_prefix,
+                [node for _, nodes in hamt_writes for node in nodes],
+            )
 
-        events_and_context, hamt_writes = await self.db_pool.runInteraction(
+            return events_and_context
+
+        events_and_context = await self.db_pool.runInteraction(
             "store_state_deltas_for_batched.insert_deltas_group",
             insert_deltas_group_txn,
             events_and_context,
             prev_group,
         )
-
-        # All state groups in the batch share the same room (linear chain),
-        # so flush all their content-addressed nodes to TiKV in a single
-        # batched write rather than one round-trip per state group.
-        all_nodes = [node for _, nodes in hamt_writes for node in nodes]
-        await self._put_state_hamt_objects_after_txn(room_id, room_version, all_nodes)
 
         return events_and_context
 
@@ -1113,15 +1078,16 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 updates=updates,
             )
 
+            # Publish the root pointer only after its TiKV node graph exists.
+            self._put_state_hamt_objects_before_txn_commit(room_prefix, nodes)
+
             return state_group, root_structural_hash, nodes
 
-        state_group, _, nodes = await self.db_pool.runInteraction(
+        state_group, _, _ = await self.db_pool.runInteraction(
             "store_state_group.insert_full_state",
             insert_full_state_txn,
             current_state_ids,
         )
-
-        await self._put_state_hamt_objects_after_txn(room_id, room_version, nodes)
 
         return state_group
 

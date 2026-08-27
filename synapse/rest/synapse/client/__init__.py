@@ -33,6 +33,7 @@ from synapse.rest.synapse.client.new_user_consent import NewUserConsentResource
 from synapse.rest.synapse.client.pick_idp import PickIdpResource
 from synapse.rest.synapse.client.pick_username import pick_username_resource
 from synapse.rest.synapse.client.rendezvous import MSC4108RendezvousSessionResource
+from synapse.rest.synapse.client.server_stats import ServerStatsResource
 from synapse.rest.synapse.client.sso_register import SsoRegisterResource
 from synapse.rest.synapse.client.unsubscribe import UnsubscribeResource
 from synapse.rest.synapse.mas import MasResource
@@ -51,6 +52,8 @@ def build_synapse_client_resource_tree(hs: "HomeServer") -> Mapping[str, Resourc
          map from path to Resource.
     """
     resources = {
+        # Public server statistics for landing page and monitoring
+        "/_synapse/client/server_stats": ServerStatsResource(hs),
         # SSO bits. These are always loaded, whether or not SSO login is actually
         # enabled (they just won't work very well if it's not)
         "/_synapse/client/pick_idp": PickIdpResource(hs),
