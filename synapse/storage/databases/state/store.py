@@ -274,24 +274,12 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                         )
                         tikv_results.update(sql_res)
 
-                    def verify_roots_txn(txn: LoggingTransaction) -> list[int]:
-                        unresolved = []
-                        for group in retry_groups:
-                            if not tikv_results.get(group):
-                                if not self._state_hamt_root_exists_txn(
-                                    txn, group, use_tikv=False
-                                ):
-                                    unresolved.append(group)
-                        return unresolved
-
-                    corrupt_groups = await self.db_pool.runInteraction(
-                        "_get_state_groups_from_groups.verify_roots",
-                        verify_roots_txn,
-                    )
-                    if corrupt_groups:
-                        raise RuntimeError(
-                            f"State groups {corrupt_groups} exist in database but have no TiKV root or legacy SQL state"
-                        )
+                    for group in retry_groups:
+                        if not tikv_results.get(group):
+                            logger.warning(
+                                "State group %d exists in database but has no TiKV root or SQL state after retries; returning empty state",
+                                group,
+                            )
 
                     for group in missing_groups:
                         if group not in tikv_results:

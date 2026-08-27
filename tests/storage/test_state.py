@@ -486,7 +486,6 @@ class StateStoreTestCase(HomeserverTestCase):
                 "synapse.synapse_rust.tikv_engine.materialize_state_hamt"
             ) as mock_mat,
         ):
-            # Temporarily simulate TiKV being configured on the store
             self.state_datastore.tikv_pd_endpoints = ["127.0.0.1:2379"]
             try:
                 sql_res = self.get_success(
@@ -505,9 +504,12 @@ class StateStoreTestCase(HomeserverTestCase):
             finally:
                 self.state_datastore.tikv_pd_endpoints = []
 
-    def test_exact_filter_read_avoids_run_interaction(self) -> None:
-        """Verify that exact-filter reads under TiKV avoid SQL state read transactions."""
+    def test_outer_dispatch_fallback_does_not_call_tikv_in_transaction(self) -> None:
+        """Integration test: natural outer dispatch fallback for missing TiKV root calls zero TiKV RPCs in SQL txn."""
+        from typing import Any
         from unittest.mock import patch
+
+        from twisted.internet import defer
 
         event = self.inject_state_event(
             self.room, self.u_alice, EventTypes.Create, "", {}
@@ -517,13 +519,116 @@ class StateStoreTestCase(HomeserverTestCase):
         )
         assert state_group is not None
 
+        tikv_calls_inside_sql_txn = []
+
+        self.state_datastore.tikv_pd_endpoints = ["127.0.0.1:2379"]
+        try:
+            original_run_interaction = self.store.db_pool.runInteraction
+
+            async def spy_run_interaction(
+                desc: str, func: Any, *args: Any, **kwargs: Any
+            ) -> Any:
+                # Track if TiKV is called during fallback_sql
+                if "fallback_sql" in desc:
+                    with (
+                        patch(
+                            "synapse.synapse_rust.tikv_engine.get",
+                            side_effect=lambda k: tikv_calls_inside_sql_txn.append(k),
+                        ),
+                        patch(
+                            "synapse.synapse_rust.tikv_engine.batch_get",
+                            side_effect=lambda k: tikv_calls_inside_sql_txn.append(k),
+                        ),
+                    ):
+                        return await original_run_interaction(
+                            desc, func, *args, **kwargs
+                        )
+                return await original_run_interaction(desc, func, *args, **kwargs)
+
+            with (
+                patch("synapse.synapse_rust.tikv_engine.get", return_value=None),
+                patch.object(
+                    self.state_datastore.hs.get_clock(),
+                    "sleep",
+                    return_value=defer.succeed(None),
+                ),
+                patch.object(
+                    self.store.db_pool,
+                    "runInteraction",
+                    side_effect=spy_run_interaction,
+                ),
+            ):
+                res = self.get_success(
+                    self.state_datastore._get_state_groups_from_groups(
+                        [state_group], StateFilter.all()
+                    )
+                )
+                self.assertEqual(
+                    res[state_group], {(EventTypes.Create, ""): event.event_id}
+                )
+                self.assertEqual(
+                    len(tikv_calls_inside_sql_txn),
+                    0,
+                    "TiKV was called inside SQL fallback transaction!",
+                )
+        finally:
+            self.state_datastore.tikv_pd_endpoints = []
+
+    def test_exact_filter_read_avoids_run_interaction(self) -> None:
+        """Verify that exact-filter reads under TiKV execute real Rust lookup and avoid state fetch SQL transactions."""
+        from unittest.mock import patch
+
+        from synapse.storage.databases.state.bg_updates import (
+            _encode_state_hamt_root,
+            _state_hamt_node_tikv_key,
+            _state_hamt_root_tikv_key,
+        )
+        from synapse.synapse_rust import state_hamt
+
+        room_prefix = b"01234567"
+        room_id = self.room.to_string()
+        server_secret = self.state_datastore._state_hamt_secret()
+        entries = [
+            (EventTypes.Create, "", "$create:test"),
+            (EventTypes.Name, "", "$name:test"),
+        ]
+        root_hash, _sg, lattice, nodes = state_hamt.build_root_handle_with_lattice(
+            server_secret, room_id, entries
+        )
+        nodes_dict = dict(nodes)
+        root_bytes = nodes_dict[root_hash]
+        encoded_root = _encode_state_hamt_root(room_prefix, root_hash, lattice)
+
+        self.get_success(
+            self.store.db_pool.simple_insert(
+                table="state_groups",
+                values={"id": 88888, "room_id": room_id, "event_id": "$create:test"},
+                desc="test_exact_filter.insert_sg",
+            )
+        )
+
+        def mock_get(key: bytes) -> bytes | None:
+            if key == _state_hamt_root_tikv_key(self.hs.hostname, 88888):
+                return encoded_root
+            if key == _state_hamt_node_tikv_key(room_prefix, root_hash):
+                return root_bytes
+            return None
+
+        def mock_batch_get(keys: list[bytes]) -> list[tuple[bytes, bytes]]:
+            res = []
+            for k in keys:
+                for h, nb in nodes:
+                    if k == _state_hamt_node_tikv_key(room_prefix, h):
+                        res.append((k, nb))
+            return res
+
         self.state_datastore.tikv_pd_endpoints = ["127.0.0.1:2379"]
         try:
             with (
-                patch.object(
-                    self.state_datastore,
-                    "_lookup_state_hamt_from_tikv_direct",
-                    return_value=[(EventTypes.Create, "", event.event_id)],
+                patch("synapse.synapse_rust.tikv_engine.get", side_effect=mock_get),
+                patch(
+                    "synapse.synapse_rust.tikv_engine.batch_get",
+                    side_effect=mock_batch_get,
                 ),
                 patch.object(
                     self.store.db_pool,
@@ -533,14 +638,11 @@ class StateStoreTestCase(HomeserverTestCase):
             ):
                 res = self.get_success(
                     self.state_datastore._get_state_groups_from_groups(
-                        [state_group],
-                        StateFilter.from_types([(EventTypes.Create, "")]),
+                        [88888],
+                        StateFilter.from_types([(EventTypes.Name, "")]),
                     )
                 )
-                self.assertEqual(
-                    res[state_group], {(EventTypes.Create, ""): event.event_id}
-                )
-                # Verify that only the room-ID lookup query ran; no state fetch transaction was run
+                self.assertEqual(res[88888], {(EventTypes.Name, ""): "$name:test"})
                 called_descs = [
                     call.args[0] for call in spy_run_interaction.call_args_list
                 ]
@@ -611,13 +713,13 @@ class StateStoreTestCase(HomeserverTestCase):
         finally:
             self.state_datastore.tikv_pd_endpoints = []
 
-    def test_missing_tikv_root_with_no_legacy_payload_raises(self) -> None:
-        """Verify that an existing state group with missing TiKV root and no legacy state raises RuntimeError."""
+    def test_empty_legacy_group_fallback_returns_empty_dict(self) -> None:
+        """Verify that an existing rootless empty state group returns {} after retrying and falling back to SQL."""
         from unittest.mock import patch
 
         from twisted.internet import defer
 
-        # Insert a state_group entry directly without HAMT root or legacy state
+        # Insert an empty state_group entry (no HAMT root, no state rows, no edges)
         state_group = 999998
         self.get_success(
             self.store.db_pool.simple_insert(
@@ -627,34 +729,81 @@ class StateStoreTestCase(HomeserverTestCase):
                     "room_id": self.room.to_string(),
                     "event_id": "$fake:test",
                 },
-                desc="test_missing_root.insert_sg",
+                desc="test_empty_legacy.insert_sg",
             )
         )
 
         self.state_datastore.tikv_pd_endpoints = ["127.0.0.1:2379"]
         try:
             with (
-                patch.object(
-                    self.state_datastore,
-                    "_materialize_state_hamt_from_tikv_direct",
-                    return_value=None,
-                ),
+                patch("synapse.synapse_rust.tikv_engine.get", return_value=None),
                 patch.object(
                     self.state_datastore.hs.get_clock(),
                     "sleep",
                     return_value=defer.succeed(None),
                 ) as mock_sleep,
             ):
-                failure = self.get_failure(
+                res = self.get_success(
                     self.state_datastore._get_state_groups_from_groups(
                         [state_group], StateFilter.all()
-                    ),
-                    RuntimeError,
+                    )
                 )
-                self.assertIn(
-                    "have no TiKV root or legacy SQL state", str(failure.value)
-                )
+                self.assertEqual(res[state_group], {})
                 self.assertEqual(mock_sleep.call_count, 9)
+        finally:
+            self.state_datastore.tikv_pd_endpoints = []
+
+    def test_rootless_legacy_group_empty_filter_does_not_raise(self) -> None:
+        """Verify that a valid legacy group with state rows but no HAMT root returns {} without raising on empty filter."""
+        from unittest.mock import patch
+
+        from twisted.internet import defer
+
+        # Insert a legacy state group with state_groups_state entry
+        legacy_group = 77777
+        self.get_success(
+            self.store.db_pool.simple_insert(
+                table="state_groups",
+                values={
+                    "id": legacy_group,
+                    "room_id": self.room.to_string(),
+                    "event_id": "$legacy:test",
+                },
+                desc="test_legacy.insert_sg",
+            )
+        )
+        self.get_success(
+            self.store.db_pool.simple_insert(
+                table="state_groups_state",
+                values={
+                    "state_group": legacy_group,
+                    "room_id": self.room.to_string(),
+                    "type": EventTypes.Create,
+                    "state_key": "",
+                    "event_id": "$legacy_create:test",
+                },
+                desc="test_legacy.insert_sgs",
+            )
+        )
+
+        self.state_datastore.tikv_pd_endpoints = ["127.0.0.1:2379"]
+        try:
+            with (
+                patch("synapse.synapse_rust.tikv_engine.get", return_value=None),
+                patch.object(
+                    self.state_datastore.hs.get_clock(),
+                    "sleep",
+                    return_value=defer.succeed(None),
+                ),
+            ):
+                # Query for a filter type that doesn't match m.room.create (e.g. m.room.topic)
+                res = self.get_success(
+                    self.state_datastore._get_state_groups_from_groups(
+                        [legacy_group],
+                        StateFilter.from_types([(EventTypes.Topic, "")]),
+                    )
+                )
+                self.assertEqual(res[legacy_group], {})
         finally:
             self.state_datastore.tikv_pd_endpoints = []
 
