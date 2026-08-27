@@ -78,23 +78,15 @@ def _encode_state_hamt_root(
     room_prefix: bytes,
     root_hash: bytes,
     lattice: bytes,
-    room_id: str | None = None,
+    room_id: str,
 ) -> bytes:
-    if room_id is not None:
-        room_id_bytes = room_id.encode("utf-8")
-        return (
-            b"\x02"
-            + struct.pack(">H", len(room_prefix))
-            + room_prefix
-            + struct.pack(">H", len(room_id_bytes))
-            + room_id_bytes
-            + root_hash
-            + lattice
-        )
+    room_id_bytes = room_id.encode("utf-8")
     return (
         b"\x01"
         + struct.pack(">H", len(room_prefix))
         + room_prefix
+        + struct.pack(">H", len(room_id_bytes))
+        + room_id_bytes
         + root_hash
         + lattice
     )
@@ -102,40 +94,25 @@ def _encode_state_hamt_root(
 
 def _decode_state_hamt_root(
     value: bytes,
-) -> tuple[bytes, bytes, bytes, str | None]:
-    if len(value) < 3:
-        raise RuntimeError("invalid HAMT root record")
-    version = value[0]
-    if version == 1:
-        prefix_len = struct.unpack(">H", value[1:3])[0]
-        root_start = 3 + prefix_len
-        if len(value) < root_start + 16:
-            raise RuntimeError("truncated HAMT root record")
-        return (
-            value[3:root_start],
-            value[root_start : root_start + 16],
-            value[root_start + 16 :],
-            None,
-        )
-    elif version == 2:
-        prefix_len = struct.unpack(">H", value[1:3])[0]
-        room_id_len_offset = 3 + prefix_len
-        if len(value) < room_id_len_offset + 2:
-            raise RuntimeError("truncated HAMT root record")
-        room_id_len = struct.unpack(
-            ">H", value[room_id_len_offset : room_id_len_offset + 2]
-        )[0]
-        room_id_start = room_id_len_offset + 2
-        root_start = room_id_start + room_id_len
-        if len(value) < root_start + 16:
-            raise RuntimeError("truncated HAMT root record")
-        room_prefix = value[3:room_id_len_offset]
-        room_id = value[room_id_start:root_start].decode("utf-8")
-        root_hash = value[root_start : root_start + 16]
-        lattice = value[root_start + 16 :]
-        return room_prefix, root_hash, lattice, room_id
-    else:
-        raise RuntimeError(f"unsupported HAMT root record version {version}")
+) -> tuple[bytes, bytes, bytes, str]:
+    if len(value) < 5 or value[0] != 1:
+        raise RuntimeError("invalid or unsupported HAMT root record version")
+    prefix_len = struct.unpack(">H", value[1:3])[0]
+    room_id_len_offset = 3 + prefix_len
+    if len(value) < room_id_len_offset + 2:
+        raise RuntimeError("truncated HAMT root record")
+    room_id_len = struct.unpack(
+        ">H", value[room_id_len_offset : room_id_len_offset + 2]
+    )[0]
+    room_id_start = room_id_len_offset + 2
+    root_start = room_id_start + room_id_len
+    if len(value) < root_start + 16:
+        raise RuntimeError("truncated HAMT root record")
+    room_prefix = value[3:room_id_len_offset]
+    room_id = value[room_id_start:root_start].decode("utf-8")
+    root_hash = value[root_start : root_start + 16]
+    lattice = value[root_start + 16 :]
+    return room_prefix, root_hash, lattice, room_id
 
 
 def put_state_hamt_objects(
@@ -545,14 +522,8 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         self,
         state_group: int,
         keys: list[tuple[str, str]],
-        room_id: str | None = None,
     ) -> list[tuple[str, str, str]] | None:
-        """Selective HAMT key lookup directly against TiKV without a SQL transaction.
-
-        If the root record was written with v2 encoding, room_id is unpacked
-        directly from the TiKV root value. For legacy v1 roots without room_id,
-        it falls back to tree materialization against TiKV, avoiding SQL queries.
-        """
+        """Selective HAMT key lookup directly against TiKV without a SQL transaction."""
         from synapse.synapse_rust import state_hamt, tikv_engine
 
         root_value = tikv_engine.get(
@@ -560,18 +531,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         )
         if root_value is None:
             return None
-        room_prefix, root_hash, _lattice, stored_room_id = _decode_state_hamt_root(
-            root_value
-        )
-        effective_room_id = stored_room_id or room_id
-        if effective_room_id is None:
-            # Backwards compatibility: v1 root records did not store room_id.
-            # Materializing the tree against TiKV does not require room_id and avoids SQL queries.
-            all_entries = self._materialize_state_hamt_from_tikv_direct(state_group)
-            if all_entries is None:
-                return None
-            key_set = set(keys)
-            return [entry for entry in all_entries if (entry[0], entry[1]) in key_set]
+        room_prefix, root_hash, _lattice, room_id = _decode_state_hamt_root(root_value)
 
         root_key = _state_hamt_node_tikv_key(room_prefix, root_hash)
         root_bytes = tikv_engine.get(root_key)
@@ -584,7 +544,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         while True:
             entries, missing = state_hamt.lookup_state_entries(
                 hashlib.sha256(self.hs.config.key.macaroon_secret_key).digest(),
-                effective_room_id,
+                room_id,
                 root_bytes,
                 list(nodes.items()),
                 keys,
