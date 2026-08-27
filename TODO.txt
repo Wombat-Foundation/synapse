@@ -2,6 +2,24 @@
 Wed 26 Aug 2026
 ###################
 
+Fair — you're right, and it's worth being precise about why that's a ceiling, not a bug I can patch away with a smarter loop.
+
+Why a flat-dict diff can't beat O(S): current_state_ids and prev_state_ids are opaque Python dicts. Comparing two opaque collections element-by-element to find what differs is inherently O(min(S)) — there's no way to skip a range of "probably unchanged" entries without some structure that tells you so in advance. The cache-gating I just added only removes the I/O cost (no HAMT materialize on a miss); the O(S) Python-level scan is still there and is fundamentally unavoidable at that representation.
+
+The two theoretically sound ways to actually get to O(K) or O(D log S):
+
+1. Track the delta at the source, never reconstruct it after the fact. This is the case that's already fully solved elsewhere in this codebase — a single linear predecessor with state_delta_due_to_event = {(type,key): event_id}, known for free the instant the event is created, costs O(1) to produce and O(log S) to apply. The lesson generalizes: any code that produces a new StateMap should track what it changed relative to its input at the point of construction, not hand back an opaque flat map and make a downstream caller rediscover that by scanning.
+2. Where you truly can't track provenance (e.g. a genuine N-way state-resolution merge with no single linear parent), diff the trees, not the maps. This is exactly the "Fast delta isolation algorithm" already specified in docs/development-gg/persistent-typed-hamt-architecture.md: walk two HAMT roots together, and at each node compare structural hashes (or pointer identity in-process) before recursing. An unchanged subtree's hash is identical by construction — content addressing gives you the skip test for free, since every internal node already carries that digest as a byproduct of being built. Cost is O(D · log₃₂ S), where D is the number of leaves that actually differ — not O(S). This is strictly better than option 1's O(1) only in the multi-branch case; for a linear predecessor, option 1 wins outright since it's O(1) with zero tree walk at all.
+
+The actual fix this points to, concretely: state resolution doesn't need a flat-dict diff or a tree diff bolted on afterward — it should never produce a bare merged StateMap in the first place. Resolution already has to identify the conflicted (type, state_key) set to do its job (unconflicted keys just carry over from whichever branch, untouched); that conflicted set is the true delta, known at zero extra cost, the same way state_delta_due_to_event is for a single event. The right target is: make Synapse's state-resolution code return (resolved_map, changed_keys) or equivalent, and thread changed_keys through as delta_ids at the store_state_group call site — eliminating the diff step (mine or a tree-based one) entirely for that path, rather than making the diff cheaper.
+
+Given that, the diff branch I just landed is a stopgap that's honest about its cost (Python dict scan, gated to avoid adding I/O) — not the sound endpoint. Want me to go look at Synapse's actual state-resolution implementation (synapse/state/v2.py et al.) now and see how far it is from already tracking its conflict set, so this can be done properly instead of patched?
+
+
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+
 This conversation snippet ends on "so is this even possible" with an answer already given — there's no new question in your message, just session context (memory/skills reminders).
 
 Given you're on guru/refactor/rust-hamt-state-res with state_hamt.rs modified, want me to check how the actual Rust implementation currently handles this — i.e., whether state_hamt.rs/state_hamt.pyi already separate point-lookup (HAMT) from range/bulk access, or whether that's the gap this branch is meant to address?

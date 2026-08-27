@@ -1017,21 +1017,36 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 # computed independently. current_state_ids overwhelmingly
                 # overlaps prev_group's state in the common case (resolution
                 # only actually changes the keys that were in conflict), so
-                # diff against prev_group's state ourselves rather than
-                # accepting a full rebuild by default. This costs a
-                # materialize of prev_group's state -- often already warm via
-                # _state_group_cache/_state_group_members_cache -- but that
-                # read is no worse than the O(S) work a full rebuild would
-                # have done anyway, in exchange for turning O(S) tree
-                # construction + O(S/31) node writes into O(K log S) writes
-                # for however many keys actually changed.
-                groups = await self._get_state_for_groups([prev_group])
-                prev_state_ids = groups[prev_group]
-                updates = [
-                    (event_type, state_key, event_id)
-                    for (event_type, state_key), event_id in current_state_ids.items()
-                    if prev_state_ids.get((event_type, state_key)) != event_id
-                ]
+                # in principle diffing against prev_group's state would let
+                # us apply an incremental update instead of a full rebuild.
+                #
+                # But the full-rebuild path this replaces reads nothing from
+                # storage -- current_state_ids is already fully in memory --
+                # so computing that diff is only a win if it's free. Peek the
+                # two DictionaryCaches synchronously (zero I/O, no awaiting)
+                # rather than calling _get_state_for_groups, which would
+                # transparently fall through to a real SQL/TiKV HAMT
+                # materialize on a miss: a genuinely new O(S) read the full
+                # rebuild never paid, stacked on top of the O(K log S)
+                # writes that follow it. Only take the diff when both halves
+                # report the complete dict is already cache-resident;
+                # otherwise fall through to the full rebuild exactly as
+                # before, rather than gambling an uncached read against it.
+                non_member_entry = self._state_group_cache.get(prev_group)
+                member_entry = self._state_group_members_cache.get(prev_group)
+                if non_member_entry.full and member_entry.full:
+                    prev_state_ids: StateMap[str] = {
+                        **non_member_entry.value,
+                        **member_entry.value,
+                    }
+                    updates = [
+                        (event_type, state_key, event_id)
+                        for (
+                            event_type,
+                            state_key,
+                        ), event_id in current_state_ids.items()
+                        if prev_state_ids.get((event_type, state_key)) != event_id
+                    ]
 
         from synapse.synapse_rust import state_hamt
 
