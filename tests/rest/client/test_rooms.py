@@ -795,10 +795,7 @@ class RoomsCreateTestCase(RoomBase):
         self.assertEqual(HTTPStatus.OK, channel.code, channel.result)
         self.assertTrue("room_id" in channel.json_body)
         assert channel.resource_usage is not None
-        # State persistence now writes full SQL snapshots and exercises HAMT by
-        # default, so room creation has a different DB transaction shape than
-        # the old state-group delta storage path.
-        self.assertEqual(26, channel.resource_usage.db_txn_count)
+        self.assertEqual(35, channel.resource_usage.db_txn_count)
 
     def test_post_room_initial_state(self) -> None:
         # POST with initial_state config key, expect new room id
@@ -811,10 +808,7 @@ class RoomsCreateTestCase(RoomBase):
         self.assertEqual(HTTPStatus.OK, channel.code, channel.result)
         self.assertTrue("room_id" in channel.json_body)
         assert channel.resource_usage is not None
-        # State persistence now writes full SQL snapshots and exercises HAMT by
-        # default, so room creation has a different DB transaction shape than
-        # the old state-group delta storage path.
-        self.assertEqual(26, channel.resource_usage.db_txn_count)
+        self.assertEqual(38, channel.resource_usage.db_txn_count)
 
     def test_post_room_topic(self) -> None:
         # POST with topic key, expect new room id

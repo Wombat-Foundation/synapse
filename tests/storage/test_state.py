@@ -901,6 +901,21 @@ class StateStoreTestCase(HomeserverTestCase):
                 self.assertEqual(len(groups), 1)
                 self.assertEqual(context.state_group_before_event, groups[0][0])
 
+        final_sg = processed_events_and_context[-1][1].state_group_after_event
+        assert final_sg is not None
+        final_state = self.get_success(
+            self.state_datastore._get_state_groups_from_groups(
+                [final_sg], StateFilter.all()
+            )
+        )
+        self.assertEqual(
+            final_state[final_sg][(EventTypes.Create, "")], creation_event.event_id
+        )
+        self.assertEqual(final_state[final_sg][(EventTypes.Name, "")], event1.event_id)
+        self.assertEqual(
+            final_state[final_sg][(EventTypes.JoinRules, "")], event4.event_id
+        )
+
 
 class CurrentStateDeltaStreamTestCase(HomeserverTestCase):
     def prepare(self, reactor: MemoryReactor, clock: Clock, hs: HomeServer) -> None:

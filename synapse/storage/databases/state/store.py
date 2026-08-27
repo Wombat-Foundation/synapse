@@ -1002,7 +1002,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     local_roots=local_roots,
                 )
                 hamt_writes.append((sg_after, root_hash, lattice, nodes))
-                local_nodes = dict(nodes)
+                local_nodes.update(nodes)
                 local_roots[sg_after] = (root_hash, lattice)
                 sg_before = sg_after
 
