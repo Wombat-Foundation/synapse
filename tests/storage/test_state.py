@@ -43,7 +43,16 @@ from tests.unittest import HomeserverTestCase
 logger = logging.getLogger(__name__)
 
 
+# Selects the TiKV branch in unit tests. It is never passed to open_client or
+# used as a network address; integration tests get real PD endpoints from
+# SYNAPSE_TEST_TIKV_PD_ENDPOINTS via the homeserver configuration.
+_MOCK_TIKV_ENABLED = object()
+
+
 class StateStoreTestCase(HomeserverTestCase):
+    def _enable_mock_tikv(self) -> None:
+        self.state_datastore.tikv_pd_endpoints = cast(list[str], _MOCK_TIKV_ENABLED)
+
     def prepare(self, reactor: MemoryReactor, clock: Clock, hs: HomeServer) -> None:
         self.store = hs.get_datastores().main
         self.storage = hs.get_storage_controllers()
@@ -197,7 +206,7 @@ class StateStoreTestCase(HomeserverTestCase):
             )
         )
 
-        self.state_datastore.tikv_pd_endpoints = ["127.0.0.1:2379"]
+        self._enable_mock_tikv()
         try:
             with (
                 patch("synapse.synapse_rust.tikv_engine.get", return_value=None),
@@ -513,7 +522,7 @@ class StateStoreTestCase(HomeserverTestCase):
                 "synapse.synapse_rust.tikv_engine.materialize_state_hamt"
             ) as mock_mat,
         ):
-            self.state_datastore.tikv_pd_endpoints = ["127.0.0.1:2379"]
+            self._enable_mock_tikv()
             try:
                 sql_res = self.get_success(
                     self.store.db_pool.runInteraction(
@@ -543,7 +552,7 @@ class StateStoreTestCase(HomeserverTestCase):
         )
         assert state_group is not None
 
-        self.state_datastore.tikv_pd_endpoints = ["127.0.0.1:2379"]
+        self._enable_mock_tikv()
         try:
             with (
                 patch.object(
@@ -631,7 +640,7 @@ class StateStoreTestCase(HomeserverTestCase):
                         res.append((k, nb))
             return res
 
-        self.state_datastore.tikv_pd_endpoints = ["127.0.0.1:2379"]
+        self._enable_mock_tikv()
         try:
             with (
                 patch("synapse.synapse_rust.tikv_engine.get", side_effect=mock_get),
@@ -684,7 +693,7 @@ class StateStoreTestCase(HomeserverTestCase):
                 return responses.pop(0)
             return [(EventTypes.Create, "", event.event_id)]
 
-        self.state_datastore.tikv_pd_endpoints = ["127.0.0.1:2379"]
+        self._enable_mock_tikv()
         try:
             with (
                 patch.object(
@@ -745,7 +754,7 @@ class StateStoreTestCase(HomeserverTestCase):
             )
         )
 
-        self.state_datastore.tikv_pd_endpoints = ["127.0.0.1:2379"]
+        self._enable_mock_tikv()
         try:
             with (
                 patch("synapse.synapse_rust.tikv_engine.get", return_value=None),
@@ -772,7 +781,7 @@ class StateStoreTestCase(HomeserverTestCase):
 
         nonexistent_group = 9999991
 
-        self.state_datastore.tikv_pd_endpoints = ["127.0.0.1:2379"]
+        self._enable_mock_tikv()
         try:
             with (
                 patch("synapse.synapse_rust.tikv_engine.get", return_value=None),
@@ -819,7 +828,7 @@ class StateStoreTestCase(HomeserverTestCase):
                 )
             return None
 
-        self.state_datastore.tikv_pd_endpoints = ["127.0.0.1:2379"]
+        self._enable_mock_tikv()
         try:
             with (
                 patch.object(
@@ -893,7 +902,7 @@ class StateStoreTestCase(HomeserverTestCase):
                 return [(EventTypes.Create, "", event.event_id)]
             return None
 
-        self.state_datastore.tikv_pd_endpoints = ["127.0.0.1:2379"]
+        self._enable_mock_tikv()
         try:
             with (
                 patch.object(
@@ -979,7 +988,7 @@ class StateStoreTestCase(HomeserverTestCase):
                         res.append((k, nb))
             return res
 
-        self.state_datastore.tikv_pd_endpoints = ["127.0.0.1:2379"]
+        self._enable_mock_tikv()
         try:
             with (
                 patch("synapse.synapse_rust.tikv_engine.get", side_effect=mock_get),
@@ -1024,7 +1033,7 @@ class StateStoreTestCase(HomeserverTestCase):
                 return corrupt_root
             return None
 
-        self.state_datastore.tikv_pd_endpoints = ["127.0.0.1:2379"]
+        self._enable_mock_tikv()
         try:
             with patch("synapse.synapse_rust.tikv_engine.get", side_effect=mock_get):
                 self.get_failure(
