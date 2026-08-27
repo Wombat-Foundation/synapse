@@ -67,6 +67,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# TiKV roots are published after the SQL transaction that allocates their
+# state-group IDs. Readers on another worker can therefore observe the SQL row
+# before the root is visible in TiKV.
+TIKV_ROOT_PUBLICATION_ATTEMPTS = 10
+
+
 class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
     """A data store for fetching/storing state groups."""
 
@@ -209,31 +215,36 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 groups,
             )
 
-            if missing_groups:
-                # Single 10ms retry to absorb commit-to-read race edges
-                await self.hs.get_clock().sleep(Duration(milliseconds=10))
-                fetched_retry, missing_final = await defer_to_thread(
+            for attempt in range(1, TIKV_ROOT_PUBLICATION_ATTEMPTS):
+                if not missing_groups:
+                    return tikv_results
+
+                # Keep reads pure-TiKV during the normal publication window.
+                # The bounded linear backoff totals 2.25 seconds, matching the
+                # previous window without restoring SQL state fallback.
+                await self.hs.get_clock().sleep(Duration(milliseconds=50 * attempt))
+                fetched_retry, missing_groups = await defer_to_thread(
                     self.hs.get_reactor(),
                     fetch_from_tikv_blocking,
                     missing_groups,
                 )
                 tikv_results.update(fetched_retry)
 
-                if missing_final:
-                    existing_rows = await self.db_pool.simple_select_many_batch(
-                        table="state_groups",
-                        column="id",
-                        iterable=missing_final,
-                        retcols=("id",),
-                        desc="_get_state_groups_from_groups.check_missing",
+            if missing_groups:
+                existing_rows = await self.db_pool.simple_select_many_batch(
+                    table="state_groups",
+                    column="id",
+                    iterable=missing_groups,
+                    retcols=("id",),
+                    desc="_get_state_groups_from_groups.check_missing",
+                )
+                existing_in_sql = {group for (group,) in existing_rows}
+                if existing_in_sql:
+                    raise RuntimeError(
+                        f"State group(s) {existing_in_sql} exist in SQL but have no TiKV HAMT root"
                     )
-                    existing_in_sql = {group for (group,) in existing_rows}
-                    if existing_in_sql:
-                        raise RuntimeError(
-                            f"State group(s) {existing_in_sql} exist in SQL but have no TiKV HAMT root"
-                        )
-                    for group in missing_final:
-                        tikv_results[group] = {}
+                for group in missing_groups:
+                    tikv_results[group] = {}
 
             return tikv_results
 
@@ -549,7 +560,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         from synapse.synapse_rust import state_hamt, tikv_engine
 
         root_value = tikv_engine.get(
-            _state_hamt_root_tikv_key(self.server_name, state_group)
+            _state_hamt_root_tikv_key(self.tikv_namespace, state_group)
         )
         if root_value is None:
             return None
@@ -562,7 +573,9 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 f"HAMT root for state group {state_group} has the wrong room prefix"
             )
 
-        root_key = _state_hamt_node_tikv_key(room_prefix, root_hash)
+        root_key = _state_hamt_node_tikv_key(
+            self.tikv_namespace, room_prefix, root_hash
+        )
         root_rows = tikv_engine.batch_get([root_key])
         if not root_rows:
             raise RuntimeError(
@@ -587,7 +600,9 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             if not missing_hashes:
                 break
             key_to_hash = {
-                _state_hamt_node_tikv_key(room_prefix, node_hash): node_hash
+                _state_hamt_node_tikv_key(
+                    self.tikv_namespace, room_prefix, node_hash
+                ): node_hash
                 for node_hash in missing_hashes
             }
             rows = tikv_engine.batch_get(list(key_to_hash))
@@ -779,7 +794,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             from synapse.synapse_rust import tikv_engine
 
             root_value = tikv_engine.get(
-                _state_hamt_root_tikv_key(self.server_name, prev_state_group)
+                _state_hamt_root_tikv_key(self.tikv_namespace, prev_state_group)
             )
             if root_value is None:
                 return None
@@ -808,7 +823,9 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 from synapse.synapse_rust import tikv_engine
 
                 root_node_bytes = tikv_engine.get(
-                    _state_hamt_node_tikv_key(room_prefix, prev_root_hash)
+                    _state_hamt_node_tikv_key(
+                        self.tikv_namespace, room_prefix, prev_root_hash
+                    )
                 )
             else:
                 root_node_bytes = self.db_pool.simple_select_one_onecol_txn(
@@ -856,7 +873,9 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 from synapse.synapse_rust import tikv_engine
 
                 key_to_hash = {
-                    _state_hamt_node_tikv_key(room_prefix, node_hash): node_hash
+                    _state_hamt_node_tikv_key(
+                        self.tikv_namespace, room_prefix, node_hash
+                    ): node_hash
                     for node_hash in missing
                 }
                 rows = [
@@ -1043,6 +1062,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             await defer_to_thread(
                 self.hs.get_reactor(),
                 put_state_hamt_objects,
+                self.tikv_namespace,
                 room_prefix,
                 nodes,
                 roots,
@@ -1198,7 +1218,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         all_nodes = [node for _, _, _, nodes in hamt_writes for node in nodes]
         roots = [
             (
-                _state_hamt_root_tikv_key(self.server_name, group),
+                _state_hamt_root_tikv_key(self.tikv_namespace, group),
                 _encode_state_hamt_root(
                     room_prefix, root_hash, lattice, room_id=room_id
                 ),
@@ -1334,7 +1354,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             nodes,
             [
                 (
-                    _state_hamt_root_tikv_key(self.server_name, state_group),
+                    _state_hamt_root_tikv_key(self.tikv_namespace, state_group),
                     _encode_state_hamt_root(
                         room_prefix, root_hash, lattice, room_id=room_id
                     ),
@@ -1374,7 +1394,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 self.hs.get_reactor(),
                 tikv_engine.batch_delete,
                 [
-                    _state_hamt_root_tikv_key(self.server_name, int(state_group))
+                    _state_hamt_root_tikv_key(self.tikv_namespace, int(state_group))
                     for state_group in state_groups
                 ],
             )
@@ -1553,7 +1573,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 self.hs.get_reactor(),
                 tikv_engine.batch_delete,
                 [
-                    _state_hamt_root_tikv_key(self.server_name, int(state_group))
+                    _state_hamt_root_tikv_key(self.tikv_namespace, int(state_group))
                     for state_group in state_groups
                 ],
             )

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use once_cell::sync::OnceCell;
 use pyo3::prelude::*;
 use rezzy::hamt::{HamtNode, StructuralHash};
+use sha2::{Digest, Sha256};
 use tikv_client::{RawClient, TransactionClient};
 use tokio::runtime::Runtime;
 use tokio::time::{sleep, Duration};
@@ -39,6 +40,12 @@ fn is_retryable_txn_error(err: &tikv_client::Error) -> bool {
         tikv_client::Error::RegionError(r) => is_retryable_region_error(r),
         tikv_client::Error::ResolveLockError(_) => true,
         tikv_client::Error::PessimisticLockError { inner, .. } => is_retryable_txn_error(inner),
+        // Transaction commits can aggregate per-key errors. Retry only when
+        // every member is retryable, rather than turning a fatal error into a
+        // delayed retry loop.
+        tikv_client::Error::MultipleKeyErrors(errors) => {
+            !errors.is_empty() && errors.iter().all(is_retryable_txn_error)
+        }
         // Replaying this operation is safe: it only writes immutable,
         // content-addressed HAMT nodes and the same state-group root value.
         tikv_client::Error::UndeterminedError(_) => true,
@@ -375,12 +382,20 @@ const NODE_FETCH_BATCH_SIZE: usize = 100;
 /// around 4 billion rooms -- far beyond any realistic homeserver.
 const ROOM_PREFIX_LEN: usize = 8;
 
-/// Room-prefixed HAMT node key: `hamt:node:<room_prefix_hex>:<structural_hash_hex>`.
+/// Namespaced, room-prefixed HAMT node key:
+/// `hamt:node:<namespace_hash>:<room_prefix_hex>:<structural_hash_hex>`.
 /// The room prefix gives nodes belonging to the same room contiguous byte
 /// ranges in TiKV's sorted keyspace, for locality -- see `room_tikv_prefix_raw`.
-fn node_tikv_key(room_prefix: &[u8; ROOM_PREFIX_LEN], structural_hash: &StructuralHash) -> Vec<u8> {
-    let mut key = Vec::with_capacity(10 + ROOM_PREFIX_LEN * 2 + 1 + 32);
+fn node_tikv_key(
+    namespace: &str,
+    room_prefix: &[u8; ROOM_PREFIX_LEN],
+    structural_hash: &StructuralHash,
+) -> Vec<u8> {
+    let namespace_hash = Sha256::digest(namespace.as_bytes());
+    let mut key = Vec::with_capacity(10 + 32 + 1 + ROOM_PREFIX_LEN * 2 + 1 + 32);
     key.extend_from_slice(b"hamt:node:");
+    key.extend_from_slice(hex::encode(&namespace_hash[..16]).as_bytes());
+    key.push(b':');
     key.extend_from_slice(hex::encode(room_prefix).as_bytes());
     key.push(b':');
     key.extend_from_slice(hex::encode(structural_hash).as_bytes());
@@ -398,12 +413,11 @@ async fn get_client() -> Result<&'static RawClient, String> {
 /// `(event_type, state_key, event_id)` triples -- without crossing back into
 /// Python per node.
 ///
-/// The root pointer (`state_group -> room_prefix + root_hash`) lives in
-/// per-instance SQL `state_hamt_roots`, so the caller supplies `room_prefix`
-/// and `root_structural_hash`; TiKV holds only content-addressed nodes keyed
-/// by `hamt:node:<room_prefix>:<hash>`, which are globally unique and so safe
-/// to share across Synapse instances.
+/// The caller supplies the TiKV namespace, room prefix, and root hash. Node
+/// keys are namespaced because content-addressing is only safe to share when
+/// every deployment uses the same HAMT secret.
 async fn materialize_state_hamt_async(
+    namespace: &str,
     room_prefix: &[u8; ROOM_PREFIX_LEN],
     root_structural_hash: StructuralHash,
 ) -> Result<Vec<(String, String, String)>, String> {
@@ -419,7 +433,7 @@ async fn materialize_state_hamt_async(
         for chunk in current_batch.chunks(NODE_FETCH_BATCH_SIZE) {
             let keys: Vec<Vec<u8>> = chunk
                 .iter()
-                .map(|hash| node_tikv_key(room_prefix, hash))
+                .map(|hash| node_tikv_key(namespace, room_prefix, hash))
                 .collect();
             let rows = client.batch_get(keys).await.map_err(|e| e.to_string())?;
 
@@ -455,13 +469,13 @@ async fn materialize_state_hamt_async(
 }
 
 /// Materialize a state group's full state map directly from TiKV, in pure
-/// Rust. `room_prefix` and `root_structural_hash` come from the per-instance
-/// SQL root pointer (`state_hamt_roots`), so this needs no room_id or
-/// room-version lookup. TiKV stores only content-addressed nodes.
+/// Rust. `room_prefix` and `root_structural_hash` come from the TiKV root
+/// record, so this needs no room_id or room-version lookup.
 #[pyfunction]
-#[pyo3(text_signature = "(room_prefix, root_structural_hash, /)")]
+#[pyo3(text_signature = "(namespace, room_prefix, root_structural_hash, /)")]
 pub fn materialize_state_hamt(
     py: Python<'_>,
+    namespace: String,
     room_prefix: Vec<u8>,
     root_structural_hash: Vec<u8>,
 ) -> PyResult<Option<Vec<(String, String, String)>>> {
@@ -476,6 +490,7 @@ pub fn materialize_state_hamt(
     let rt = get_runtime();
     py.detach(|| {
         rt.block_on(materialize_state_hamt_async(
+            &namespace,
             &room_prefix,
             root_structural_hash,
         ))
@@ -571,5 +586,20 @@ mod tests {
         assert!(!is_retryable_txn_error(&tikv_client::Error::StringError(
             "generic string error".to_string()
         )));
+    }
+
+    #[test]
+    fn wrapped_key_conflicts_are_retryable() {
+        let conflict = tikv_client::Error::KeyError(Box::new(tikv_client::ProtoKeyError {
+            retryable: "write conflict".to_owned(),
+            ..Default::default()
+        }));
+        assert!(is_retryable_txn_error(
+            &tikv_client::Error::MultipleKeyErrors(vec![conflict])
+        ));
+
+        assert!(!is_retryable_txn_error(
+            &tikv_client::Error::MultipleKeyErrors(vec![tikv_client::Error::Unimplemented])
+        ));
     }
 }

@@ -85,6 +85,7 @@ class DatabaseConfig(Config):
 
         self.databases: list[DatabaseConnectionConfig] = []
         self.tikv_pd_endpoints: list[str] | None = None
+        self.tikv_namespace: str | None = None
 
     def read_config(self, config: JsonDict, **kwargs: Any) -> None:
         # We *experimentally* support specifying multiple databases via the
@@ -109,6 +110,7 @@ class DatabaseConfig(Config):
         tikv_config = config.get("tikv")
         if tikv_config:
             self.tikv_pd_endpoints = tikv_config.get("pd_endpoints")
+            self.tikv_namespace = tikv_config.get("namespace")
 
         if multi_database_config and database_config:
             raise ConfigError("Can't specify both 'database' and 'databases' in config")

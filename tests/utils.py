@@ -232,7 +232,12 @@ def default_config(
     }
 
     if TIKV_PD_ENDPOINTS:
-        config_dict["tikv"] = {"pd_endpoints": TIKV_PD_ENDPOINTS}
+        # Trial workers use separate SQL databases but share this TiKV cluster.
+        # State-group ids restart in each database, so isolate their HAMT keys.
+        config_dict["tikv"] = {
+            "pd_endpoints": TIKV_PD_ENDPOINTS,
+            "namespace": f"trial-{os.getpid()}",
+        }
 
     if parse:
         config = HomeServerConfig()

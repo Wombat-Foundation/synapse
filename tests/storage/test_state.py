@@ -306,7 +306,7 @@ class StateStoreTestCase(HomeserverTestCase):
 
         garbage_structural_hash = random_string(16).encode("ascii")
         garbage_node_key = _state_hamt_node_tikv_key(
-            room_prefix, garbage_structural_hash
+            self.state_datastore.tikv_namespace, room_prefix, garbage_structural_hash
         )
         tikv_engine.put(garbage_node_key, b"not a valid persisted HAMT node")
 
@@ -363,7 +363,9 @@ class StateStoreTestCase(HomeserverTestCase):
         )
 
         def mock_get(key: bytes) -> bytes | None:
-            if key == _state_hamt_root_tikv_key(self.hs.hostname, 1234):
+            if key == _state_hamt_root_tikv_key(
+                self.state_datastore.tikv_namespace, 1234
+            ):
                 return encoded_root
             return None
 
@@ -371,7 +373,9 @@ class StateStoreTestCase(HomeserverTestCase):
         def mock_batch_get(keys: list[bytes]) -> list[tuple[bytes, bytes]]:
             res = []
             for k in keys:
-                if k == _state_hamt_node_tikv_key(room_prefix, root_hash):
+                if k == _state_hamt_node_tikv_key(
+                    self.state_datastore.tikv_namespace, room_prefix, root_hash
+                ):
                     res.append((k, root_bytes))
             return res
 
@@ -418,9 +422,13 @@ class StateStoreTestCase(HomeserverTestCase):
         )
 
         def mock_get(key: bytes) -> bytes | None:
-            if key == _state_hamt_root_tikv_key(self.hs.hostname, 1234):
+            if key == _state_hamt_root_tikv_key(
+                self.state_datastore.tikv_namespace, 1234
+            ):
                 return encoded_root
-            if key == _state_hamt_node_tikv_key(room_prefix, root_hash):
+            if key == _state_hamt_node_tikv_key(
+                self.state_datastore.tikv_namespace, room_prefix, root_hash
+            ):
                 return root_bytes
             return None
 
@@ -428,7 +436,9 @@ class StateStoreTestCase(HomeserverTestCase):
             res = []
             for k in keys:
                 for h, nb in nodes:
-                    if k == _state_hamt_node_tikv_key(room_prefix, h):
+                    if k == _state_hamt_node_tikv_key(
+                        self.state_datastore.tikv_namespace, room_prefix, h
+                    ):
                         res.append((k, nb))
             return res
 
@@ -588,9 +598,13 @@ class StateStoreTestCase(HomeserverTestCase):
         )
 
         def mock_get(key: bytes) -> bytes | None:
-            if key == _state_hamt_root_tikv_key(self.hs.hostname, 88888):
+            if key == _state_hamt_root_tikv_key(
+                self.state_datastore.tikv_namespace, 88888
+            ):
                 return encoded_root
-            if key == _state_hamt_node_tikv_key(room_prefix, root_hash):
+            if key == _state_hamt_node_tikv_key(
+                self.state_datastore.tikv_namespace, room_prefix, root_hash
+            ):
                 return root_bytes
             return None
 
@@ -598,7 +612,9 @@ class StateStoreTestCase(HomeserverTestCase):
             res = []
             for k in keys:
                 for h, nb in nodes:
-                    if k == _state_hamt_node_tikv_key(room_prefix, h):
+                    if k == _state_hamt_node_tikv_key(
+                        self.state_datastore.tikv_namespace, room_prefix, h
+                    ):
                         res.append((k, nb))
             return res
 
@@ -802,8 +818,8 @@ class StateStoreTestCase(HomeserverTestCase):
         finally:
             self.state_datastore.tikv_pd_endpoints = []
 
-    def test_mixed_batch_with_corrupt_existing_group_raises(self) -> None:
-        """Verify that a batch with a valid group, nonexistent group, and an unresolved existing SQL group raises RuntimeError."""
+    def test_mixed_batch_with_unresolved_existing_group_raises(self) -> None:
+        """An unresolved existing group must not be masked by other results."""
         from unittest.mock import patch
 
         from twisted.internet import defer
@@ -816,16 +832,16 @@ class StateStoreTestCase(HomeserverTestCase):
         )
         assert valid_group is not None
 
-        corrupt_group = 8888881
+        unresolved_group = 8888881
         self.get_success(
             self.store.db_pool.simple_insert(
                 table="state_groups",
                 values={
-                    "id": corrupt_group,
+                    "id": unresolved_group,
                     "room_id": self.room.to_string(),
-                    "event_id": "$corrupt:test",
+                    "event_id": "$unresolved:test",
                 },
-                desc="test_corrupt.insert_sg",
+                desc="test_unresolved.insert_sg",
             )
         )
         nonexistent_group = 9999992
@@ -851,7 +867,7 @@ class StateStoreTestCase(HomeserverTestCase):
             ):
                 self.get_failure(
                     self.state_datastore._get_state_groups_from_groups(
-                        [valid_group, corrupt_group, nonexistent_group],
+                        [valid_group, unresolved_group, nonexistent_group],
                         StateFilter.all(),
                     ),
                     RuntimeError,
@@ -901,9 +917,13 @@ class StateStoreTestCase(HomeserverTestCase):
         )
 
         def mock_get(key: bytes) -> bytes | None:
-            if key == _state_hamt_root_tikv_key(self.hs.hostname, state_group):
+            if key == _state_hamt_root_tikv_key(
+                self.state_datastore.tikv_namespace, state_group
+            ):
                 return encoded_root
-            if key == _state_hamt_node_tikv_key(room_prefix, root_hash):
+            if key == _state_hamt_node_tikv_key(
+                self.state_datastore.tikv_namespace, room_prefix, root_hash
+            ):
                 return root_bytes
             return None
 
@@ -911,7 +931,9 @@ class StateStoreTestCase(HomeserverTestCase):
             res = []
             for k in keys:
                 for h, nb in nodes:
-                    if k == _state_hamt_node_tikv_key(room_prefix, h):
+                    if k == _state_hamt_node_tikv_key(
+                        self.state_datastore.tikv_namespace, room_prefix, h
+                    ):
                         res.append((k, nb))
             return res
 
@@ -954,7 +976,9 @@ class StateStoreTestCase(HomeserverTestCase):
         state_group = 88890
 
         def mock_get(key: bytes) -> bytes | None:
-            if key == _state_hamt_root_tikv_key(self.hs.hostname, state_group):
+            if key == _state_hamt_root_tikv_key(
+                self.state_datastore.tikv_namespace, state_group
+            ):
                 return corrupt_root
             return None
 
@@ -970,6 +994,24 @@ class StateStoreTestCase(HomeserverTestCase):
                 )
         finally:
             self.state_datastore.tikv_pd_endpoints = []
+
+    def test_tikv_hamt_keys_are_namespaced(self) -> None:
+        """Independent SQL databases must not share TiKV state-group keys."""
+        from synapse.storage.databases.state.bg_updates import (
+            _state_hamt_node_tikv_key,
+            _state_hamt_root_tikv_key,
+        )
+
+        room_prefix = b"01234567"
+        structural_hash = b"0123456789abcdef"
+        self.assertNotEqual(
+            _state_hamt_root_tikv_key("worker-one", 1),
+            _state_hamt_root_tikv_key("worker-two", 1),
+        )
+        self.assertNotEqual(
+            _state_hamt_node_tikv_key("worker-one", room_prefix, structural_hash),
+            _state_hamt_node_tikv_key("worker-two", room_prefix, structural_hash),
+        )
 
     def test_get_state_groups(self) -> None:
         e1 = self.inject_state_event(self.room, self.u_alice, EventTypes.Create, "", {})

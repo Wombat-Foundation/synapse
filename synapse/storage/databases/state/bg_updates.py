@@ -49,27 +49,32 @@ logger = logging.getLogger(__name__)
 MAX_STATE_DELTA_HOPS = 100
 
 
-def _state_hamt_node_tikv_key(room_prefix: bytes, structural_hash: bytes) -> bytes:
+def _state_hamt_node_tikv_key(
+    namespace: str, room_prefix: bytes, structural_hash: bytes
+) -> bytes:
     # Must match `node_tikv_key` in `rust/src/tikv_engine.rs`.
+    namespace_hash = hashlib.sha256(namespace.encode("utf-8")).digest()[:16]
     return (
         b"hamt:node:"
+        + namespace_hash.hex().encode("ascii")
+        + b":"
         + room_prefix.hex().encode("ascii")
         + b":"
         + structural_hash.hex().encode("ascii")
     )
 
 
-def _state_hamt_root_tikv_key(server_name: str, state_group: int) -> bytes:
-    """Return the per-homeserver HAMT root key.
+def _state_hamt_root_tikv_key(namespace: str, state_group: int) -> bytes:
+    """Return the per-namespace HAMT root key.
 
     State-group ids are only unique inside one Synapse database, so the
-    homeserver namespace is part of the key. The room prefix is stored in the
+    namespace is part of the key. The room prefix is stored in the
     value, allowing readers to locate a root from only its state-group id.
     """
-    server_hash = hashlib.sha256(server_name.encode("utf-8")).digest()[:16]
+    namespace_hash = hashlib.sha256(namespace.encode("utf-8")).digest()[:16]
     return (
         b"hamt:root:"
-        + server_hash.hex().encode("ascii")
+        + namespace_hash.hex().encode("ascii")
         + str(state_group).encode("ascii")
     )
 
@@ -116,25 +121,23 @@ def _decode_state_hamt_root(
 
 
 def put_state_hamt_objects(
+    namespace: str,
     room_prefix: bytes,
     nodes: list[tuple[bytes, bytes]],
     roots: list[tuple[bytes, bytes]],
     use_tikv: bool,
 ) -> None:
-    # Only content-addressed nodes are stored in TiKV, keyed by
-    # `hamt:node:<room_prefix>:<structural_hash>`. The root *pointer*
-    # (state_group -> room_prefix + root_hash) lives in per-instance SQL
-    # `state_hamt_roots`, so nothing in shared TiKV is keyed by the
-    # per-instance `state_group` id -- which is NOT globally unique across
-    # Synapse instances sharing one cluster (each instance's state_groups
-    # sequence restarts at 1). Keying by the per-instance id in shared TiKV
-    # let two instances overwrite each other's root pointer.
+    # Nodes and root pointers live in the same TiKV namespace. State-group ids
+    # are only unique within one Synapse database, so namespace both key types
+    # to prevent independent deployments from overwriting each other's state.
     # A linear event batch contains many adjacent snapshots and therefore many
     # repeated, unchanged node hashes. Collapse them before sending the batch to
     # TiKV rather than overwriting the same immutable object repeatedly.
     pairs = list(
         {
-            _state_hamt_node_tikv_key(room_prefix, structural_hash): node_bytes
+            _state_hamt_node_tikv_key(
+                namespace, room_prefix, structural_hash
+            ): node_bytes
             for structural_hash, node_bytes in nodes
         }.items()
     )
@@ -159,6 +162,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         hs: "HomeServer",
     ):
         super().__init__(database, db_conn, hs)
+        self.tikv_namespace = hs.config.database.tikv_namespace or hs.hostname
 
     @trace
     @tag_args
@@ -427,7 +431,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
 
             return (
                 tikv_engine.get(
-                    _state_hamt_root_tikv_key(self.server_name, state_group)
+                    _state_hamt_root_tikv_key(self.tikv_namespace, state_group)
                 )
                 is not None
             )
@@ -504,14 +508,16 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         from synapse.synapse_rust import tikv_engine
 
         root_value = tikv_engine.get(
-            _state_hamt_root_tikv_key(self.server_name, state_group)
+            _state_hamt_root_tikv_key(self.tikv_namespace, state_group)
         )
         if root_value is None:
             return None
         room_prefix, root_structural_hash, _lattice, _stored_room_id = (
             _decode_state_hamt_root(root_value)
         )
-        return tikv_engine.materialize_state_hamt(room_prefix, root_structural_hash)
+        return tikv_engine.materialize_state_hamt(
+            self.tikv_namespace, room_prefix, root_structural_hash
+        )
 
     def _materialize_state_hamt_from_tikv(
         self, txn: LoggingTransaction, state_group: int
@@ -527,13 +533,15 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         from synapse.synapse_rust import state_hamt, tikv_engine
 
         root_value = tikv_engine.get(
-            _state_hamt_root_tikv_key(self.server_name, state_group)
+            _state_hamt_root_tikv_key(self.tikv_namespace, state_group)
         )
         if root_value is None:
             return None
         room_prefix, root_hash, _lattice, room_id = _decode_state_hamt_root(root_value)
 
-        root_key = _state_hamt_node_tikv_key(room_prefix, root_hash)
+        root_key = _state_hamt_node_tikv_key(
+            self.tikv_namespace, room_prefix, root_hash
+        )
         root_bytes = tikv_engine.get(root_key)
         if root_bytes is None:
             raise RuntimeError(
@@ -555,7 +563,9 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
             if not missing:
                 return entries
             key_to_hash = {
-                _state_hamt_node_tikv_key(room_prefix, node_hash): node_hash
+                _state_hamt_node_tikv_key(
+                    self.tikv_namespace, room_prefix, node_hash
+                ): node_hash
                 for node_hash in missing
             }
             rows = tikv_engine.batch_get(list(key_to_hash))
