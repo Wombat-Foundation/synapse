@@ -21,6 +21,34 @@ const OPEN_CLIENT_RETRY_DELAY: Duration = Duration::from_secs(2);
 const TRANSACTION_WRITE_ATTEMPTS: u32 = 5;
 const TRANSACTION_WRITE_RETRY_DELAY: Duration = Duration::from_millis(10);
 
+fn is_retryable_key_error(k: &tikv_client::ProtoKeyError) -> bool {
+    k.conflict.is_some() || !k.retryable.is_empty() || k.locked.is_some()
+}
+
+fn is_retryable_region_error(r: &tikv_client::ProtoRegionError) -> bool {
+    r.not_leader.is_some()
+        || r.epoch_not_match.is_some()
+        || r.server_is_busy.is_some()
+        || r.stale_command.is_some()
+        || r.region_not_found.is_some()
+}
+
+fn is_retryable_txn_error(err: &tikv_client::Error) -> bool {
+    match err {
+        tikv_client::Error::KeyError(k) => is_retryable_key_error(k),
+        tikv_client::Error::RegionError(r) => is_retryable_region_error(r),
+        tikv_client::Error::ResolveLockError(_) => true,
+        tikv_client::Error::PessimisticLockError { inner, .. } => is_retryable_txn_error(inner),
+        // Replaying this operation is safe: it only writes immutable,
+        // content-addressed HAMT nodes and the same state-group root value.
+        tikv_client::Error::UndeterminedError(_) => true,
+        tikv_client::Error::LeaderNotFound { .. }
+        | tikv_client::Error::RegionNotFoundInResponse { .. }
+        | tikv_client::Error::EntryNotFoundInRegionCache => true,
+        _ => false,
+    }
+}
+
 fn get_runtime() -> &'static Runtime {
     RUNTIME.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
@@ -197,23 +225,27 @@ pub fn transactional_batch_put(py: Python<'_>, pairs: Vec<(Vec<u8>, Vec<u8>)>) -
     let rt = get_runtime();
     py.detach(|| {
         rt.block_on(async {
-            let mut last_error = None;
+            let mut last_error: Option<tikv_client::Error> = None;
 
             for attempt in 1..=TRANSACTION_WRITE_ATTEMPTS {
-                let result = async {
-                    let mut txn = client.begin_optimistic().await.map_err(|e| e.to_string())?;
+                let result: Result<(), tikv_client::Error> = async {
+                    let mut txn = client.begin_optimistic().await?;
                     for (key, value) in &pairs {
-                        txn.put(key.clone(), value.clone())
-                            .await
-                            .map_err(|e| e.to_string())?;
+                        txn.put(key.clone(), value.clone()).await?;
                     }
-                    txn.commit().await.map_err(|e| e.to_string())
+                    txn.commit().await?;
+                    Ok(())
                 }
                 .await;
 
                 match result {
                     Ok(_) => return Ok(()),
-                    Err(error) => last_error = Some(error),
+                    Err(error) => {
+                        if !is_retryable_txn_error(&error) {
+                            return Err(error.to_string());
+                        }
+                        last_error = Some(error);
+                    }
                 }
 
                 if attempt < TRANSACTION_WRITE_ATTEMPTS {
@@ -221,7 +253,9 @@ pub fn transactional_batch_put(py: Python<'_>, pairs: Vec<(Vec<u8>, Vec<u8>)>) -
                 }
             }
 
-            Err(last_error.expect("transaction write loop always records an error"))
+            Err(last_error
+                .expect("transaction write loop always records an error")
+                .to_string())
         })
     })
     .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
@@ -499,5 +533,43 @@ mod tests {
     fn prefix_scan_upper_bound_has_no_successor_for_all_ff_or_empty() {
         assert_eq!(prefix_scan_upper_bound(&[0xFF, 0xFF]), Vec::<u8>::new());
         assert_eq!(prefix_scan_upper_bound(&[]), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn retryable_key_error_does_not_retry_an_abort() {
+        let key_err = tikv_client::ProtoKeyError::default();
+        assert!(!is_retryable_key_error(&key_err));
+
+        let retryable_err = tikv_client::ProtoKeyError {
+            retryable: "retryable lock".to_string(),
+            ..Default::default()
+        };
+        assert!(is_retryable_key_error(&retryable_err));
+
+        let abort_err = tikv_client::ProtoKeyError {
+            abort: "txn aborted".to_string(),
+            ..Default::default()
+        };
+        assert!(!is_retryable_key_error(&abort_err));
+    }
+
+    #[test]
+    fn retryable_region_error_detects_flags() {
+        let region_err = tikv_client::ProtoRegionError::default();
+        assert!(!is_retryable_region_error(&region_err));
+    }
+
+    #[test]
+    fn fatal_errors_fail_fast_without_retrying() {
+        assert!(!is_retryable_txn_error(&tikv_client::Error::Unimplemented));
+        assert!(!is_retryable_txn_error(
+            &tikv_client::Error::UnsupportedMode
+        ));
+        assert!(!is_retryable_txn_error(
+            &tikv_client::Error::ColumnFamilyError("default".to_string())
+        ));
+        assert!(!is_retryable_txn_error(&tikv_client::Error::StringError(
+            "generic string error".to_string()
+        )));
     }
 }

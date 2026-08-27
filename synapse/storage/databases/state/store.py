@@ -189,108 +189,66 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 group_to_room = dict(rows)
 
             tikv_results: dict[int, StateMap[str]] = {}
-            remaining_groups = list(groups)
 
-            for attempt in range(10):
-
-                def fetch_from_tikv_blocking(
-                    target_groups: list[int],
-                ) -> tuple[dict[int, StateMap[str]], list[int]]:
-                    res: dict[int, StateMap[str]] = {}
-                    missing: list[int] = []
-                    for group in target_groups:
-                        if exact_keys is not None:
-                            room_id = group_to_room.get(group)
-                            if room_id is None:
-                                missing.append(group)
-                                continue
-                            entries = self._lookup_state_hamt_from_tikv_direct(
-                                group, room_id, exact_keys
-                            )
-                        else:
-                            entries = self._materialize_state_hamt_from_tikv_direct(
-                                group
-                            )
-
-                        if entries is None:
+            def fetch_from_tikv_blocking(
+                target_groups: list[int],
+            ) -> tuple[dict[int, StateMap[str]], list[int]]:
+                res: dict[int, StateMap[str]] = {}
+                missing: list[int] = []
+                for group in target_groups:
+                    if exact_keys is not None:
+                        room_id = group_to_room.get(group)
+                        if room_id is None:
                             missing.append(group)
                             continue
+                        entries = self._lookup_state_hamt_from_tikv_direct(
+                            group, room_id, exact_keys
+                        )
+                    else:
+                        entries = self._materialize_state_hamt_from_tikv_direct(group)
 
-                        state_map: MutableStateMap[str] = {}
-                        for typ, state_key, event_id in entries:
-                            key = (intern_string(typ), intern_string(state_key))
-                            state_map[key] = event_id
-                        res[group] = dict(state_filter.filter_state(state_map))
-                    return res, missing
+                    if entries is None:
+                        missing.append(group)
+                        continue
 
-                fetched, missing_groups = await defer_to_thread(
+                    state_map: MutableStateMap[str] = {}
+                    for typ, state_key, event_id in entries:
+                        key = (intern_string(typ), intern_string(state_key))
+                        state_map[key] = event_id
+                    res[group] = dict(state_filter.filter_state(state_map))
+                return res, missing
+
+            tikv_results, missing_groups = await defer_to_thread(
+                self.hs.get_reactor(),
+                fetch_from_tikv_blocking,
+                groups,
+            )
+
+            if missing_groups:
+                # Single 10ms retry to absorb commit-to-read race edges
+                await self.hs.get_clock().sleep(Duration(milliseconds=10))
+                fetched_retry, missing_final = await defer_to_thread(
                     self.hs.get_reactor(),
                     fetch_from_tikv_blocking,
-                    remaining_groups,
+                    missing_groups,
                 )
-                tikv_results.update(fetched)
+                tikv_results.update(fetched_retry)
 
-                if not missing_groups:
-                    return tikv_results
-
-                existing_rows = await self.db_pool.simple_select_many_batch(
-                    table="state_groups",
-                    column="id",
-                    iterable=missing_groups,
-                    retcols=("id",),
-                    desc="_get_state_groups_from_groups.check_state_groups",
-                )
-                existing_groups = {group for (group,) in existing_rows}
-                retry_groups = []
-                for group in missing_groups:
-                    if group in existing_groups:
-                        retry_groups.append(group)
-                    else:
-                        # Keep the result shape stable when this request also
-                        # includes a group that has been deleted or never
-                        # existed.
-                        tikv_results[group] = {}
-
-                if not retry_groups:
-                    for group in missing_groups:
-                        tikv_results[group] = {}
-                    return tikv_results
-
-                if attempt < 9:
-                    logger.debug(
-                        "State group HAMT root not ready yet in TiKV for %s; retrying (%d/10)",
-                        retry_groups,
-                        attempt + 1,
+                if missing_final:
+                    existing_rows = await self.db_pool.simple_select_many_batch(
+                        table="state_groups",
+                        column="id",
+                        iterable=missing_final,
+                        retcols=("id",),
+                        desc="_get_state_groups_from_groups.check_missing",
                     )
-                    remaining_groups = retry_groups
-                    await self.hs.get_clock().sleep(
-                        Duration(milliseconds=50 * (attempt + 1))
-                    )
-                else:
-                    for chunk in [
-                        retry_groups[i : i + 100]
-                        for i in range(0, len(retry_groups), 100)
-                    ]:
-                        sql_res = await self.db_pool.runInteraction(
-                            "_get_state_groups_from_groups.fallback_sql",
-                            self._get_state_groups_from_groups_txn,
-                            chunk,
-                            state_filter,
-                            use_tikv=False,
+                    existing_in_sql = {group for (group,) in existing_rows}
+                    if existing_in_sql:
+                        raise RuntimeError(
+                            f"State group(s) {existing_in_sql} exist in SQL but have no TiKV HAMT root"
                         )
-                        tikv_results.update(sql_res)
-
-                    for group in retry_groups:
-                        if group not in tikv_results:
-                            logger.warning(
-                                "State group %d exists in database but has no TiKV root or SQL state after retries; returning empty state",
-                                group,
-                            )
-
-                    for group in missing_groups:
-                        if group not in tikv_results:
-                            tikv_results[group] = {}
-                    return tikv_results
+                    for group in missing_final:
+                        tikv_results[group] = {}
 
             return tikv_results
 
