@@ -180,7 +180,18 @@
       .hero-quote-card {
         display: flex;
         flex-direction: column;
-        gap: 1.5rem;
+        gap: 1.25rem;
+      }
+
+      .quote-fade {
+        transition:
+          opacity 0.3s ease,
+          transform 0.3s ease;
+      }
+
+      .quote-faded {
+        opacity: 0;
+        transform: translateY(6px);
       }
 
       .quote-lead {
@@ -209,6 +220,14 @@
         content: "”";
       }
 
+      .quote-meta-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 0.75rem;
+      }
+
       .attribution {
         font-family: var(--font-mono);
         font-size: 0.82rem;
@@ -229,6 +248,31 @@
         color: #ff6b6b;
         border-bottom-style: solid;
         text-shadow: 0 0 8px rgba(255, 107, 107, 0.4);
+      }
+
+      .dictum-cycle-btn {
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid var(--border);
+        color: var(--text-muted);
+        font-family: var(--font-mono);
+        font-size: 0.68rem;
+        padding: 0.35rem 0.65rem;
+        border-radius: 3px;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+      }
+
+      .dictum-cycle-btn:hover {
+        border-color: var(--accent);
+        color: #fff;
+        background: rgba(212, 59, 59, 0.12);
+      }
+
+      .dictum-cycle-btn:active {
+        transform: scale(0.96);
       }
 
       .secondary-section {
@@ -439,20 +483,32 @@
         </div>
 
         <div class="hero-quote-card">
-          <p class="quote-lead">
+          <p class="quote-lead quote-fade" id="dictum-lead">
             proudly defiant of the irresistible forces that tolerate, for a
             moment, his knowledge and his condemnation, to sustain alone, a
             weary but unyielding Atlas, the world that his own ideals have
             fashioned despite the trampling march of unconscious power.
           </p>
-          <div class="attribution">
-            ~ Bertrand Russell,
-            <a
-              href="https://www.freddoso.com/courses/264/fmw.htm"
-              target="_blank"
-              rel="noopener noreferrer"
-              >"A free man's worship"</a
+          <div class="quote-meta-row">
+            <div class="attribution quote-fade" id="dictum-attr">
+              ~ Bertrand Russell,
+              <a
+                href="https://www.freddoso.com/courses/264/fmw.htm"
+                target="_blank"
+                rel="noopener noreferrer"
+                >"A free man's worship"</a
+              >
+            </div>
+            <button
+              class="dictum-cycle-btn"
+              onclick="rotateDictum(1)"
+              title="Cycle to next philosophical dictum"
             >
+              ◈ ROTATE DICTUM (<span id="dictum-index">1</span>/<span
+                id="dictum-total"
+                >5</span
+              >)
+            </button>
           </div>
         </div>
       </main>
@@ -520,7 +576,7 @@
       </div>
 
       <section class="secondary-section">
-        <div class="secondary-quote">
+        <div class="secondary-quote quote-fade" id="dictum-sec-quote">
           From the purely biological point of view it is unfortunate that the
           destructive side of technique has advanced so very much more rapidly
           than the creative side. In one moment a man may kill 500,000 people,
@@ -531,7 +587,7 @@
           existence and the survival of the fittest. But in the modern world the
           old mechanism of evolution can no longer be relied upon.
         </div>
-        <div class="secondary-author">
+        <div class="secondary-author quote-fade" id="dictum-sec-author">
           ~ Bertrand Russell, 1949: "Authority and the Individual"
         </div>
       </section>
@@ -560,6 +616,81 @@
     </div>
 
     <script>
+      const DICTUMS = [
+        {
+          lead: "proudly defiant of the irresistible forces that tolerate, for a moment, his knowledge and his condemnation, to sustain alone, a weary but unyielding Atlas, the world that his own ideals have fashioned despite the trampling march of unconscious power.",
+          attrText: 'Bertrand Russell, "A free man\'s worship"',
+          attrLink: "https://www.freddoso.com/courses/264/fmw.htm",
+          secQuote: `From the purely biological point of view it is unfortunate that the destructive side of technique has advanced so very much more rapidly than the creative side. In one moment a man may kill 500,000 people, but he cannot have children any quicker than in the days of our savage ancestors. If a man could have 500,000 children as quickly as by an atomic bomb he can destroy 500,000 enemies, we might, at the cost of enormous suffering, leave the biological problem to the struggle for existence and the survival of the fittest. But in the modern world the old mechanism of evolution can no longer be relied upon.`,
+          secAuthor: '~ Bertrand Russell, 1949: "Authority and the Individual"',
+        },
+        {
+          lead: "He who fights with monsters should look to it that he himself does not become a monster. And if you gaze long into an abyss, the abyss also gazes into you.",
+          attrText: 'Friedrich Nietzsche, "Beyond Good and Evil" (1886)',
+          attrLink: "https://www.gutenberg.org/ebooks/4363",
+          secQuote: `Optimism is cowardice. We are born into this time and must bravely follow the path to the destined end. There is no other way. Our duty is to hold on to the lost position without hope, without rescue, like that Roman soldier whose bones were found in front of a door in Pompeii, who, during the eruption of Vesuvius, died at his post because they forgot to relieve him. That is greatness.`,
+          secAuthor: '~ Oswald Spengler, 1931: "Man and Technics"',
+        },
+        {
+          lead: "Of the infinite desires of man, the chief are the desires for power and glory... Love of power is the chief motive producing the changes which social science has to study.",
+          attrText: 'Bertrand Russell, "Power: A New Social Analysis" (1938)',
+          attrLink:
+            "https://en.wikipedia.org/wiki/Power:_A_New_Social_Analysis",
+          secQuote: `Everyone sees what you appear to be, few experience what you really are. A prince must know well how to use both the beast and the man. He should choose from among the beasts the fox and the lion, because the lion cannot defend himself from traps and the fox cannot defend himself from wolves. One must therefore be a fox to recognize traps, and a lion to frighten wolves.`,
+          secAuthor: '~ Niccolò Machiavelli, 1532: "The Prince"',
+        },
+        {
+          lead: "A man who fears nothing is as powerful as he who is feared by everybody. What is a tyrant? A solitary surrounded by slaves.",
+          attrText: 'Emil Cioran, "A Short History of Decay" (1949)',
+          attrLink: "https://en.wikipedia.org/wiki/A_Short_History_of_Decay",
+          secQuote: `The world is my will and my representation. Life is a struggle for existence with the certainty of being conquered in the end. He who has awakened from the dream of life has realized that suffering and contest are the essence of all existence. To master the world, one must first master the illusion of peace.`,
+          secAuthor:
+            '~ Arthur Schopenhauer, 1818: "The World as Will and Representation"',
+        },
+        {
+          lead: "The dark side of the Force is a pathway to many abilities some consider to be unnatural. Power is not given to those who merely desire it, but seized by those with the will to reshape reality.",
+          attrText: 'Darth Sidious, "Dictums of the Sith"',
+          attrLink: "https://starwars.fandom.com/wiki/Darth_Sidious",
+          secQuote: `To achieve mastery one must embrace all aspects of the Force, not just the dogmatic narrow view of the Jedi. If you wish to understand the great mystery, you must study all its aspects, unclouded by fear or hesitation. It is only through strength that victory is achieved, and through victory that all chains are broken.`,
+          secAuthor: "~ The Sith Archives & Holocron Dictums",
+        },
+      ];
+
+      let currentDictumIdx = Math.floor(Math.random() * DICTUMS.length);
+
+      function renderDictum(idx) {
+        const d = DICTUMS[idx];
+        const fadeEls = [
+          document.getElementById("dictum-lead"),
+          document.getElementById("dictum-attr"),
+          document.getElementById("dictum-sec-quote"),
+          document.getElementById("dictum-sec-author"),
+        ];
+
+        fadeEls.forEach((el) => el && el.classList.add("quote-faded"));
+
+        setTimeout(() => {
+          document.getElementById("dictum-lead").innerText = d.lead;
+          document.getElementById("dictum-attr").innerHTML =
+            `~ ${d.attrText.split(",")[0]}, <a href="${d.attrLink}" target="_blank" rel="noopener noreferrer">${d.attrText.split(",").slice(1).join(",")}</a>`;
+          document.getElementById("dictum-sec-quote").innerText = d.secQuote;
+          document.getElementById("dictum-sec-author").innerText = d.secAuthor;
+          document.getElementById("dictum-index").innerText = idx + 1;
+          document.getElementById("dictum-total").innerText = DICTUMS.length;
+
+          fadeEls.forEach((el) => el && el.classList.remove("quote-faded"));
+        }, 250);
+      }
+
+      function rotateDictum(step = 1) {
+        currentDictumIdx =
+          (currentDictumIdx + step + DICTUMS.length) % DICTUMS.length;
+        renderDictum(currentDictumIdx);
+      }
+
+      // Initialize with a random dictum on load
+      renderDictum(currentDictumIdx);
+
       function toggleSyncBar() {
         const el = document.getElementById("sync-container");
         el.style.display = el.style.display === "none" ? "flex" : "none";
