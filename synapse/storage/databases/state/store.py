@@ -179,19 +179,20 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 )
                 results.update(res)
 
-            if not state_filter.is_full():
-                empty_groups = [group for group in groups if not results[group]]
-                if empty_groups:
-                    logger.warning(
-                        "[gg-state] _get_state_groups_from_groups returning early on "
-                        "non-full filter WITHOUT retry; empty groups: %s",
-                        empty_groups,
-                    )
-                return results
-
             empty_groups = [group for group in groups if not results[group]]
             if not empty_groups:
                 return results
+
+            # An empty result under a non-full filter is ambiguous on its
+            # own: it might genuinely mean "this group has no state matching
+            # the filter" (nothing to retry), or it might mean the group's
+            # HAMT root simply isn't visible yet on this connection (the
+            # same cross-worker/cross-connection race the full-filter path
+            # below already retries for). get_groups_without_hamt_roots_txn
+            # disambiguates by checking root existence directly, so both
+            # cases share one retry mechanism instead of the non-full-filter
+            # case skipping it and silently returning wrong (empty) state
+            # for a group that's actually still racing into visibility.
 
             def get_groups_without_hamt_roots_txn(
                 txn: LoggingTransaction,
