@@ -241,9 +241,15 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     desc="_get_state_groups_from_groups.check_state_groups",
                 )
                 existing_groups = {group for (group,) in existing_rows}
-                retry_groups = [
-                    group for group in missing_groups if group in existing_groups
-                ]
+                retry_groups = []
+                for group in missing_groups:
+                    if group in existing_groups:
+                        retry_groups.append(group)
+                    else:
+                        # Keep the result shape stable when this request also
+                        # includes a group that has been deleted or never
+                        # existed.
+                        tikv_results[group] = {}
 
                 if not retry_groups:
                     for group in missing_groups:
@@ -275,7 +281,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                         tikv_results.update(sql_res)
 
                     for group in retry_groups:
-                        if not tikv_results.get(group):
+                        if group not in tikv_results:
                             logger.warning(
                                 "State group %d exists in database but has no TiKV root or SQL state after retries; returning empty state",
                                 group,
@@ -595,7 +601,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         state_group: int,
         room_id: str,
         updates: list[tuple[str, str, str]],
-    ) -> tuple[dict[bytes, bytes], dict[int, tuple[bytes, bytes]]]:
+    ) -> tuple[dict[bytes, bytes], dict[int, tuple[bytes, bytes]]] | None:
         """Fetch a HAMT tree before starting a SQL transaction."""
         from synapse.synapse_rust import state_hamt, tikv_engine
 
@@ -603,7 +609,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             _state_hamt_root_tikv_key(self.server_name, state_group)
         )
         if root_value is None:
-            return {}, {}
+            return None
 
         stored_prefix, root_hash, lattice = _decode_state_hamt_root(root_value)
         if stored_prefix != room_prefix:
@@ -661,13 +667,25 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         room_id: str,
         updates: list[tuple[str, str, str]],
     ) -> tuple[dict[bytes, bytes], dict[int, tuple[bytes, bytes]]]:
-        return await defer_to_thread(
-            self.hs.get_reactor(),
-            self._prefetch_tikv_hamt_blocking,
-            room_prefix,
-            state_group,
-            room_id,
-            updates,
+        for attempt in range(10):
+            prefetched = await defer_to_thread(
+                self.hs.get_reactor(),
+                self._prefetch_tikv_hamt_blocking,
+                room_prefix,
+                state_group,
+                room_id,
+                updates,
+            )
+            if prefetched is not None:
+                return prefetched
+
+            if attempt < 9:
+                await self.hs.get_clock().sleep(
+                    Duration(milliseconds=50 * (attempt + 1))
+                )
+
+        raise RuntimeError(
+            f"Missing TiKV HAMT root while prefetching state group {state_group}"
         )
 
     def _persist_state_hamt_txn(

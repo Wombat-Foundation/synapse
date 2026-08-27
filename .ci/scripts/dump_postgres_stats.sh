@@ -8,6 +8,12 @@ stats_file=${1:-/tmp/postgres-stats.txt}
 psql_args=(-h "${SYNAPSE_POSTGRES_HOST:-localhost}"
 	-U "${SYNAPSE_POSTGRES_USER:-postgres}" -v ON_ERROR_STOP=1)
 
+# Check if PostgreSQL is reachable before attempting statistics collection
+if ! psql "${psql_args[@]}" -d postgres -c "SELECT 1;" >/dev/null 2>&1; then
+	echo "PostgreSQL is not reachable at ${SYNAPSE_POSTGRES_HOST:-localhost}; skipping statistics collection." | tee "$stats_file"
+	exit 0
+fi
+
 {
 	echo "PostgreSQL diagnostics"
 	date --iso-8601=seconds
