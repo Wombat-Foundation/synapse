@@ -15,6 +15,32 @@ The actual fix this points to, concretely: state resolution doesn't need a flat-
 
 Given that, the diff branch I just landed is a stopgap that's honest about its cost (Python dict scan, gated to avoid adding I/O) — not the sound endpoint. Want me to go look at Synapse's actual state-resolution implementation (synapse/state/v2.py et al.) now and see how far it is from already tracking its conflict set, so this can be done properly instead of patched?
 
+--- session continued past the above; the state-resolution follow-up wasn't done, this is where it actually landed instead ---
+
+Fixed the overclaim from the diff branch above: "no worse than what a full rebuild would have paid anyway" was false on a cache miss (full rebuild reads nothing from storage at all). Replaced the _get_state_for_groups call with a synchronous, zero-I/O peek at both DictionaryCaches (_state_group_cache.get / _state_group_members_cache.get) and only take the diff path when both report the complete dict already cache-resident; otherwise falls through to full rebuild as before. Committed as 515bc48a0f.
+
+Then wired the two remaining full-rebuild gaps that were flagged as "explicitly out of scope" a few commits earlier and turned out not to actually be out of scope:
+- TiKV mode: _persist_state_hamt_incremental_txn now fetches the previous root and missing path nodes via tikv_engine.get/batch_get (mirroring _lookup_state_hamt_from_tikv_txn's existing pattern) instead of unconditionally bailing to full rebuild. New nodes still flow through the existing post-commit _put_state_hamt_objects_after_txn flush in TiKV mode. Committed as 4dc23cc771.
+- store_state_group's single-event path (events/snapshot.py's UnpersistedEventContext.persist, not just the batched linear-chain path) was left on full rebuild with the justification "arbitrary/merged state, no single prior state to update from" — wrong, its own delta_ids parameter already is that delta in the common case. Generalized _persist_state_hamt_txn/_persist_state_hamt_incremental_txn/_persist_state_group_snapshot_txn from a single delta_due_to_event tuple to updates: list[...]; store_state_group now passes delta_ids through as that batch whenever both prev_group and delta_ids are given. Committed as e942f6c4e0, then the cache-gating fix above landed on top as 515bc48a0f.
+
+Net effect: every code path in store.py that persists a new state_group now tries an O(K log S) incremental update against a known prior root before ever falling back to a full O(S) rebuild, for both SQL and TiKV. The only genuinely unavoidable full-rebuild case left is prev_group being None (a room's first state group — nothing to diff against).
+
+Verified across all of the above: mypy clean, ruff clean, and the real integration-level test sweep (test_state, test_purge, test_state_deletion, test_events, test_room, test_federation's PartialJoinTestCase, test_handlers.test_room, test_rest.client.test_rooms — 251 tests) passes unchanged at each step, not just the state_hamt unit tests.
+
+Also landed this session, upstream of all of the above (state_hamt.rs):
+- 549725d1d1: fixed a real pre-existing bug where build_root_handle_and_nodes passed LtHash::default() (the zero lattice) instead of the entries' actual lattice into build_hamt_root_handle, so state_group_id was a constant for every room/state — silently defeating MSC00DC's whole cross-server dedup mechanism. Also gave the typed root (format 0x02, landed the commit before) a real unkeyed state_group_id instead of only a keyed/local digest.
+- 456c06c82e / 2cb652b393: added apply_flat_state_updates — O(log32 S) persistent insert/remove via rezzy's existing insert/remove primitives (already in rezzy, never wired up anywhere) instead of materialize-full-state-then-rebuild. Missing-node case is retryable data (mirrors lookup_state_entries's contract), not an exception.
+- ffd8168bc5: docs/development-gg/persistent-typed-hamt-architecture.md — the decision-complete design doc all of the above builds against.
+
+../proposals (guru/working, af926c30a): updated MSC00DC to cite rezzy's existing isolate_delta/diff_hamt_nodes as the reference implementation of the "Fast delta isolation algorithm" section, added guidance that it's the fallback for no-provenance comparisons (not the default path when a delta is already knowable), and added a new "Optional: typed roots" subsection documenting the per-event-type directory extension plus the state_group_id-must-stay-unkeyed caution found via the 549725d1d1 bug above.
+
+Honest remaining gaps (asked directly "is sql and tikv both optimal" — answer: no, not fully):
+1. Typed roots (build_typed_root/decode_typed_root) are built and tested but completely unwired from store.py for both backends — no state_hamt_typed_roots table, nothing persists or reads them. A type-scoped bulk read (all m.room.member) still does a full O(S) materialize on both SQL and TiKV.
+2. store_state_group's diff-when-cached fallback is still O(S) at the Python level (scanning the whole flat map) — cheaper than a full HAMT rebuild, but not O(K). The actual fix (state resolution reporting its own conflicted-key set as the delta, so no diff is needed at all) was identified but not implemented — this is the follow-up question at the top of this entry that never got picked up.
+3. TiKV's node key layout is still the short-term room-prefixed scheme (hamt:node:<room_prefix>:<hash>), not the pure content-addressed global layout ("Option B") docs/development-gg/tikv-state-root-longterm.txt itself recommends adopting after a validation run. Nobody's done that run.
+4. No ordered/range index exists or was ever planned to — accepted trade-off, not a gap, but worth being explicit that "optimal" here means optimal for what a HAMT can do (point lookup, type-scoped bulk, O(1) equality), not universal.
+5. GC/orphan-node reachability logic (reachability_audit/unreachable_node_hashes) wasn't re-examined against the new finer-grained incremental write pattern this session introduced. No known bug, just unverified.
+
 
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
