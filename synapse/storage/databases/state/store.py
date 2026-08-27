@@ -177,17 +177,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 else None
             )
 
-            group_to_room: dict[int, str] = {}
-            if exact_keys is not None:
-                rows = await self.db_pool.simple_select_many_batch(
-                    table="state_groups",
-                    column="id",
-                    iterable=groups,
-                    retcols=("id", "room_id"),
-                    desc="_get_state_groups_from_groups.get_rooms",
-                )
-                group_to_room = dict(rows)
-
             tikv_results: dict[int, StateMap[str]] = {}
 
             def fetch_from_tikv_blocking(
@@ -197,12 +186,8 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 missing: list[int] = []
                 for group in target_groups:
                     if exact_keys is not None:
-                        room_id = group_to_room.get(group)
-                        if room_id is None:
-                            missing.append(group)
-                            continue
                         entries = self._lookup_state_hamt_from_tikv_direct(
-                            group, room_id, exact_keys
+                            group, exact_keys
                         )
                     else:
                         entries = self._materialize_state_hamt_from_tikv_direct(group)
@@ -569,7 +554,9 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         if root_value is None:
             return None
 
-        stored_prefix, root_hash, lattice = _decode_state_hamt_root(root_value)
+        stored_prefix, root_hash, lattice, _stored_room_id = _decode_state_hamt_root(
+            root_value
+        )
         if stored_prefix != room_prefix:
             raise RuntimeError(
                 f"HAMT root for state group {state_group} has the wrong room prefix"
@@ -796,9 +783,12 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             )
             if root_value is None:
                 return None
-            _stored_prefix, prev_root_hash, prev_lattice = _decode_state_hamt_root(
-                root_value
-            )
+            (
+                _stored_prefix,
+                prev_root_hash,
+                prev_lattice,
+                _stored_room_id,
+            ) = _decode_state_hamt_root(root_value)
         else:
             prev_root = self.db_pool.simple_select_one_txn(
                 txn,
@@ -1209,7 +1199,9 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         roots = [
             (
                 _state_hamt_root_tikv_key(self.server_name, group),
-                _encode_state_hamt_root(room_prefix, root_hash, lattice),
+                _encode_state_hamt_root(
+                    room_prefix, root_hash, lattice, room_id=room_id
+                ),
             )
             for group, root_hash, lattice, _ in hamt_writes
         ]
@@ -1343,7 +1335,9 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             [
                 (
                     _state_hamt_root_tikv_key(self.server_name, state_group),
-                    _encode_state_hamt_root(room_prefix, root_hash, lattice),
+                    _encode_state_hamt_root(
+                        room_prefix, root_hash, lattice, room_id=room_id
+                    ),
                 )
             ],
         )

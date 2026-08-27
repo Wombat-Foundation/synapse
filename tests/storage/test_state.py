@@ -358,7 +358,9 @@ class StateStoreTestCase(HomeserverTestCase):
         nodes_dict = dict(nodes)
         self.assertGreater(len(nodes_dict), 1, "Expected multi-node HAMT tree")
         root_bytes = nodes_dict[root_hash]
-        encoded_root = _encode_state_hamt_root(room_prefix, root_hash, lattice)
+        encoded_root = _encode_state_hamt_root(
+            room_prefix, root_hash, lattice, room_id=room_id
+        )
 
         def mock_get(key: bytes) -> bytes | None:
             if key == _state_hamt_root_tikv_key(self.hs.hostname, 1234):
@@ -411,7 +413,9 @@ class StateStoreTestCase(HomeserverTestCase):
         )
         nodes_dict = dict(nodes)
         root_bytes = nodes_dict[root_hash]
-        encoded_root = _encode_state_hamt_root(room_prefix, root_hash, lattice)
+        encoded_root = _encode_state_hamt_root(
+            room_prefix, root_hash, lattice, room_id=room_id
+        )
 
         def mock_get(key: bytes) -> bytes | None:
             if key == _state_hamt_root_tikv_key(self.hs.hostname, 1234):
@@ -432,10 +436,10 @@ class StateStoreTestCase(HomeserverTestCase):
             with patch(
                 "synapse.synapse_rust.tikv_engine.batch_get", side_effect=mock_batch_get
             ):
-                # 1. Selective key lookup
+                # 1. Selective key lookup (pure TiKV with embedded room_id)
                 entries_selective = (
                     self.state_datastore._lookup_state_hamt_from_tikv_direct(
-                        1234, room_id, [(EventTypes.Name, "")]
+                        1234, [(EventTypes.Name, "")]
                     )
                 )
                 self.assertIsNotNone(entries_selective)
@@ -447,7 +451,7 @@ class StateStoreTestCase(HomeserverTestCase):
                 # 2. Absent root returns None
                 entries_absent = (
                     self.state_datastore._lookup_state_hamt_from_tikv_direct(
-                        9999, room_id, [(EventTypes.Name, "")]
+                        9999, [(EventTypes.Name, "")]
                     )
                 )
                 self.assertIsNone(entries_absent)
@@ -571,7 +575,9 @@ class StateStoreTestCase(HomeserverTestCase):
         )
         nodes_dict = dict(nodes)
         root_bytes = nodes_dict[root_hash]
-        encoded_root = _encode_state_hamt_root(room_prefix, root_hash, lattice)
+        encoded_root = _encode_state_hamt_root(
+            room_prefix, root_hash, lattice, room_id=room_id
+        )
 
         self.get_success(
             self.store.db_pool.simple_insert(
@@ -877,7 +883,9 @@ class StateStoreTestCase(HomeserverTestCase):
         )
         nodes_dict = dict(nodes)
         root_bytes = nodes_dict[root_hash]
-        encoded_root = _encode_state_hamt_root(room_prefix, root_hash, lattice)
+        encoded_root = _encode_state_hamt_root(
+            room_prefix, root_hash, lattice, room_id=room_id
+        )
 
         state_group = 88889
         self.get_success(
@@ -926,6 +934,60 @@ class StateStoreTestCase(HomeserverTestCase):
                                 (EventTypes.JoinRules, ""),
                             ]
                         ),
+                    )
+                )
+                self.assertEqual(
+                    res[state_group], {(EventTypes.Name, ""): "$name:test"}
+                )
+        finally:
+            self.state_datastore.tikv_pd_endpoints = []
+
+    def test_v1_legacy_root_without_room_id_fallback_materializes(self) -> None:
+        """Verify backwards compatibility: v1 root records (no room_id) fall back to TiKV tree materialization without SQL lookups."""
+        from unittest.mock import patch
+
+        from synapse.storage.databases.state.bg_updates import (
+            _encode_state_hamt_root,
+            _state_hamt_root_tikv_key,
+        )
+        from synapse.synapse_rust import state_hamt
+
+        room_prefix = b"01234567"
+        room_id = self.room.to_string()
+        server_secret = self.state_datastore._state_hamt_secret()
+        entries = [
+            (EventTypes.Create, "", "$create:test"),
+            (EventTypes.Name, "", "$name:test"),
+        ]
+        root_hash, _sg, lattice, _nodes = state_hamt.build_root_handle_with_lattice(
+            server_secret, room_id, entries
+        )
+        # v1 format: room_id=None
+        v1_encoded_root = _encode_state_hamt_root(
+            room_prefix, root_hash, lattice, room_id=None
+        )
+        self.assertEqual(v1_encoded_root[0], 1, "Expected v1 format header byte")
+
+        state_group = 88890
+
+        def mock_get(key: bytes) -> bytes | None:
+            if key == _state_hamt_root_tikv_key(self.hs.hostname, state_group):
+                return v1_encoded_root
+            return None
+
+        self.state_datastore.tikv_pd_endpoints = ["127.0.0.1:2379"]
+        try:
+            with (
+                patch("synapse.synapse_rust.tikv_engine.get", side_effect=mock_get),
+                patch(
+                    "synapse.synapse_rust.tikv_engine.materialize_state_hamt",
+                    return_value=entries,
+                ),
+            ):
+                res = self.get_success(
+                    self.state_datastore._get_state_groups_from_groups(
+                        [state_group],
+                        StateFilter.from_types([(EventTypes.Name, "")]),
                     )
                 )
                 self.assertEqual(
