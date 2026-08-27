@@ -987,12 +987,51 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         if prev_group is None and current_state_ids is None:
             raise Exception("current_state_ids and prev_group can't both be None")
 
+        # `updates` is the delta from prev_group's state to current_state_ids,
+        # for _persist_state_hamt_txn to apply via O(K log S) path-copying
+        # instead of rebuilding the whole tree. It falls back to a full
+        # rebuild inside _persist_state_hamt_txn regardless if prev_group has
+        # no usable stored root+lattice (e.g. the room's first state group).
+        updates: list[tuple[str, str, str]] | None = None
+
         if current_state_ids is None:
             assert prev_group is not None
             assert delta_ids is not None
             groups = await self._get_state_for_groups([prev_group])
             current_state_ids = dict(groups[prev_group])
             current_state_ids.update(delta_ids)
+            # delta_ids already *is* the delta here -- no need to diff.
+            updates = [
+                (event_type, state_key, event_id)
+                for (event_type, state_key), event_id in delta_ids.items()
+            ]
+        elif prev_group is not None:
+            if delta_ids is not None:
+                updates = [
+                    (event_type, state_key, event_id)
+                    for (event_type, state_key), event_id in delta_ids.items()
+                ]
+            else:
+                # The caller handed us a full current_state_ids map with no
+                # explicit delta -- e.g. a state-resolution/merge result it
+                # computed independently. current_state_ids overwhelmingly
+                # overlaps prev_group's state in the common case (resolution
+                # only actually changes the keys that were in conflict), so
+                # diff against prev_group's state ourselves rather than
+                # accepting a full rebuild by default. This costs a
+                # materialize of prev_group's state -- often already warm via
+                # _state_group_cache/_state_group_members_cache -- but that
+                # read is no worse than the O(S) work a full rebuild would
+                # have done anyway, in exchange for turning O(S) tree
+                # construction + O(S/31) node writes into O(K log S) writes
+                # for however many keys actually changed.
+                groups = await self._get_state_for_groups([prev_group])
+                prev_state_ids = groups[prev_group]
+                updates = [
+                    (event_type, state_key, event_id)
+                    for (event_type, state_key), event_id in current_state_ids.items()
+                    if prev_state_ids.get((event_type, state_key)) != event_id
+                ]
 
         from synapse.synapse_rust import state_hamt
 
@@ -1000,22 +1039,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             self._state_hamt_secret(),
             room_id,
             room_version.msc4291_room_ids_as_hashes,
-        )
-
-        # When the caller already knows the delta from prev_group (the
-        # common case: a single state event, or a state-resolution/merge
-        # result the caller diffed itself), apply it via O(K log S)
-        # path-copying instead of rebuilding the whole tree from
-        # current_state_ids. Falls back to a full rebuild inside
-        # _persist_state_hamt_txn if prev_group has no usable stored
-        # root+lattice (e.g. the room's first state group).
-        updates = (
-            [
-                (event_type, state_key, event_id)
-                for (event_type, state_key), event_id in delta_ids.items()
-            ]
-            if prev_group is not None and delta_ids is not None
-            else None
         )
 
         def insert_full_state_txn(
