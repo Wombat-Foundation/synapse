@@ -39,6 +39,14 @@ type PyBuiltRootWithLattice = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<PyPersistedNodeByt
 type PyStateUpdate = (String, String, Option<String>);
 type PyAppliedStateUpdate = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<PyPersistedNodeBytes>);
 type PyApplyOutcome = (Option<PyAppliedStateUpdate>, Vec<Vec<u8>>);
+type PyBuiltTypedRootWithLattice = (
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<PyPersistedNodeBytes>,
+);
+type PyApplyTypedOutcome = (Option<PyAppliedStateUpdate>, Vec<Vec<u8>>);
 type PyStateEntry = (String, String, String);
 type PyReachabilityAudit = (Vec<Vec<u8>>, Vec<Vec<u8>>);
 type PyStateLookup = (Vec<PyStateEntry>, Vec<Vec<u8>>);
@@ -147,6 +155,21 @@ fn build_typed_root_and_nodes(
     room_id: &str,
     entries: Vec<(String, String, String)>,
 ) -> Result<(TypedRoot, Vec<PersistedNodeBytes>), String> {
+    let (root, _lattice, nodes) =
+        build_typed_root_nodes_and_lattice(server_secret, room_id, entries)?;
+    Ok((root, nodes))
+}
+
+/// Same as [`build_typed_root_and_nodes`], but also returns the full,
+/// retained `LtHash` lattice — not just its collapsed `state_group_id`
+/// digest — so a caller can later apply incremental updates against this
+/// typed root via [`apply_typed_state_updates_impl`], mirroring
+/// [`build_root_handle_nodes_and_lattice`] for the flat path.
+fn build_typed_root_nodes_and_lattice(
+    server_secret: &[u8; 32],
+    room_id: &str,
+    entries: Vec<(String, String, String)>,
+) -> Result<(TypedRoot, LtHash, Vec<PersistedNodeBytes>), String> {
     let room_key = room_structural_key_raw(server_secret, room_id);
     let mut by_type: std::collections::BTreeMap<String, Vec<(String, String)>> =
         std::collections::BTreeMap::new();
@@ -184,7 +207,7 @@ fn build_typed_root_and_nodes(
         state_group_id: rezzy::hamt::state_group_id_from_lthash(&lattice),
         directory,
     };
-    Ok((root, nodes))
+    Ok((root, lattice, nodes))
 }
 
 #[must_use]
@@ -511,6 +534,169 @@ fn apply_flat_state_updates_impl(
     }))
 }
 
+/// Result of applying updates to a typed root: the re-encoded `TypedRoot`
+/// bytes, its (recomputed) `state_group_id`, the updated retained lattice,
+/// and only the newly created subtree nodes.
+struct AppliedTypedStateUpdate {
+    typed_root_bytes: Vec<u8>,
+    state_group_id: StateGroupId,
+    lattice_bytes: Vec<u8>,
+    new_nodes: Vec<PersistedNodeBytes>,
+}
+
+/// Same [`ApplyOutcome`] split as the flat path: a resolver miss is
+/// retryable data, not an error.
+enum ApplyTypedOutcome {
+    Applied(AppliedTypedStateUpdate),
+    Missing(HashSet<StructuralHash>),
+}
+
+/// Applies a batch of single-key changes to an existing typed root by
+/// updating only the touched event types' subtrees via O(log₃₂ S_T)
+/// path-copying, and touching only their directory entries — not by
+/// rebuilding the whole typed structure from a full entry list. This is the
+/// typed-root analogue of [`apply_flat_state_updates_impl`]; doing anything
+/// less here (e.g. calling `build_typed_root` fresh from a materialized
+/// entry list on every update) would reintroduce the same O(S)-per-PDU tax
+/// this whole design exists to eliminate, just on the typed side instead of
+/// the flat side.
+///
+/// `nodes` must include, for every event type touched by `updates`, the
+/// nodes along the path(s) to the changed keys within that type's subtree
+/// (the subtree root at minimum) — not the whole typed structure. A type
+/// with no existing subtree (its first-ever entry) needs no prior nodes:
+/// `rezzy::hamt::build_hamt` with an empty entry list produces a valid
+/// empty root to insert into, so a brand-new event type is not a special
+/// case requiring a different code path.
+fn apply_typed_state_updates_impl(
+    server_secret: &[u8; 32],
+    room_id: &str,
+    typed_root_bytes: &[u8],
+    nodes: Vec<(Vec<u8>, Vec<u8>)>,
+    lattice_bytes: &[u8],
+    updates: Vec<(String, String, Option<String>)>,
+) -> Result<ApplyTypedOutcome, String> {
+    let room_key = room_structural_key_raw(server_secret, room_id);
+    let mut lattice = lattice_from_bytes(lattice_bytes)?;
+
+    let typed_root = TypedRoot::decode_v1(typed_root_bytes)?;
+    let mut directory: std::collections::BTreeMap<String, StructuralHash> =
+        typed_root.directory.into_iter().collect();
+
+    let mut node_map: HashMap<StructuralHash, Arc<HamtNode<String, String>>> = HashMap::new();
+    for (hash_bytes, node_bytes) in nodes {
+        let hash = structural_hash_from_slice(&hash_bytes)?;
+        let node = decode_persisted_node(&node_bytes)?;
+        node_map.insert(hash, node);
+    }
+    let known: HashSet<StructuralHash> = node_map.keys().copied().collect();
+
+    let mut by_type: std::collections::BTreeMap<String, Vec<(String, Option<String>)>> =
+        std::collections::BTreeMap::new();
+    for (event_type, state_key, new_event_id) in updates {
+        by_type
+            .entry(event_type)
+            .or_default()
+            .push((state_key, new_event_id));
+    }
+
+    let mut seen_new = HashSet::new();
+    let mut new_nodes = Vec::new();
+
+    for (event_type, type_updates) in by_type {
+        let subtree_key = typed_subtree_key(&room_key, &event_type);
+
+        let mut subtree_root = match directory.get(&event_type) {
+            Some(hash) => match node_map.get(hash).cloned() {
+                Some(node) => node,
+                None => return Ok(ApplyTypedOutcome::Missing(HashSet::from([*hash]))),
+            },
+            None => rezzy::hamt::build_hamt(&subtree_key, Vec::<(String, String)>::new())
+                .map_err(|e| format!("Failed to build empty typed subtree: {e:?}"))?,
+        };
+
+        for (state_key, new_event_id) in type_updates {
+            let mut resolver =
+                |hash: &StructuralHash| -> Result<Arc<HamtNode<String, String>>, StructuralHash> {
+                    node_map.get(hash).cloned().ok_or(*hash)
+                };
+
+            macro_rules! handle_typed_mutate_err {
+                ($result:expr) => {
+                    match $result {
+                        Ok(pair) => pair,
+                        Err(rezzy::hamt::HamtMutateError::Resolve(missing_hash)) => {
+                            return Ok(ApplyTypedOutcome::Missing(HashSet::from([missing_hash])));
+                        }
+                        Err(rezzy::hamt::HamtMutateError::HashCollision { depth, bucket_size }) => {
+                            return Err(format!(
+                                "hash collision at depth {depth} with bucket size {bucket_size}"
+                            ));
+                        }
+                    }
+                };
+            }
+
+            match new_event_id {
+                Some(new_id) => {
+                    let (new_subtree_root, old_value) =
+                        handle_typed_mutate_err!(rezzy::hamt::insert(
+                            &subtree_root,
+                            &subtree_key,
+                            state_key.clone(),
+                            new_id.clone(),
+                            &mut resolver
+                        ));
+                    match old_value {
+                        Some(old) => lattice.replace(&event_type, &state_key, &old, &new_id),
+                        None => lattice.insert(&event_type, &state_key, &new_id),
+                    }
+                    subtree_root = new_subtree_root;
+                }
+                None => {
+                    let (new_subtree_root, old_value) =
+                        handle_typed_mutate_err!(rezzy::hamt::remove(
+                            &subtree_root,
+                            &subtree_key,
+                            state_key.as_str(),
+                            &mut resolver
+                        ));
+                    if let Some(old) = old_value {
+                        lattice.remove(&event_type, &state_key, &old);
+                    }
+                    subtree_root = new_subtree_root;
+                }
+            }
+            node_map.insert(subtree_root.structural_hash, subtree_root.clone());
+        }
+
+        if subtree_root.datamap == 0 && subtree_root.nodemap == 0 {
+            // The subtree lost its last entry -- drop the directory entry
+            // entirely rather than keeping a pointer to an empty subtree.
+            directory.remove(&event_type);
+        } else {
+            directory.insert(event_type, subtree_root.structural_hash);
+        }
+        collect_new_persisted_nodes(subtree_root, &known, &mut seen_new, &mut new_nodes);
+    }
+
+    let directory: Vec<(String, StructuralHash)> = directory.into_iter().collect();
+    let new_root = TypedRoot {
+        structural_hash: typed_root_hash(&room_key, &directory),
+        state_group_id: rezzy::hamt::state_group_id_from_lthash(&lattice),
+        directory,
+    };
+    let state_group_id = new_root.state_group_id;
+    let typed_root_bytes = new_root.encode_v1()?;
+
+    Ok(ApplyTypedOutcome::Applied(AppliedTypedStateUpdate {
+        typed_root_bytes,
+        state_group_id,
+        lattice_bytes: lattice_to_bytes(&lattice),
+        new_nodes,
+    }))
+}
+
 pub(crate) fn decode_persisted_node(
     node_bytes: &[u8],
 ) -> Result<Arc<HamtNode<String, String>>, String> {
@@ -741,6 +927,80 @@ pub fn build_typed_root(
 }
 
 #[pyfunction]
+#[pyo3(text_signature = "(server_secret, room_id, entries, /)")]
+pub fn build_typed_root_with_lattice(
+    server_secret: Vec<u8>,
+    room_id: &str,
+    entries: Vec<(String, String, String)>,
+) -> PyResult<PyBuiltTypedRootWithLattice> {
+    let server_secret: [u8; 32] = server_secret
+        .try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("server_secret must be 32 bytes"))?;
+    let (root, lattice, nodes) =
+        build_typed_root_nodes_and_lattice(&server_secret, room_id, entries)
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    let root_bytes = root
+        .encode_v1()
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    Ok((
+        root.structural_hash.to_vec(),
+        root.state_group_id.to_vec(),
+        lattice_to_bytes(&lattice),
+        root_bytes,
+        nodes
+            .into_iter()
+            .map(|(hash, bytes)| (hash.to_vec(), bytes))
+            .collect(),
+    ))
+}
+
+#[pyfunction]
+#[pyo3(
+    text_signature = "(server_secret, room_id, typed_root_bytes, nodes, lattice_bytes, updates, /)"
+)]
+pub fn apply_typed_state_updates(
+    server_secret: Vec<u8>,
+    room_id: &str,
+    typed_root_bytes: Vec<u8>,
+    nodes: Vec<(Vec<u8>, Vec<u8>)>,
+    lattice_bytes: Vec<u8>,
+    updates: Vec<PyStateUpdate>,
+) -> PyResult<PyApplyTypedOutcome> {
+    let server_secret: [u8; 32] = server_secret
+        .try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("server_secret must be 32 bytes"))?;
+    let outcome = apply_typed_state_updates_impl(
+        &server_secret,
+        room_id,
+        &typed_root_bytes,
+        nodes,
+        &lattice_bytes,
+        updates,
+    )
+    .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+
+    Ok(match outcome {
+        ApplyTypedOutcome::Applied(applied) => (
+            Some((
+                applied.typed_root_bytes,
+                applied.state_group_id.to_vec(),
+                applied.lattice_bytes,
+                applied
+                    .new_nodes
+                    .into_iter()
+                    .map(|(hash, bytes)| (hash.to_vec(), bytes))
+                    .collect(),
+            )),
+            Vec::new(),
+        ),
+        ApplyTypedOutcome::Missing(missing) => (
+            None,
+            missing.into_iter().map(|hash| hash.to_vec()).collect(),
+        ),
+    })
+}
+
+#[pyfunction]
 #[pyo3(text_signature = "(root_bytes, /)")]
 pub fn decode_typed_root(root_bytes: Vec<u8>) -> PyResult<PyDecodedTypedRoot> {
     let root =
@@ -917,6 +1177,11 @@ pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     )?)?;
     child_module.add_function(wrap_pyfunction!(apply_flat_state_updates, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(build_typed_root, &child_module)?)?;
+    child_module.add_function(wrap_pyfunction!(
+        build_typed_root_with_lattice,
+        &child_module
+    )?)?;
+    child_module.add_function(wrap_pyfunction!(apply_typed_state_updates, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(decode_typed_root, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(materialize_state_entries, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(lookup_state_entries, &child_module)?)?;
@@ -940,6 +1205,198 @@ mod tests {
         match outcome.expect(msg) {
             ApplyOutcome::Applied(applied) => applied,
             ApplyOutcome::Missing(missing) => panic!("unexpected missing nodes: {missing:02x?}"),
+        }
+    }
+
+    fn expect_applied_typed(
+        outcome: Result<ApplyTypedOutcome, String>,
+        msg: &str,
+    ) -> AppliedTypedStateUpdate {
+        match outcome.expect(msg) {
+            ApplyTypedOutcome::Applied(applied) => applied,
+            ApplyTypedOutcome::Missing(missing) => {
+                panic!("unexpected missing nodes: {missing:02x?}")
+            }
+        }
+    }
+
+    #[test]
+    fn apply_typed_state_updates_matches_full_rebuild_with_few_new_nodes() {
+        // The typed-root analogue of apply_flat_state_updates_matches_full_
+        // rebuild_with_few_new_nodes: a one-key replace against an existing
+        // typed root must converge on exactly what a full build_typed_root
+        // rebuild of the resulting state produces, and write only a small,
+        // depth-bounded number of new subtree nodes -- not O(S_T), and
+        // definitely not O(S).
+        let server_secret = [31u8; 32];
+        let room_id = "!room:test.example";
+        let mut entries: Vec<(String, String, String)> = (0..300)
+            .map(|i| {
+                (
+                    "m.room.member".to_owned(),
+                    format!("@user-{i}:test.example"),
+                    format!("$original-{i}"),
+                )
+            })
+            .collect();
+        entries.push((
+            "m.room.create".to_owned(),
+            String::new(),
+            "$create".to_owned(),
+        ));
+        entries.push((
+            "m.room.power_levels".to_owned(),
+            String::new(),
+            "$pl".to_owned(),
+        ));
+
+        let (typed_root, lattice, nodes) =
+            build_typed_root_nodes_and_lattice(&server_secret, room_id, entries.clone())
+                .expect("initial typed root should build");
+        let total_node_count = nodes.len();
+        let typed_root_bytes = typed_root.encode_v1().expect("typed root should encode");
+
+        // --- Replace one existing key within the m.room.member subtree ---
+        let changed_key = "@user-150:test.example".to_owned();
+        let applied = expect_applied_typed(
+            apply_typed_state_updates_impl(
+                &server_secret,
+                room_id,
+                &typed_root_bytes,
+                nodes.iter().map(|(h, b)| (h.to_vec(), b.clone())).collect(),
+                &lattice_to_bytes(&lattice),
+                vec![(
+                    "m.room.member".to_owned(),
+                    changed_key.clone(),
+                    Some("$replaced-150".to_owned()),
+                )],
+            ),
+            "incremental typed replace should apply",
+        );
+
+        assert!(
+            applied.new_nodes.len() < 10,
+            "expected a small, depth-bounded number of new subtree nodes for one \
+             changed key out of {} entries, got {}",
+            entries.len(),
+            applied.new_nodes.len()
+        );
+        assert!(
+            applied.new_nodes.len() < total_node_count,
+            "incremental typed update must not rewrite the whole structure"
+        );
+
+        let mut rebuilt_entries = entries.clone();
+        let idx = rebuilt_entries
+            .iter()
+            .position(|(_, sk, _)| sk == &changed_key)
+            .expect("changed key must exist in original entries");
+        rebuilt_entries[idx].2 = "$replaced-150".to_owned();
+        let (rebuilt_typed_root, _, _) =
+            build_typed_root_nodes_and_lattice(&server_secret, room_id, rebuilt_entries.clone())
+                .expect("full typed rebuild should build");
+
+        let applied_typed_root =
+            TypedRoot::decode_v1(&applied.typed_root_bytes).expect("applied root should decode");
+        assert_eq!(
+            applied_typed_root.structural_hash, rebuilt_typed_root.structural_hash,
+            "incrementally updated typed root must have the same directory structural_hash as \
+             a full rebuild of the resulting state"
+        );
+        assert_eq!(
+            applied_typed_root.directory, rebuilt_typed_root.directory,
+            "incrementally updated typed root must have the same per-type subtree hashes as a \
+             full rebuild of the resulting state"
+        );
+        assert_eq!(
+            applied.state_group_id, rebuilt_typed_root.state_group_id,
+            "incrementally updated typed root must have the same cross-server state_group_id \
+             as a full rebuild of the resulting state"
+        );
+
+        // --- Insert a state key for a brand-new event type (no prior subtree) ---
+        let applied_typed_root_bytes = applied.typed_root_bytes.clone();
+        let mut combined_nodes = nodes;
+        combined_nodes.extend(applied.new_nodes.clone());
+
+        let applied2 = expect_applied_typed(
+            apply_typed_state_updates_impl(
+                &server_secret,
+                room_id,
+                &applied_typed_root_bytes,
+                combined_nodes
+                    .iter()
+                    .map(|(h, b)| (h.to_vec(), b.clone()))
+                    .collect(),
+                &applied.lattice_bytes,
+                vec![(
+                    "m.room.join_rules".to_owned(),
+                    String::new(),
+                    Some("$join_rules".to_owned()),
+                )],
+            ),
+            "incremental insert of a brand-new event type should apply",
+        );
+
+        let mut rebuilt_entries2 = rebuilt_entries;
+        rebuilt_entries2.push((
+            "m.room.join_rules".to_owned(),
+            String::new(),
+            "$join_rules".to_owned(),
+        ));
+        let (rebuilt_typed_root2, _, _) =
+            build_typed_root_nodes_and_lattice(&server_secret, room_id, rebuilt_entries2)
+                .expect("second full typed rebuild should build");
+        let applied_typed_root2 = TypedRoot::decode_v1(&applied2.typed_root_bytes)
+            .expect("second applied root should decode");
+
+        assert_eq!(
+            applied_typed_root2.directory, rebuilt_typed_root2.directory,
+            "adding a brand-new event type incrementally must match a full rebuild"
+        );
+        assert_eq!(applied2.state_group_id, rebuilt_typed_root2.state_group_id);
+    }
+
+    #[test]
+    fn apply_typed_state_updates_reports_missing_node_for_retry() {
+        let server_secret = [32u8; 32];
+        let room_id = "!room:test.example";
+        let entries: Vec<(String, String, String)> = (0..200)
+            .map(|i| {
+                (
+                    "m.room.member".to_owned(),
+                    format!("@user-{i}:test.example"),
+                    format!("${i}"),
+                )
+            })
+            .collect();
+        let (typed_root, lattice, _nodes) =
+            build_typed_root_nodes_and_lattice(&server_secret, room_id, entries)
+                .expect("initial typed root should build");
+        let typed_root_bytes = typed_root.encode_v1().expect("typed root should encode");
+
+        let outcome = apply_typed_state_updates_impl(
+            &server_secret,
+            room_id,
+            &typed_root_bytes,
+            Vec::new(), // deliberately withhold the subtree root and every path node
+            &lattice_to_bytes(&lattice),
+            vec![(
+                "m.room.member".to_owned(),
+                "@user-150:test.example".to_owned(),
+                Some("$replaced".to_owned()),
+            )],
+        )
+        .expect("should not be a hard error");
+
+        match outcome {
+            ApplyTypedOutcome::Missing(missing) => assert!(
+                !missing.is_empty(),
+                "expected at least one missing hash to retry with"
+            ),
+            ApplyTypedOutcome::Applied(_) => {
+                panic!("expected a Missing outcome when subtree nodes were withheld")
+            }
         }
     }
 

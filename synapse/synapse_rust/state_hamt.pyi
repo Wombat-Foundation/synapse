@@ -85,6 +85,55 @@ def decode_typed_root(
 ) -> tuple[bytes, bytes, list[tuple[str, bytes]]]:
     """Returns (structural_hash, state_group_id, directory)."""
 
+def build_typed_root_with_lattice(
+    server_secret: bytes,
+    room_id: str,
+    entries: Sequence[tuple[str, str, str]],
+) -> tuple[bytes, bytes, bytes, bytes, list[tuple[bytes, bytes]]]:
+    """Returns (structural_hash, state_group_id, lattice_bytes, root_bytes, nodes).
+
+    Same as `build_typed_root`, but also returns the full, retained
+    2048-byte `LtHash` lattice (not just its collapsed `state_group_id`
+    digest). A caller must keep `lattice_bytes` alongside the typed root if
+    it wants to apply further incremental updates via
+    `apply_typed_state_updates` later.
+    """
+
+def apply_typed_state_updates(
+    server_secret: bytes,
+    room_id: str,
+    typed_root_bytes: bytes,
+    nodes: Sequence[tuple[bytes, bytes]],
+    lattice_bytes: bytes,
+    updates: Sequence[tuple[str, str, str | None]],
+) -> tuple[tuple[bytes, bytes, bytes, list[tuple[bytes, bytes]]] | None, list[bytes]]:
+    """Applies single-key changes to an existing typed root by updating only
+    the touched event types' subtrees via O(log S_T) path-copying and
+    touching only their directory entries -- the typed-root analogue of
+    `apply_flat_state_updates`. Doing anything less (e.g. rebuilding the
+    whole typed structure from a materialized entry list per update) would
+    reintroduce the O(S)-per-update tax on the typed side that
+    `apply_flat_state_updates` already eliminates on the flat side.
+
+    Returns `(applied, missing)`, with the same retry contract as
+    `apply_flat_state_updates`: on success, `applied` is
+    `(typed_root_bytes, state_group_id, lattice_bytes, new_nodes)` and
+    `missing` is empty; on a resolver miss, `applied` is `None` and
+    `missing` names the hash(es) to fetch and retry with. `new_nodes`
+    contains only the newly created subtree nodes.
+
+    `nodes` must include, for every event type touched by `updates`, the
+    nodes along the path(s) to the changed keys within that type's subtree
+    (the subtree root at minimum). A brand-new event type (no existing
+    subtree) needs no prior nodes for that type.
+
+    `updates` is `(event_type, state_key, new_event_id)`, where
+    `new_event_id=None` means "remove this key". `lattice_bytes` is the
+    *retained* lattice for the current typed root (from
+    `build_typed_root_with_lattice` or a prior call to this function), not
+    the collapsed `state_group_id`.
+    """
+
 def materialize_state_entries(
     root_node_bytes: bytes,
     nodes: Sequence[tuple[bytes, bytes]],
