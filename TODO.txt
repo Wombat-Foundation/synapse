@@ -2,6 +2,30 @@
 Wed 26 Aug 2026
 ###################
 
+Let me actually verify one thing worth raising: whether the local_nodes fix I just made is the only place with this hazard, or whether store_state_group's non-batched path has it too across separate transactions.
+
+  Read 1 file
+
+Verified one important thing while I was in there: the fix is correctly scoped. store_state_group's single-group path (insert_full_state_txn) already calls _put_state_hamt_objects_after_txn immediately after its own transaction returns, before the function hands control back — so no other call site chains multiple state groups against each other inside one uncommitted transaction. insert_deltas_group_txn was the only place with the hazard, confirmed by grep. Good — the fix isn't papering over a symptom while missing siblings.
+
+A few things genuinely worth raising, that neither side has surfaced yet:
+
+1. Lattice storage cost is real and unbudgeted. Every state_hamt_roots row now carries a full 2048-byte retained LtHash, not the 32-byte collapsed digest. For a room with thousands of state groups (any long-lived, active room), that's 2048 × N_state_groups bytes just for lattice retention — on top of the node tree itself. Nobody's quantified this yet. Worth deciding now whether every root needs a retained lattice forever, or whether it's fine to only retain it for "recent" roots and accept full-rebuild fallback (which the code already does gracefully) once a root ages out and its lattice is pruned. That's a real, boundable win if state groups are append-mostly.
+
+2. Typed roots may be solving an already-solved problem. Synapse's Python layer already splits _state_group_cache (non-member) from _state_group_members_cache (member) — the single highest-value type-scoped split already exists at the cache layer, for free, with no HAMT changes. Before wiring typed roots into store.py, it's worth asking: what read pattern actually needs type-scoped storage, not just type-scoped cache? A cold-cache read of m.room.power_levels alone, a federation-facing type-scoped query, or state_at_event for a historical group not in cache — those are real cases. But if the answer turns out to be "mostly cache hits already cover this," the typed-root storage layer is solving a problem storage-level caching mostly already solved, and the ROI needs to be checked before more engineering goes in.
+
+3. Untested: prev_group deletion racing an in-flight incremental read. _persist_state_hamt_incremental_txn already degrades correctly to None → full rebuild if prev_group's state_hamt_roots row is gone (purge ran first). That's handled by existing code, but there's no test exercising "purge concurrently with a new event landing" for the incremental path specifically — worth one test, low cost, catches a real if rare production race.
+
+4. The crash-between-commit-and-TiKV-flush window is pre-existing, not new. Same hazard existed in the full-rebuild path before any of this incremental work — a committed SQL root pointer whose TiKV nodes haven't landed yet if the process dies mid-flush. The read-side retry-on-missing-node contract is presumably the existing mitigation for that. Worth confirming it's actually tested against a killed-process scenario rather than just the intra-transaction ordering I just fixed — those are two different races that look similar.
+
+Want me to turn #1 or #3 into actual work now, or keep this as a running list?
+
+
+
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+
 Fair — you're right, and it's worth being precise about why that's a ceiling, not a bug I can patch away with a smarter loop.
 
 Why a flat-dict diff can't beat O(S): current_state_ids and prev_state_ids are opaque Python dicts. Comparing two opaque collections element-by-element to find what differs is inherently O(min(S)) — there's no way to skip a range of "probably unchanged" entries without some structure that tells you so in advance. The cache-gating I just added only removes the I/O cost (no HAMT materialize on a miss); the O(S) Python-level scan is still there and is fundamentally unavoidable at that representation.
