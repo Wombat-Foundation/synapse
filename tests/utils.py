@@ -22,6 +22,7 @@
 import atexit
 import os
 import signal
+import uuid
 from types import FrameType, TracebackType
 from typing import (
     Literal,
@@ -233,10 +234,11 @@ def default_config(
 
     if TIKV_PD_ENDPOINTS:
         # Trial workers use separate SQL databases but share this TiKV cluster.
-        # State-group ids restart in each database, so isolate their HAMT keys.
+        # State-group ids restart in each database, so isolate their HAMT keys
+        # uniquely per HomeServer instance.
         config_dict["tikv"] = {
             "pd_endpoints": TIKV_PD_ENDPOINTS,
-            "namespace": f"trial-{os.getpid()}",
+            "namespace": f"trial-{os.getpid()}-{uuid.uuid4().hex}",
         }
 
     if parse:

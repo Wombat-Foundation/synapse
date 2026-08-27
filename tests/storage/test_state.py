@@ -209,7 +209,11 @@ class StateStoreTestCase(HomeserverTestCase):
         self._enable_mock_tikv()
         try:
             with (
-                patch("synapse.synapse_rust.tikv_engine.get", return_value=None),
+                patch.object(
+                    self.state_datastore,
+                    "_materialize_state_hamt_from_tikv_direct",
+                    return_value=[],
+                ),
                 patch.object(
                     self.state_datastore.hs.get_clock(),
                     "sleep",
@@ -726,9 +730,6 @@ class StateStoreTestCase(HomeserverTestCase):
         from twisted.internet import defer
 
         state_group = 999998
-        event = self.inject_state_event(
-            self.room, self.u_alice, EventTypes.Create, "", {}
-        )
         self.get_success(
             self.store.db_pool.simple_insert(
                 table="state_groups",
@@ -738,19 +739,6 @@ class StateStoreTestCase(HomeserverTestCase):
                     "event_id": "$fake:test",
                 },
                 desc="test_unresolved.insert_sg",
-            )
-        )
-        self.get_success(
-            self.store.db_pool.simple_insert(
-                table="state_groups_state",
-                values={
-                    "state_group": state_group,
-                    "room_id": self.room.to_string(),
-                    "type": EventTypes.Create,
-                    "state_key": "",
-                    "event_id": event.event_id,
-                },
-                desc="test_unresolved.insert_sgs",
             )
         )
 
@@ -880,19 +868,6 @@ class StateStoreTestCase(HomeserverTestCase):
                     "event_id": "$unresolved:test",
                 },
                 desc="test_unresolved.insert_sg",
-            )
-        )
-        self.get_success(
-            self.store.db_pool.simple_insert(
-                table="state_groups_state",
-                values={
-                    "state_group": unresolved_group,
-                    "room_id": self.room.to_string(),
-                    "type": EventTypes.Create,
-                    "state_key": "",
-                    "event_id": event.event_id,
-                },
-                desc="test_unresolved.insert_sgs",
             )
         )
         nonexistent_group = 9999992
