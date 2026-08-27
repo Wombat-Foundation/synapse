@@ -44,7 +44,10 @@ from synapse.storage.database import (
 )
 from synapse.storage.databases.state.bg_updates import (
     StateBackgroundUpdateStore,
+    _decode_state_hamt_root,
+    _encode_state_hamt_root,
     _state_hamt_node_tikv_key,
+    _state_hamt_root_tikv_key,
     put_state_hamt_objects,
 )
 from synapse.storage.engines import PostgresEngine
@@ -478,7 +481,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         prev_state_group: int | None = None,
         updates: list[tuple[str, str, str]] | None = None,
         local_nodes: dict[bytes, bytes] | None = None,
-    ) -> tuple[bytes, list[tuple[bytes, bytes]]]:
+    ) -> tuple[bytes, bytes, list[tuple[bytes, bytes]]]:
         """Persist a new state_group's HAMT root and nodes.
 
         If `prev_state_group` has a usable stored root+lattice and
@@ -536,36 +539,25 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             # In TiKV mode the nodes (root included) go to TiKV, keyed by
             # content hash.
             self._store_state_hamt_nodes_txn(txn, nodes)
-        else:
-            # Keep a durable hand-off copy until TiKV publication completes.
-            # The SQL root is marked unpublished below, so readers can use
-            # this copy after a crash between the two commits.
-            self._store_state_hamt_pending_nodes_txn(txn, nodes)
-
         # The root pointer (state_group -> room_prefix + root_hash) lives in
         # per-instance SQL. `state_group` is a per-database sequence that
         # restarts at 1 for every Synapse instance, so it is NOT globally
         # unique -- keeping this mapping in shared TiKV would let two instances
         # overwrite each other's `hamt:root:<state_group>` pointer whenever they
         # share one cluster. SQL is per-instance, so it is isolated.
-        self.db_pool.simple_insert_txn(
-            txn,
-            table="state_hamt_roots",
-            values={
-                "state_group": state_group,
-                "room_prefix": bytearray(room_prefix),
-                "root_structural_hash": bytearray(root_structural_hash),
-                # Populated on the full-rebuild path too (not just the
-                # incremental one) so *this* root can itself serve as a base
-                # for a later incremental update -- e.g. the very first
-                # state group in a room, or one written by
-                # store_state_group's arbitrary/merged-state path.
-                "root_lattice": bytearray(root_lattice),
-                "published": not use_tikv,
-            },
-        )
+        if not use_tikv:
+            self.db_pool.simple_insert_txn(
+                txn,
+                table="state_hamt_roots",
+                values={
+                    "state_group": state_group,
+                    "room_prefix": bytearray(room_prefix),
+                    "root_structural_hash": bytearray(root_structural_hash),
+                    "root_lattice": bytearray(root_lattice),
+                },
+            )
 
-        return root_structural_hash, nodes
+        return root_structural_hash, root_lattice, nodes
 
     def _persist_state_hamt_incremental_txn(
         self,
@@ -576,7 +568,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         prev_state_group: int,
         updates: list[tuple[str, str, str]],
         local_nodes: dict[bytes, bytes] | None = None,
-    ) -> tuple[bytes, list[tuple[bytes, bytes]]] | None:
+    ) -> tuple[bytes, bytes, list[tuple[bytes, bytes]]] | None:
         """Apply `updates` -- a delta of any size, from a single state event
         to a whole state-resolution/merge result the caller already computed
         as a delta -- against `prev_state_group`'s HAMT root via O(K log S)
@@ -598,18 +590,30 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         """
         from synapse.synapse_rust import state_hamt
 
-        prev_root = self.db_pool.simple_select_one_txn(
-            txn,
-            table="state_hamt_roots",
-            keyvalues={"state_group": prev_state_group},
-            retcols=("root_structural_hash", "root_lattice"),
-            allow_none=True,
-        )
-        if prev_root is None or prev_root[1] is None:
-            return None
-        prev_root_hash, prev_lattice = bytes(prev_root[0]), bytes(prev_root[1])
-
         use_tikv = bool(self.tikv_pd_endpoints)
+        if use_tikv:
+            from synapse.synapse_rust import tikv_engine
+
+            root_value = tikv_engine.get(
+                _state_hamt_root_tikv_key(self.server_name, prev_state_group)
+            )
+            if root_value is None:
+                return None
+            _stored_prefix, prev_root_hash, prev_lattice = _decode_state_hamt_root(
+                root_value
+            )
+        else:
+            prev_root = self.db_pool.simple_select_one_txn(
+                txn,
+                table="state_hamt_roots",
+                keyvalues={"state_group": prev_state_group},
+                retcols=("root_structural_hash", "root_lattice"),
+                allow_none=True,
+            )
+            if prev_root is None or prev_root[1] is None:
+                return None
+            prev_root_hash, prev_lattice = bytes(prev_root[0]), bytes(prev_root[1])
+
         local_nodes = local_nodes or {}
         root_node_bytes = local_nodes.get(prev_root_hash)
         if root_node_bytes is None:
@@ -699,20 +703,18 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             # _put_state_hamt_objects_after_txn -- same split as the
             # full-rebuild path in _persist_state_hamt_txn.
             self._store_state_hamt_nodes_txn(txn, new_nodes)
-        else:
-            self._store_state_hamt_pending_nodes_txn(txn, new_nodes)
-        self.db_pool.simple_insert_txn(
-            txn,
-            table="state_hamt_roots",
-            values={
-                "state_group": state_group,
-                "room_prefix": bytearray(room_prefix),
-                "root_structural_hash": bytearray(new_root_hash),
-                "root_lattice": bytearray(new_lattice),
-                "published": False,
-            },
-        )
-        return bytes(new_root_hash), new_nodes
+        if not use_tikv:
+            self.db_pool.simple_insert_txn(
+                txn,
+                table="state_hamt_roots",
+                values={
+                    "state_group": state_group,
+                    "room_prefix": bytearray(room_prefix),
+                    "root_structural_hash": bytearray(new_root_hash),
+                    "root_lattice": bytearray(new_lattice),
+                },
+            )
+        return bytes(new_root_hash), new_lattice, new_nodes
 
     def _store_state_hamt_nodes_txn(
         self,
@@ -722,23 +724,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         txn.executemany(
             """
             INSERT INTO state_hamt_nodes (structural_hash, node_bytes)
-            VALUES (?, ?)
-            ON CONFLICT (structural_hash) DO NOTHING
-            """,
-            [
-                (bytearray(structural_hash), bytearray(node_bytes))
-                for structural_hash, node_bytes in nodes
-            ],
-        )
-
-    def _store_state_hamt_pending_nodes_txn(
-        self,
-        txn: LoggingTransaction,
-        nodes: list[tuple[bytes, bytes]],
-    ) -> None:
-        txn.executemany(
-            """
-            INSERT INTO state_hamt_pending_nodes (structural_hash, node_bytes)
             VALUES (?, ?)
             ON CONFLICT (structural_hash) DO NOTHING
             """,
@@ -759,7 +744,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         prev_group: int | None = None,
         updates: list[tuple[str, str, str]] | None = None,
         local_nodes: dict[bytes, bytes] | None = None,
-    ) -> tuple[bytes, list[tuple[bytes, bytes]]]:
+    ) -> tuple[bytes, bytes, list[tuple[bytes, bytes]]]:
         self.db_pool.simple_insert_txn(
             txn,
             table="state_groups",
@@ -815,7 +800,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         room_id: str,
         room_version: RoomVersion,
         nodes: list[tuple[bytes, bytes]],
-        state_groups: list[int],
+        roots: list[tuple[bytes, bytes]],
     ) -> None:
         """Persist the HAMT node objects for a single state group to TiKV.
 
@@ -866,30 +851,12 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 put_state_hamt_objects,
                 room_prefix,
                 nodes,
+                roots,
                 bool(self.tikv_pd_endpoints),
-            )
-            await self.db_pool.runInteraction(
-                "publish_state_hamt_roots",
-                self._publish_state_hamt_roots_txn,
-                state_groups,
             )
         except Exception:
             logger.exception("Failed to persist HAMT state objects to TiKV")
             raise
-
-    def _publish_state_hamt_roots_txn(
-        self, txn: LoggingTransaction, state_groups: list[int]
-    ) -> None:
-        if not state_groups:
-            return
-        self.db_pool.simple_update_many_txn(
-            txn,
-            table="state_hamt_roots",
-            key_names=("state_group",),
-            key_values=[(group,) for group in state_groups],
-            value_names=("published",),
-            value_values=[(True,) for _ in state_groups],
-        )
 
     @trace
     @tag_args
@@ -933,7 +900,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             prev_group: int,
         ) -> tuple[
             list[tuple[EventBase, UnpersistedEventContext]],
-            list[tuple[int, list[tuple[bytes, bytes]]]],
+            list[tuple[int, bytes, bytes, list[tuple[bytes, bytes]]]],
         ]:
             """Generate and store state groups for the provided events and contexts.
 
@@ -970,7 +937,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
 
             sg_before = prev_group
             state_group_iter = iter(state_groups)
-            hamt_writes: list[tuple[int, list[tuple[bytes, bytes]]]] = []
+            hamt_writes: list[tuple[int, bytes, bytes, list[tuple[bytes, bytes]]]] = []
             # Nodes for state groups persisted earlier *in this same batch*
             # aren't necessarily visible in TiKV yet -- TiKV writes are
             # deferred to a single flush after this whole transaction
@@ -992,7 +959,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     (event.type, event.state_key): event.event_id
                 }
                 current_state_ids[(event.type, event.state_key)] = event.event_id
-                _, nodes = self._persist_state_group_snapshot_txn(
+                root_hash, lattice, nodes = self._persist_state_group_snapshot_txn(
                     txn,
                     sg_after,
                     room_id,
@@ -1008,7 +975,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     updates=[(event.type, event.state_key, event.event_id)],
                     local_nodes=local_nodes,
                 )
-                hamt_writes.append((sg_after, nodes))
+                hamt_writes.append((sg_after, root_hash, lattice, nodes))
                 local_nodes.update(nodes)
                 sg_before = sg_after
 
@@ -1024,9 +991,16 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         # All state groups in the batch share the same room (linear chain),
         # so flush all their content-addressed nodes to TiKV in a single
         # batched write rather than one round-trip per state group.
-        all_nodes = [node for _, nodes in hamt_writes for node in nodes]
+        all_nodes = [node for _, _, _, nodes in hamt_writes for node in nodes]
+        roots = [
+            (
+                _state_hamt_root_tikv_key(self.server_name, group),
+                _encode_state_hamt_root(room_prefix, root_hash, lattice),
+            )
+            for group, root_hash, lattice, _ in hamt_writes
+        ]
         await self._put_state_hamt_objects_after_txn(
-            room_id, room_version, all_nodes, [group for group, _ in hamt_writes]
+            room_id, room_version, all_nodes, roots
         )
 
         return events_and_context
@@ -1151,27 +1125,37 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     )
 
             state_group = self._state_group_seq_gen.get_next_id_txn(txn)
-            root_structural_hash, nodes = self._persist_state_group_snapshot_txn(
-                txn,
-                state_group,
-                room_id,
-                room_prefix,
-                event_id,
-                current_state_ids,
-                prev_group=prev_group,
-                updates=updates,
+            root_structural_hash, lattice, nodes = (
+                self._persist_state_group_snapshot_txn(
+                    txn,
+                    state_group,
+                    room_id,
+                    room_prefix,
+                    event_id,
+                    current_state_ids,
+                    prev_group=prev_group,
+                    updates=updates,
+                )
             )
 
-            return state_group, root_structural_hash, nodes
+            return state_group, root_structural_hash, lattice, nodes
 
-        state_group, _, nodes = await self.db_pool.runInteraction(
+        state_group, root_hash, lattice, nodes = await self.db_pool.runInteraction(
             "store_state_group.insert_full_state",
             insert_full_state_txn,
             current_state_ids,
         )
 
         await self._put_state_hamt_objects_after_txn(
-            room_id, room_version, nodes, [state_group]
+            room_id,
+            room_version,
+            nodes,
+            [
+                (
+                    _state_hamt_root_tikv_key(self.server_name, state_group),
+                    _encode_state_hamt_root(room_prefix, root_hash, lattice),
+                )
+            ],
         )
 
         return state_group

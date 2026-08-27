@@ -21,6 +21,7 @@
 
 import hashlib
 import logging
+import struct
 from typing import (
     TYPE_CHECKING,
     Mapping,
@@ -58,9 +59,51 @@ def _state_hamt_node_tikv_key(room_prefix: bytes, structural_hash: bytes) -> byt
     )
 
 
+def _state_hamt_root_tikv_key(server_name: str, state_group: int) -> bytes:
+    """Return the per-homeserver HAMT root key.
+
+    State-group ids are only unique inside one Synapse database, so the
+    homeserver namespace is part of the key. The room prefix is stored in the
+    value, allowing readers to locate a root from only its state-group id.
+    """
+    server_hash = hashlib.sha256(server_name.encode("utf-8")).digest()[:16]
+    return (
+        b"hamt:root:"
+        + server_hash.hex().encode("ascii")
+        + str(state_group).encode("ascii")
+    )
+
+
+def _encode_state_hamt_root(
+    room_prefix: bytes, root_hash: bytes, lattice: bytes
+) -> bytes:
+    return (
+        b"\x01"
+        + struct.pack(">H", len(room_prefix))
+        + room_prefix
+        + root_hash
+        + lattice
+    )
+
+
+def _decode_state_hamt_root(value: bytes) -> tuple[bytes, bytes, bytes]:
+    if len(value) < 3 or value[0] != 1:
+        raise RuntimeError("invalid HAMT root record")
+    prefix_len = struct.unpack(">H", value[1:3])[0]
+    root_start = 3 + prefix_len
+    if len(value) < root_start + 16:
+        raise RuntimeError("truncated HAMT root record")
+    return (
+        value[3:root_start],
+        value[root_start : root_start + 16],
+        value[root_start + 16 :],
+    )
+
+
 def put_state_hamt_objects(
     room_prefix: bytes,
     nodes: list[tuple[bytes, bytes]],
+    roots: list[tuple[bytes, bytes]],
     use_tikv: bool,
 ) -> None:
     # Only content-addressed nodes are stored in TiKV, keyed by
@@ -84,7 +127,9 @@ def put_state_hamt_objects(
     if use_tikv:
         from synapse.synapse_rust import tikv_engine
 
-        tikv_engine.batch_put(pairs)
+        # Roots are published in the same MVCC transaction as all nodes. A
+        # reader can therefore never observe a root without its tree.
+        tikv_engine.transactional_batch_put(pairs + roots)
 
 
 class StateGroupBackgroundUpdateStore(SQLBaseStore):
@@ -361,6 +406,16 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         The root pointer always lives in per-instance SQL `state_hamt_roots`
         (in both SQL and TiKV mode), so this is a plain SQL existence check.
         """
+        if use_tikv:
+            from synapse.synapse_rust import tikv_engine
+
+            return (
+                tikv_engine.get(
+                    _state_hamt_root_tikv_key(self.server_name, state_group)
+                )
+                is not None
+            )
+
         root = self.db_pool.simple_select_one_onecol_txn(
             txn,
             table="state_hamt_roots",
@@ -431,70 +486,14 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         """
         from synapse.synapse_rust import tikv_engine
 
-        row = self.db_pool.simple_select_one_txn(
-            txn,
-            table="state_hamt_roots",
-            keyvalues={"state_group": state_group},
-            retcols=("room_prefix", "root_structural_hash", "published"),
-            allow_none=True,
+        root_value = tikv_engine.get(
+            _state_hamt_root_tikv_key(self.server_name, state_group)
         )
-        if row is None:
+        if root_value is None:
             return None
-        room_prefix = bytes(row[0])
-        root_structural_hash = bytes(row[1])
-        published = bool(row[2])
-
-        if not published:
-            # A crash can leave the SQL transaction committed after the root
-            # and its durable hand-off nodes, but before TiKV publication.
-            # Read that hand-off directly; it is complete for this root.
-            root_bytes = self.db_pool.simple_select_one_onecol_txn(
-                txn,
-                table="state_hamt_pending_nodes",
-                keyvalues={"structural_hash": bytearray(root_structural_hash)},
-                retcol="node_bytes",
-                allow_none=True,
-            )
-            if root_bytes is None:
-                return None
-            nodes = {root_structural_hash: bytes(root_bytes)}
-            from synapse.synapse_rust import state_hamt
-
-            # Walk the staged content-addressed tree. A root produced by a
-            # batch may point at nodes from an earlier, already-published
-            # root, so consult TiKV after checking the durable SQL hand-off.
-            while True:
-                needed = {
-                    child
-                    for node in nodes.values()
-                    for child in state_hamt.node_child_hashes(node)
-                    if child not in nodes
-                }
-                if not needed:
-                    return state_hamt.materialize_state_entries(
-                        nodes[root_structural_hash], list(nodes.items())
-                    )
-                rows = self.db_pool.simple_select_many_txn(
-                    txn,
-                    table="state_hamt_pending_nodes",
-                    column="structural_hash",
-                    iterable=[bytearray(h) for h in needed],
-                    keyvalues={},
-                    retcols=("structural_hash", "node_bytes"),
-                )
-                nodes.update({bytes(h): bytes(b) for h, b in rows})
-                unresolved = needed - nodes.keys()
-                if unresolved:
-                    key_to_hash = {
-                        _state_hamt_node_tikv_key(room_prefix, h): h for h in unresolved
-                    }
-                    rows = tikv_engine.batch_get(list(key_to_hash))
-                    nodes.update(
-                        {key_to_hash[bytes(key)]: bytes(value) for key, value in rows}
-                    )
-                    if unresolved - nodes.keys():
-                        return None
-
+        room_prefix, root_structural_hash, _lattice = _decode_state_hamt_root(
+            root_value
+        )
         return tikv_engine.materialize_state_hamt(room_prefix, root_structural_hash)
 
     def _lookup_state_hamt_from_tikv(
@@ -505,16 +504,12 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
     ) -> list[tuple[str, str, str]] | None:
         from synapse.synapse_rust import state_hamt, tikv_engine
 
-        row = self.db_pool.simple_select_one_txn(
-            txn,
-            table="state_hamt_roots",
-            keyvalues={"state_group": state_group},
-            retcols=("room_prefix", "root_structural_hash"),
-            allow_none=True,
+        root_value = tikv_engine.get(
+            _state_hamt_root_tikv_key(self.server_name, state_group)
         )
-        if row is None:
+        if root_value is None:
             return None
-        room_prefix, root_hash = bytes(row[0]), bytes(row[1])
+        room_prefix, root_hash, _lattice = _decode_state_hamt_root(root_value)
         room_id = self.db_pool.simple_select_one_onecol_txn(
             txn,
             table="state_groups",

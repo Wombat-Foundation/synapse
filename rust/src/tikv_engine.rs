@@ -4,7 +4,7 @@ use std::sync::Arc;
 use once_cell::sync::OnceCell;
 use pyo3::prelude::*;
 use rezzy::hamt::{HamtNode, StructuralHash};
-use tikv_client::RawClient;
+use tikv_client::{RawClient, TransactionClient};
 use tokio::runtime::Runtime;
 use tokio::time::{sleep, Duration};
 
@@ -12,6 +12,7 @@ use crate::state_hamt::{decode_persisted_node, materialize_from_node_map};
 
 static RUNTIME: OnceCell<Runtime> = OnceCell::new();
 static CLIENT: OnceCell<RawClient> = OnceCell::new();
+static TX_CLIENT: OnceCell<TransactionClient> = OnceCell::new();
 const READINESS_PROBE_KEY: &[u8] = b"synapse:tikv:readiness-probe";
 const READINESS_PROBE_VALUE: &[u8] = b"ok";
 const OPEN_CLIENT_ATTEMPTS: u32 = 60;
@@ -77,11 +78,17 @@ pub fn open_client(py: Python<'_>, pd_endpoints: Vec<String>) -> PyResult<()> {
     }
     let rt = get_runtime();
     let client = py
-        .detach(|| rt.block_on(async { open_ready_client(pd_endpoints).await }))
+        .detach(|| rt.block_on(async { open_ready_client(pd_endpoints.clone()).await }))
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
 
     CLIENT.set(client).map_err(|_| {
         pyo3::exceptions::PyRuntimeError::new_err("Failed to set TiKV Client instance")
+    })?;
+    let tx_client = py
+        .detach(|| get_runtime().block_on(TransactionClient::new(pd_endpoints)))
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    TX_CLIENT.set(tx_client).map_err(|_| {
+        pyo3::exceptions::PyRuntimeError::new_err("Failed to set TiKV transaction client")
     })?;
     Ok(())
 }
@@ -155,6 +162,31 @@ pub fn batch_put(py: Python<'_>, pairs: Vec<(Vec<u8>, Vec<u8>)>) -> PyResult<()>
     py.detach(|| {
         rt.block_on(async { client.batch_put(pairs).await })
             .map_err(|e| e.to_string())
+    })
+    .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    Ok(())
+}
+
+/// Atomically publish a set of immutable HAMT nodes and its root/index
+/// record. RawClient::batch_put is not transactional; using it for a tree
+/// plus its root can expose a root whose children are not committed yet.
+#[pyfunction]
+pub fn transactional_batch_put(py: Python<'_>, pairs: Vec<(Vec<u8>, Vec<u8>)>) -> PyResult<()> {
+    let client = TX_CLIENT.get().ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err(
+            "TiKV transaction client is not open. Call open_client first.",
+        )
+    })?;
+    let rt = get_runtime();
+    py.detach(|| {
+        rt.block_on(async {
+            let mut txn = client.begin_optimistic().await.map_err(|e| e.to_string())?;
+            for (key, value) in pairs {
+                txn.put(key, value).await.map_err(|e| e.to_string())?;
+            }
+            txn.commit().await.map_err(|e| e.to_string())?;
+            Ok::<(), String>(())
+        })
     })
     .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
     Ok(())
@@ -389,6 +421,7 @@ pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     child_module.add_function(wrap_pyfunction!(get, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(batch_get, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(batch_put, &child_module)?)?;
+    child_module.add_function(wrap_pyfunction!(transactional_batch_put, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(delete, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(batch_delete, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(scan_prefix, &child_module)?)?;

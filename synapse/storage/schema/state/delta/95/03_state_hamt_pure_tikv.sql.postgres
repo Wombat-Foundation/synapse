@@ -1,0 +1,4 @@
+-- HAMT roots and nodes are authoritative in TiKV. Remove the temporary SQL
+-- publication bridge introduced by 02_state_hamt_publication.
+DROP TABLE IF EXISTS state_hamt_pending_nodes;
+ALTER TABLE state_hamt_roots DROP COLUMN IF EXISTS published;
