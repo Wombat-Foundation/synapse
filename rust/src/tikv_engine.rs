@@ -18,6 +18,8 @@ const READINESS_PROBE_VALUE: &[u8] = b"ok";
 static READINESS_PROBE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const OPEN_CLIENT_ATTEMPTS: u32 = 60;
 const OPEN_CLIENT_RETRY_DELAY: Duration = Duration::from_secs(2);
+const TRANSACTION_WRITE_ATTEMPTS: u32 = 5;
+const TRANSACTION_WRITE_RETRY_DELAY: Duration = Duration::from_millis(10);
 
 fn get_runtime() -> &'static Runtime {
     RUNTIME.get_or_init(|| {
@@ -195,12 +197,31 @@ pub fn transactional_batch_put(py: Python<'_>, pairs: Vec<(Vec<u8>, Vec<u8>)>) -
     let rt = get_runtime();
     py.detach(|| {
         rt.block_on(async {
-            let mut txn = client.begin_optimistic().await.map_err(|e| e.to_string())?;
-            for (key, value) in pairs {
-                txn.put(key, value).await.map_err(|e| e.to_string())?;
+            let mut last_error = None;
+
+            for attempt in 1..=TRANSACTION_WRITE_ATTEMPTS {
+                let result = async {
+                    let mut txn = client.begin_optimistic().await.map_err(|e| e.to_string())?;
+                    for (key, value) in &pairs {
+                        txn.put(key.clone(), value.clone())
+                            .await
+                            .map_err(|e| e.to_string())?;
+                    }
+                    txn.commit().await.map_err(|e| e.to_string())
+                }
+                .await;
+
+                match result {
+                    Ok(_) => return Ok(()),
+                    Err(error) => last_error = Some(error),
+                }
+
+                if attempt < TRANSACTION_WRITE_ATTEMPTS {
+                    sleep(TRANSACTION_WRITE_RETRY_DELAY * attempt).await;
+                }
             }
-            txn.commit().await.map_err(|e| e.to_string())?;
-            Ok::<(), String>(())
+
+            Err(last_error.expect("transaction write loop always records an error"))
         })
     })
     .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
