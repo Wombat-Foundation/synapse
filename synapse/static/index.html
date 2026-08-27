@@ -250,6 +250,25 @@
         text-shadow: 0 0 8px rgba(255, 107, 107, 0.4);
       }
 
+      .secondary-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 1.25rem;
+        padding-bottom: 0.6rem;
+        border-bottom: 1px dashed var(--border);
+        flex-wrap: wrap;
+        gap: 0.5rem;
+      }
+
+      .secondary-title {
+        font-family: var(--font-mono);
+        font-size: 0.7rem;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--accent);
+      }
+
       .dictum-cycle-btn {
         background: rgba(255, 255, 255, 0.04);
         border: 1px solid var(--border);
@@ -306,7 +325,7 @@
 
       .telemetry-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(165px, 1fr));
         gap: 1rem;
       }
 
@@ -314,10 +333,10 @@
         background: var(--card-bg);
         border: 1px solid var(--border);
         border-radius: 4px;
-        padding: 1.1rem 1.25rem;
+        padding: 1.1rem 1.2rem;
         display: flex;
         flex-direction: column;
-        gap: 0.4rem;
+        gap: 0.35rem;
         position: relative;
         overflow: hidden;
         box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
@@ -345,24 +364,27 @@
       .telemetry-label {
         font-family: var(--font-mono);
         font-size: 0.65rem;
-        letter-spacing: 0.12em;
+        letter-spacing: 0.1em;
         text-transform: uppercase;
         color: var(--text-muted);
+        white-space: nowrap;
       }
 
       .telemetry-value {
         font-family: var(--font-mono);
-        font-size: 1.4rem;
+        font-size: 1.25rem;
         font-weight: 600;
         color: #ffffff;
-        letter-spacing: 0.05em;
+        letter-spacing: 0.02em;
+        white-space: nowrap;
       }
 
       .telemetry-sub {
         font-family: var(--font-mono);
-        font-size: 0.65rem;
+        font-size: 0.62rem;
         color: var(--accent);
         opacity: 0.85;
+        white-space: nowrap;
       }
 
       .sync-bar {
@@ -483,32 +505,19 @@
         </div>
 
         <div class="hero-quote-card">
-          <p class="quote-lead quote-fade" id="dictum-lead">
-            proudly defiant of the irresistible forces that tolerate, for a
-            moment, his knowledge and his condemnation, to sustain alone, a
-            weary but unyielding Atlas, the world that his own ideals have
-            fashioned despite the trampling march of unconscious power.
+          <p class="quote-lead">
+            The dark side of the Force is a pathway to many abilities some
+            consider to be unnatural. Power is not given to those who merely
+            desire it, but seized by those with the will to reshape reality.
           </p>
-          <div class="quote-meta-row">
-            <div class="attribution quote-fade" id="dictum-attr">
-              ~ Bertrand Russell,
-              <a
-                href="https://www.freddoso.com/courses/264/fmw.htm"
-                target="_blank"
-                rel="noopener noreferrer"
-                >"A free man's worship"</a
-              >
-            </div>
-            <button
-              class="dictum-cycle-btn"
-              onclick="rotateDictum(1)"
-              title="Cycle to next philosophical dictum"
+          <div class="attribution">
+            ~ Sheev Palpatine,
+            <a
+              href="https://starwars.fandom.com/wiki/Darth_Sidious"
+              target="_blank"
+              rel="noopener noreferrer"
+              >"Dictums of the Sith"</a
             >
-              ◈ ROTATE DICTUM (<span id="dictum-index">1</span>/<span
-                id="dictum-total"
-                >5</span
-              >)
-            </button>
           </div>
         </div>
       </main>
@@ -519,32 +528,28 @@
           <span class="telemetry-label">Souls Corrupted</span>
           <span class="telemetry-value" id="stat-souls">...</span>
           <span class="telemetry-sub" id="stat-souls-sub"
-            >LOCAL REGISTERED USERS</span
+            >REGISTERED DB SOULS</span
           >
         </div>
 
         <div class="telemetry-card">
-          <span class="telemetry-label">Galactic Inhabitants</span>
+          <span class="telemetry-label">Galactic Mesh</span>
           <span class="telemetry-value" id="stat-galactic">...</span>
           <span class="telemetry-sub" id="stat-galactic-sub"
-            >FEDERATION CENSUS</span
+            >FEDERATED PEERS</span
           >
         </div>
 
         <div class="telemetry-card">
           <span class="telemetry-label">Dark Sanctums</span>
           <span class="telemetry-value" id="stat-sanctums">...</span>
-          <span class="telemetry-sub" id="stat-sanctums-sub"
-            >ROOMS DISCOVERED</span
-          >
+          <span class="telemetry-sub" id="stat-sanctums-sub">TOTAL DB ROOMS</span>
         </div>
 
         <div class="telemetry-card">
-          <span class="telemetry-label">Realms Federated</span>
-          <span class="telemetry-value" id="stat-realms">...</span>
-          <span class="telemetry-sub" id="stat-realms-sub"
-            >REMOTE PEER NODES</span
-          >
+          <span class="telemetry-label">Public Sanctums</span>
+          <span class="telemetry-value" id="stat-public">...</span>
+          <span class="telemetry-sub" id="stat-public-sub">DIRECTORY LISTED</span>
         </div>
 
         <div class="telemetry-card">
@@ -556,7 +561,9 @@
         <div class="telemetry-card">
           <span class="telemetry-label">Matrix Protocol</span>
           <span class="telemetry-value" id="stat-spec">...</span>
-          <span class="telemetry-sub" id="stat-engine-sub">SERVER ENGINE</span>
+          <span class="telemetry-sub" id="stat-engine-sub"
+            >SERVER SPEC LEVEL</span
+          >
         </div>
       </section>
 
@@ -576,7 +583,22 @@
       </div>
 
       <section class="secondary-section">
-        <div class="secondary-quote quote-fade" id="dictum-sec-quote">
+        <div class="secondary-header">
+          <span class="secondary-title"
+            >PHILOSOPHICAL ARCHIVE // THE NATURE OF POWER</span
+          >
+          <button
+            class="dictum-cycle-btn"
+            onclick="rotateManuscript(1)"
+            title="Cycle to next philosophical manuscript"
+          >
+            ◈ ROTATE MANUSCRIPT (<span id="manuscript-index">1</span>/<span
+              id="manuscript-total"
+              >7</span
+            >)
+          </button>
+        </div>
+        <div class="secondary-quote quote-fade" id="manuscript-quote">
           From the purely biological point of view it is unfortunate that the
           destructive side of technique has advanced so very much more rapidly
           than the creative side. In one moment a man may kill 500,000 people,
@@ -587,7 +609,7 @@
           existence and the survival of the fittest. But in the modern world the
           old mechanism of evolution can no longer be relied upon.
         </div>
-        <div class="secondary-author quote-fade" id="dictum-sec-author">
+        <div class="secondary-author quote-fade" id="manuscript-author">
           ~ Bertrand Russell, 1949: "Authority and the Individual"
         </div>
       </section>
@@ -616,98 +638,92 @@
     </div>
 
     <script>
-      const DICTUMS = [
+      const MANUSCRIPTS = [
         {
-          lead: "proudly defiant of the irresistible forces that tolerate, for a moment, his knowledge and his condemnation, to sustain alone, a weary but unyielding Atlas, the world that his own ideals have fashioned despite the trampling march of unconscious power.",
-          attrText: 'Bertrand Russell, "A free man\'s worship"',
-          attrLink: "https://www.freddoso.com/courses/264/fmw.htm",
-          secQuote: `From the purely biological point of view it is unfortunate that the destructive side of technique has advanced so very much more rapidly than the creative side. In one moment a man may kill 500,000 people, but he cannot have children any quicker than in the days of our savage ancestors. If a man could have 500,000 children as quickly as by an atomic bomb he can destroy 500,000 enemies, we might, at the cost of enormous suffering, leave the biological problem to the struggle for existence and the survival of the fittest. But in the modern world the old mechanism of evolution can no longer be relied upon.`,
-          secAuthor: '~ Bertrand Russell, 1949: "Authority and the Individual"',
+          quote: `From the purely biological point of view it is unfortunate that the destructive side of technique has advanced so very much more rapidly than the creative side. In one moment a man may kill 500,000 people, but he cannot have children any quicker than in the days of our savage ancestors. If a man could have 500,000 children as quickly as by an atomic bomb he can destroy 500,000 enemies, we might, at the cost of enormous suffering, leave the biological problem to the struggle for existence and the survival of the fittest. But in the modern world the old mechanism of evolution can no longer be relied upon.`,
+          author: '~ Bertrand Russell, 1949: "Authority and the Individual"',
         },
         {
-          lead: "He who fights with monsters should look to it that he himself does not become a monster. And if you gaze long into an abyss, the abyss also gazes into you.",
-          attrText: 'Friedrich Nietzsche, "Beyond Good and Evil" (1886)',
-          attrLink: "https://www.gutenberg.org/ebooks/4363",
-          secQuote: `Optimism is cowardice. We are born into this time and must bravely follow the path to the destined end. There is no other way. Our duty is to hold on to the lost position without hope, without rescue, like that Roman soldier whose bones were found in front of a door in Pompeii, who, during the eruption of Vesuvius, died at his post because they forgot to relieve him. That is greatness.`,
-          secAuthor: '~ Oswald Spengler, 1931: "Man and Technics"',
+          quote: `proudly defiant of the irresistible forces that tolerate, for a moment, his knowledge and his condemnation, to sustain alone, a weary but unyielding Atlas, the world that his own ideals have fashioned despite the trampling march of unconscious power.`,
+          author: '~ Bertrand Russell, 1903: "A free man\'s worship"',
+          link: "https://www.freddoso.com/courses/264/fmw.htm",
         },
         {
-          lead: "Of the infinite desires of man, the chief are the desires for power and glory... Love of power is the chief motive producing the changes which social science has to study.",
-          attrText: 'Bertrand Russell, "Power: A New Social Analysis" (1938)',
-          attrLink:
-            "https://en.wikipedia.org/wiki/Power:_A_New_Social_Analysis",
-          secQuote: `Everyone sees what you appear to be, few experience what you really are. A prince must know well how to use both the beast and the man. He should choose from among the beasts the fox and the lion, because the lion cannot defend himself from traps and the fox cannot defend himself from wolves. One must therefore be a fox to recognize traps, and a lion to frighten wolves.`,
-          secAuthor: '~ Niccolò Machiavelli, 1532: "The Prince"',
+          quote: `He who fights with monsters should look to it that he himself does not become a monster. And if you gaze long into an abyss, the abyss also gazes into you.`,
+          author: '~ Friedrich Nietzsche, 1886: "Beyond Good and Evil"',
+          link: "https://www.gutenberg.org/ebooks/4363",
         },
         {
-          lead: "A man who fears nothing is as powerful as he who is feared by everybody. What is a tyrant? A solitary surrounded by slaves.",
-          attrText: 'Emil Cioran, "A Short History of Decay" (1949)',
-          attrLink: "https://en.wikipedia.org/wiki/A_Short_History_of_Decay",
-          secQuote: `The world is my will and my representation. Life is a struggle for existence with the certainty of being conquered in the end. He who has awakened from the dream of life has realized that suffering and contest are the essence of all existence. To master the world, one must first master the illusion of peace.`,
-          secAuthor:
+          quote: `Optimism is cowardice. We are born into this time and must bravely follow the path to the destined end. There is no other way. Our duty is to hold on to the lost position without hope, without rescue, like that Roman soldier whose bones were found in front of a door in Pompeii, who, during the eruption of Vesuvius, died at his post because they forgot to relieve him. That is greatness.`,
+          author: '~ Oswald Spengler, 1931: "Man and Technics"',
+        },
+        {
+          quote: `Everyone sees what you appear to be, few experience what you really are. A prince must know well how to use both the beast and the man. He should choose from among the beasts the fox and the lion, because the lion cannot defend himself from traps and the fox cannot defend himself from wolves. One must therefore be a fox to recognize traps, and a lion to frighten wolves.`,
+          author: '~ Niccolò Machiavelli, 1532: "The Prince"',
+        },
+        {
+          quote: `A man who fears nothing is as powerful as he who is feared by everybody. What is a tyrant? A solitary surrounded by slaves.`,
+          author: '~ Emil Cioran, 1949: "A Short History of Decay"',
+          link: "https://en.wikipedia.org/wiki/A_Short_History_of_Decay",
+        },
+        {
+          quote: `The world is my will and my representation. Life is a struggle for existence with the certainty of being conquered in the end. He who has awakened from the dream of life has realized that suffering and contest are the essence of all existence. To master the world, one must first master the illusion of peace.`,
+          author:
             '~ Arthur Schopenhauer, 1818: "The World as Will and Representation"',
-        },
-        {
-          lead: "The dark side of the Force is a pathway to many abilities some consider to be unnatural. Power is not given to those who merely desire it, but seized by those with the will to reshape reality.",
-          attrText: 'Darth Sidious, "Dictums of the Sith"',
-          attrLink: "https://starwars.fandom.com/wiki/Darth_Sidious",
-          secQuote: `To achieve mastery one must embrace all aspects of the Force, not just the dogmatic narrow view of the Jedi. If you wish to understand the great mystery, you must study all its aspects, unclouded by fear or hesitation. It is only through strength that victory is achieved, and through victory that all chains are broken.`,
-          secAuthor: "~ The Sith Archives & Holocron Dictums",
         },
       ];
 
-      let currentDictumIdx = Math.floor(Math.random() * DICTUMS.length);
+      let currentManuscriptIdx = Math.floor(Math.random() * MANUSCRIPTS.length);
 
-      function renderDictum(idx) {
-        const d = DICTUMS[idx];
+      function renderManuscript(idx) {
+        const m = MANUSCRIPTS[idx];
         const fadeEls = [
-          document.getElementById("dictum-lead"),
-          document.getElementById("dictum-attr"),
-          document.getElementById("dictum-sec-quote"),
-          document.getElementById("dictum-sec-author"),
+          document.getElementById("manuscript-quote"),
+          document.getElementById("manuscript-author"),
         ];
 
         fadeEls.forEach((el) => el && el.classList.add("quote-faded"));
 
         setTimeout(() => {
-          const leadEl = document.getElementById("dictum-lead");
-          const attrEl = document.getElementById("dictum-attr");
-          const secQuoteEl = document.getElementById("dictum-sec-quote");
-          const secAuthorEl = document.getElementById("dictum-sec-author");
-          const idxEl = document.getElementById("dictum-index");
-          const totalEl = document.getElementById("dictum-total");
+          const quoteEl = document.getElementById("manuscript-quote");
+          const authorEl = document.getElementById("manuscript-author");
+          const idxEl = document.getElementById("manuscript-index");
+          const totalEl = document.getElementById("manuscript-total");
 
-          if (leadEl) leadEl.textContent = d.lead;
-          if (secQuoteEl) secQuoteEl.textContent = d.secQuote;
-          if (secAuthorEl) secAuthorEl.textContent = d.secAuthor;
+          if (quoteEl) quoteEl.textContent = m.quote;
           if (idxEl) idxEl.textContent = String(idx + 1);
-          if (totalEl) totalEl.textContent = String(DICTUMS.length);
+          if (totalEl) totalEl.textContent = String(MANUSCRIPTS.length);
 
-          if (attrEl) {
-            attrEl.textContent = "";
-            const parts = d.attrText.split(",");
-            const authorText = `~ ${parts[0]}, `;
-            attrEl.appendChild(document.createTextNode(authorText));
-            const a = document.createElement("a");
-            a.href = d.attrLink;
-            a.target = "_blank";
-            a.rel = "noopener noreferrer";
-            a.textContent = parts.slice(1).join(",");
-            attrEl.appendChild(a);
+          if (authorEl) {
+            authorEl.textContent = "";
+            if (m.link) {
+              const parts = m.author.split(":");
+              const prefix = parts[0] + ": ";
+              authorEl.appendChild(document.createTextNode(prefix));
+              const a = document.createElement("a");
+              a.href = m.link;
+              a.target = "_blank";
+              a.rel = "noopener noreferrer";
+              a.textContent = parts.slice(1).join(":");
+              authorEl.appendChild(a);
+            } else {
+              authorEl.textContent = m.author;
+            }
           }
 
           fadeEls.forEach((el) => el && el.classList.remove("quote-faded"));
         }, 200);
       }
 
-      function rotateDictum(step = 1) {
-        currentDictumIdx =
-          (currentDictumIdx + step + DICTUMS.length) % DICTUMS.length;
-        renderDictum(currentDictumIdx);
+      function rotateManuscript(step = 1) {
+        currentManuscriptIdx =
+          (currentManuscriptIdx + step + MANUSCRIPTS.length) %
+          MANUSCRIPTS.length;
+        renderManuscript(currentManuscriptIdx);
       }
 
-      // Initialize with a random dictum on load
-      renderDictum(currentDictumIdx);
+      // Initialize with a random manuscript on load
+      renderManuscript(currentManuscriptIdx);
 
       function toggleSyncBar() {
         const el = document.getElementById("sync-container");
@@ -740,7 +756,58 @@
           input.value = token;
         }
 
-        // 1. Matrix Spec & Core Ping
+        // 1. Direct Server DB Stats Endpoint (Zero Auth)
+        let dbStatsLoaded = false;
+        try {
+          const statsRes = await fetch("/_synapse/client/server_stats");
+          if (statsRes.ok) {
+            const stats = await statsRes.json();
+            dbStatsLoaded = true;
+
+            const soulsEl = document.getElementById("stat-souls");
+            const soulsSubEl = document.getElementById("stat-souls-sub");
+            if (soulsEl && typeof stats.total_users === "number") {
+              soulsEl.textContent = stats.total_users.toLocaleString();
+              if (soulsSubEl) soulsSubEl.textContent = "REGISTERED DB SOULS";
+            }
+
+            const galacticEl = document.getElementById("stat-galactic");
+            const galacticSubEl = document.getElementById("stat-galactic-sub");
+            if (galacticEl && typeof stats.total_destinations === "number") {
+              galacticEl.textContent = stats.total_destinations.toLocaleString();
+              if (galacticSubEl) galacticSubEl.textContent = "FEDERATED PEERS";
+            }
+
+            const sanctumsEl = document.getElementById("stat-sanctums");
+            const sanctumsSubEl = document.getElementById("stat-sanctums-sub");
+            if (sanctumsEl && typeof stats.total_rooms === "number") {
+              sanctumsEl.textContent = stats.total_rooms.toLocaleString();
+              if (sanctumsSubEl)
+                sanctumsSubEl.textContent = "ACTIVE DATABASE SANCTUMS";
+            }
+
+            const publicEl = document.getElementById("stat-public");
+            const publicSubEl = document.getElementById("stat-public-sub");
+            if (publicEl && typeof stats.public_rooms === "number") {
+              publicEl.textContent = stats.public_rooms.toLocaleString();
+              if (publicSubEl)
+                publicSubEl.textContent = "PUBLIC DIRECTORY ROOMS";
+            }
+
+            if (stats.server_version) {
+              const vStr = stats.server_version.startsWith("v")
+                ? stats.server_version
+                : `v${stats.server_version}`;
+              const titleEl = document.getElementById("server-title");
+              const engineEl = document.getElementById("stat-engine-sub");
+              if (titleEl)
+                titleEl.textContent = `SYNAPSE ${vStr} // MATRIX HOMESERVER`;
+              if (engineEl) engineEl.textContent = `SYNAPSE ${vStr}`;
+            }
+          }
+        } catch (e) {}
+
+        // 2. Matrix Spec & Core Ping
         try {
           const res = await fetch("/_matrix/client/versions");
           const latency = Math.max(
@@ -765,56 +832,63 @@
           if (specEl) specEl.textContent = "v1.11";
         }
 
-        // 2. Server Software Version
-        try {
-          const fedRes = await fetch("/_matrix/federation/v1/version");
-          if (fedRes.ok) {
-            const fedData = await fedRes.json();
-            if (fedData.server && fedData.server.version) {
-              const titleEl = document.getElementById("server-title");
-              const engineEl = document.getElementById("stat-engine-sub");
-              if (titleEl)
-                titleEl.textContent = `SYNAPSE ${fedData.server.version} // MATRIX HOMESERVER`;
-              if (engineEl)
-                engineEl.textContent = `SYNAPSE ${fedData.server.version}`;
+        // 3. Fallback discovery if server_stats endpoint is not available
+        if (!dbStatsLoaded) {
+          try {
+            const fedRes = await fetch("/_matrix/federation/v1/version");
+            if (fedRes.ok) {
+              const fedData = await fedRes.json();
+              if (fedData.server && fedData.server.version) {
+                const vStr = fedData.server.version.startsWith("v")
+                  ? fedData.server.version
+                  : `v${fedData.server.version}`;
+                const titleEl = document.getElementById("server-title");
+                const engineEl = document.getElementById("stat-engine-sub");
+                if (titleEl)
+                  titleEl.textContent = `SYNAPSE ${vStr} // MATRIX HOMESERVER`;
+                if (engineEl) engineEl.textContent = `SYNAPSE ${vStr}`;
+              }
+            }
+          } catch (e) {}
+
+          try {
+            const roomsRes = await fetch(
+              "/_matrix/client/v3/publicRooms?limit=1",
+            );
+            const publicEl = document.getElementById("stat-public");
+            const publicSubEl = document.getElementById("stat-public-sub");
+            const sanctumsEl = document.getElementById("stat-sanctums");
+            if (roomsRes.ok) {
+              const roomsData = await roomsRes.json();
+              const count =
+                typeof roomsData.total_room_count_estimate === "number"
+                  ? roomsData.total_room_count_estimate
+                  : 0;
+              if (publicEl) publicEl.textContent = count.toLocaleString();
+              if (publicSubEl)
+                publicSubEl.textContent = "PUBLIC DIRECTORY ROOMS";
+              if (sanctumsEl && sanctumsEl.textContent === "...") {
+                sanctumsEl.textContent = count.toLocaleString();
+              }
+            } else {
+              if (publicEl && (publicEl.textContent === "..." || !publicEl.textContent)) {
+                publicEl.textContent = "UNLISTED";
+                if (publicSubEl)
+                  publicSubEl.textContent = "DIRECTORY RESTRICTED";
+              }
+            }
+          } catch (e) {
+            const publicEl = document.getElementById("stat-public");
+            if (publicEl && (publicEl.textContent === "..." || !publicEl.textContent)) {
+              publicEl.textContent = "0";
             }
           }
-        } catch (e) {}
-
-        // 3. Public Rooms Count (Zero Auth)
-        try {
-          const roomsRes = await fetch(
-            "/_matrix/client/v3/publicRooms?limit=1",
-          );
-          if (roomsRes.ok) {
-            const roomsData = await roomsRes.json();
-            if (typeof roomsData.total_room_count_estimate === "number") {
-              const sanctumsEl = document.getElementById("stat-sanctums");
-              const sanctumsSubEl =
-                document.getElementById("stat-sanctums-sub");
-              if (sanctumsEl)
-                sanctumsEl.textContent =
-                  roomsData.total_room_count_estimate.toLocaleString();
-              if (sanctumsSubEl)
-                sanctumsSubEl.textContent = "PUBLIC ROOMS DISCOVERED";
-            }
-          }
-        } catch (e) {}
-
-        // 4. Global Federation Census Indicator
-        const galacticEl = document.getElementById("stat-galactic");
-        if (
-          galacticEl &&
-          (galacticEl.textContent === "..." || !galacticEl.textContent)
-        ) {
-          galacticEl.textContent = "115M+";
         }
 
-        // 5. Authenticated Admin Database Probes (Exact Counts)
+        // 4. Authenticated Admin Database Override (if token explicitly supplied)
         if (token) {
           const authHeaders = { Authorization: `Bearer ${token}` };
 
-          // Exact User Count
           try {
             const usersRes = await fetch("/_synapse/admin/v2/users?limit=1", {
               headers: authHeaders,
@@ -832,7 +906,6 @@
             }
           } catch (e) {}
 
-          // Exact Total Rooms (Public + Private)
           try {
             const allRoomsRes = await fetch(
               "/_synapse/admin/v1/rooms?limit=1",
@@ -849,12 +922,12 @@
                 if (sanctumsEl)
                   sanctumsEl.textContent =
                     allRoomsData.total_rooms.toLocaleString();
-                if (sanctumsSubEl) sanctumsSubEl.textContent = "TOTAL DB ROOMS";
+                if (sanctumsSubEl)
+                  sanctumsSubEl.textContent = "TOTAL DB ROOMS (ALL)";
               }
             }
           } catch (e) {}
 
-          // Exact Federated Destinations
           try {
             const destRes = await fetch(
               "/_synapse/admin/v1/federation/destinations?limit=1",
@@ -863,29 +936,34 @@
             if (destRes.ok) {
               const destData = await destRes.json();
               if (typeof destData.total === "number") {
-                const realmsEl = document.getElementById("stat-realms");
-                const realmsSubEl = document.getElementById("stat-realms-sub");
-                if (realmsEl)
-                  realmsEl.textContent = destData.total.toLocaleString();
-                if (realmsSubEl)
-                  realmsSubEl.textContent = "EXACT FEDERATED PEERS";
+                const galacticEl = document.getElementById("stat-galactic");
+                const galacticSubEl = document.getElementById("stat-galactic-sub");
+                if (galacticEl)
+                  galacticEl.textContent = destData.total.toLocaleString();
+                if (galacticSubEl)
+                  galacticSubEl.textContent = "EXACT FEDERATED PEERS";
               }
             }
           } catch (e) {}
-        } else {
+        } else if (!dbStatsLoaded) {
           const soulsEl = document.getElementById("stat-souls");
           const soulsSubEl = document.getElementById("stat-souls-sub");
-          const realmsEl = document.getElementById("stat-realms");
-          const realmsSubEl = document.getElementById("stat-realms-sub");
+          const galacticEl = document.getElementById("stat-galactic");
+          const galacticSubEl = document.getElementById("stat-galactic-sub");
+          const sanctumsEl = document.getElementById("stat-sanctums");
 
           if (soulsEl && soulsEl.textContent === "...") {
             soulsEl.textContent = "LOCKED";
             if (soulsSubEl)
-              soulsSubEl.textContent = "AUTH REQUIRED FOR DB CENSUS";
+              soulsSubEl.textContent = "AUTH REQUIRED FOR DB COUNT";
           }
-          if (realmsEl && realmsEl.textContent === "...") {
-            realmsEl.textContent = "ONLINE";
-            if (realmsSubEl) realmsSubEl.textContent = "FEDERATION PEERS";
+          if (galacticEl && galacticEl.textContent === "...") {
+            galacticEl.textContent = "0";
+            if (galacticSubEl)
+              galacticSubEl.textContent = "FEDERATED PEERS";
+          }
+          if (sanctumsEl && sanctumsEl.textContent === "...") {
+            sanctumsEl.textContent = "0";
           }
         }
       }
