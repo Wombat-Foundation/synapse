@@ -184,6 +184,8 @@ class StateStoreTestCase(HomeserverTestCase):
         )
 
     def test_empty_state_group_does_not_retry(self) -> None:
+        from twisted.internet import defer
+
         state_group = self.get_success(
             self.state_datastore.store_state_group(
                 event_id="$empty-state-group",
@@ -195,15 +197,26 @@ class StateStoreTestCase(HomeserverTestCase):
             )
         )
 
-        with patch.object(self.state_datastore.hs.get_clock(), "sleep") as sleep:
-            state_group_map = self.get_success(
-                self.state_datastore._get_state_groups_from_groups(
-                    [state_group], StateFilter.all()
+        self.state_datastore.tikv_pd_endpoints = ["127.0.0.1:2379"]
+        try:
+            with (
+                patch("synapse.synapse_rust.tikv_engine.get", return_value=None),
+                patch.object(
+                    self.state_datastore.hs.get_clock(),
+                    "sleep",
+                    return_value=defer.succeed(None),
+                ) as sleep,
+            ):
+                state_group_map = self.get_success(
+                    self.state_datastore._get_state_groups_from_groups(
+                        [state_group], StateFilter.all()
+                    )
                 )
-            )
 
-        self.assertDictEqual(state_group_map[state_group], {})
-        sleep.assert_not_called()
+                self.assertDictEqual(state_group_map[state_group], {})
+                sleep.assert_not_called()
+        finally:
+            self.state_datastore.tikv_pd_endpoints = []
 
     def test_state_group_hamt_corruption_does_not_fallback_to_sql(self) -> None:
         if self.state_datastore.tikv_pd_endpoints:
@@ -704,6 +717,9 @@ class StateStoreTestCase(HomeserverTestCase):
         from twisted.internet import defer
 
         state_group = 999998
+        event = self.inject_state_event(
+            self.room, self.u_alice, EventTypes.Create, "", {}
+        )
         self.get_success(
             self.store.db_pool.simple_insert(
                 table="state_groups",
@@ -713,6 +729,19 @@ class StateStoreTestCase(HomeserverTestCase):
                     "event_id": "$fake:test",
                 },
                 desc="test_unresolved.insert_sg",
+            )
+        )
+        self.get_success(
+            self.store.db_pool.simple_insert(
+                table="state_groups_state",
+                values={
+                    "state_group": state_group,
+                    "room_id": self.room.to_string(),
+                    "type": EventTypes.Create,
+                    "state_key": "",
+                    "event_id": event.event_id,
+                },
+                desc="test_unresolved.insert_sgs",
             )
         )
 
@@ -842,6 +871,19 @@ class StateStoreTestCase(HomeserverTestCase):
                     "event_id": "$unresolved:test",
                 },
                 desc="test_unresolved.insert_sg",
+            )
+        )
+        self.get_success(
+            self.store.db_pool.simple_insert(
+                table="state_groups_state",
+                values={
+                    "state_group": unresolved_group,
+                    "room_id": self.room.to_string(),
+                    "type": EventTypes.Create,
+                    "state_key": "",
+                    "event_id": event.event_id,
+                },
+                desc="test_unresolved.insert_sgs",
             )
         )
         nonexistent_group = 9999992
