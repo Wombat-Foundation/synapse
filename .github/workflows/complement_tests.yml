@@ -208,6 +208,20 @@ jobs:
         # custom `.ci/complement_package.gotpl` template to render the output.
         run: cat /tmp/gotest-in-repo-complement.log | gotestfmt -hide "successful-downloads,successful-tests,empty-packages"
 
+      - name: Dump PostgreSQL statistics
+        if: ${{ always() && contains(matrix.database, 'Postgres') }}
+        run: synapse/.ci/scripts/dump_postgres_stats.sh /tmp/postgres-stats.txt
+        env:
+          SYNAPSE_POSTGRES_HOST: localhost
+          SYNAPSE_POSTGRES_USER: postgres
+      - name: Upload PostgreSQL statistics
+        if: ${{ always() && contains(matrix.database, 'Postgres') }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: PostgreSQL stats - (${{ matrix.arrangement }}, ${{ matrix.database }})
+          path: /tmp/postgres-stats.txt
+          if-no-files-found: warn
+
       - name: Upload Complement logs
         # Always upload the logs (as artifacts) if we attempted to run the
         # Complement tests, so we can debug failures without scrolling through

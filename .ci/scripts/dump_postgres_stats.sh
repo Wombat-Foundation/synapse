@@ -26,15 +26,14 @@ psql_args=(-h "${SYNAPSE_POSTGRES_HOST:-localhost}"
             tup_returned, tup_fetched, tup_inserted, tup_updated, tup_deleted,
             temp_files, temp_bytes, deadlocks
        FROM pg_catalog.pg_stat_database
-      WHERE datname LIKE 'synapse_test_%'
-         OR datname LIKE '_synapse_unit_tests_base_%'
+      WHERE datname <> 'postgres' AND datname NOT LIKE 'template%'
       ORDER BY (tup_fetched + tup_inserted + tup_updated + tup_deleted) DESC;"
 
 	# The suite can create hundreds of databases. Keep detailed table output
 	# bounded, while printing database-level counters for all of them above.
 	mapfile -t databases < <(psql "${psql_args[@]}" -d postgres -Atc \
 		"SELECT datname FROM pg_catalog.pg_stat_database
-      WHERE datname LIKE 'synapse_test_%' OR datname LIKE '_synapse_unit_tests_base_%'
+      WHERE datname <> 'postgres' AND datname NOT LIKE 'template%'
       ORDER BY (tup_fetched + tup_inserted + tup_updated + tup_deleted) DESC
       LIMIT 10;")
 

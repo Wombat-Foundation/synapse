@@ -752,6 +752,20 @@ jobs:
       - name: Run SyTest
         run: .github/workflows/sytest-wrapper.sh frozen
         working-directory: /src
+      - name: Dump PostgreSQL statistics
+        if: ${{ always() && matrix.job.postgres }}
+        run: .ci/scripts/dump_postgres_stats.sh /tmp/postgres-stats.txt
+        working-directory: /src
+        env:
+          SYNAPSE_POSTGRES_HOST: /var/run/postgresql
+          SYNAPSE_POSTGRES_USER: postgres
+      - name: Upload PostgreSQL statistics
+        if: ${{ always() && matrix.job.postgres }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: Sytest PostgreSQL stats - (${{ join(matrix.job.*, ', ') }})
+          path: /tmp/postgres-stats.txt
+          if-no-files-found: warn
       - name: Summarise results.tap
         if: ${{ always() }}
         run: /sytest/scripts/tap_to_gha.pl /logs/results.tap
