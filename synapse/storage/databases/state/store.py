@@ -477,6 +477,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         current_state_ids: StateMap[str],
         prev_state_group: int | None = None,
         updates: list[tuple[str, str, str]] | None = None,
+        local_nodes: dict[bytes, bytes] | None = None,
     ) -> tuple[bytes, list[tuple[bytes, bytes]]]:
         """Persist a new state_group's HAMT root and nodes.
 
@@ -492,6 +493,18 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         group -- or no delta given, i.e. the caller only has a full
         current_state_ids map with no known relationship to prev_group)
         this falls back to a full rebuild, exactly as before.
+
+        `local_nodes`: an optional cache of hash->node-bytes the caller
+        already holds in memory, consulted before hitting SQL/TiKV. This
+        matters for a caller (`store_state_deltas_for_batched`) that
+        persists a *chain* of state groups within one transaction: in TiKV
+        mode, node writes are deferred until after the whole transaction
+        commits (one batched flush -- see `_put_state_hamt_objects_after_txn`),
+        so state group N+1's incremental update, which needs to read state
+        group N's just-written root node back, would otherwise find nothing
+        in TiKV yet. SQL mode doesn't need this (nodes are visible to later
+        reads in the same transaction), but checking `local_nodes` first is
+        harmless there too.
         """
         incremental = None
         if prev_state_group is not None and updates is not None:
@@ -502,6 +515,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 room_prefix,
                 prev_state_group,
                 updates,
+                local_nodes=local_nodes,
             )
         if incremental is not None:
             return incremental
@@ -554,6 +568,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         room_prefix: bytes,
         prev_state_group: int,
         updates: list[tuple[str, str, str]],
+        local_nodes: dict[bytes, bytes] | None = None,
     ) -> tuple[bytes, list[tuple[bytes, bytes]]] | None:
         """Apply `updates` -- a delta of any size, from a single state event
         to a whole state-resolution/merge result the caller already computed
@@ -588,27 +603,31 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         prev_root_hash, prev_lattice = bytes(prev_root[0]), bytes(prev_root[1])
 
         use_tikv = bool(self.tikv_pd_endpoints)
-        if use_tikv:
-            from synapse.synapse_rust import tikv_engine
+        local_nodes = local_nodes or {}
+        root_node_bytes = local_nodes.get(prev_root_hash)
+        if root_node_bytes is None:
+            if use_tikv:
+                from synapse.synapse_rust import tikv_engine
 
-            root_node_bytes = tikv_engine.get(
-                _state_hamt_node_tikv_key(room_prefix, prev_root_hash)
-            )
-        else:
-            root_node_bytes = self.db_pool.simple_select_one_onecol_txn(
-                txn,
-                table="state_hamt_nodes",
-                keyvalues={"structural_hash": bytearray(prev_root_hash)},
-                retcol="node_bytes",
-                allow_none=True,
-            )
+                root_node_bytes = tikv_engine.get(
+                    _state_hamt_node_tikv_key(room_prefix, prev_root_hash)
+                )
+            else:
+                root_node_bytes = self.db_pool.simple_select_one_onecol_txn(
+                    txn,
+                    table="state_hamt_nodes",
+                    keyvalues={"structural_hash": bytearray(prev_root_hash)},
+                    retcol="node_bytes",
+                    allow_none=True,
+                )
         if root_node_bytes is None:
             raise RuntimeError(
                 "Missing HAMT root node for state group "
                 f"{prev_state_group}: {prev_root_hash.hex()}"
             )
         root_bytes = bytes(root_node_bytes)
-        nodes: dict[bytes, bytes] = {prev_root_hash: root_bytes}
+        nodes: dict[bytes, bytes] = dict(local_nodes)
+        nodes[prev_root_hash] = root_bytes
 
         # Mirrors _lookup_state_hamt_from_postgres_txn /
         # _lookup_state_hamt_from_tikv_txn's retry loop: each round trip
@@ -712,6 +731,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         current_state_ids: StateMap[str],
         prev_group: int | None = None,
         updates: list[tuple[str, str, str]] | None = None,
+        local_nodes: dict[bytes, bytes] | None = None,
     ) -> tuple[bytes, list[tuple[bytes, bytes]]]:
         self.db_pool.simple_insert_txn(
             txn,
@@ -760,6 +780,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             current_state_ids,
             prev_state_group=prev_group,
             updates=updates,
+            local_nodes=local_nodes,
         )
 
     async def _put_state_hamt_objects_after_txn(
@@ -903,6 +924,13 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             sg_before = prev_group
             state_group_iter = iter(state_groups)
             hamt_writes: list[tuple[int, list[tuple[bytes, bytes]]]] = []
+            # Nodes for state groups persisted earlier *in this same batch*
+            # aren't necessarily visible in TiKV yet -- TiKV writes are
+            # deferred to a single flush after this whole transaction
+            # commits (see below) -- so a later group's incremental update
+            # needs this in-memory cache to find its predecessor's root,
+            # rather than reading (nothing) back from TiKV mid-transaction.
+            local_nodes: dict[bytes, bytes] = {}
 
             for event, context in events_and_context:
                 if not event.is_state():
@@ -931,8 +959,10 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     # incremental update against sg_before's HAMT root
                     # instead of rebuilding from all of current_state_ids.
                     updates=[(event.type, event.state_key, event.event_id)],
+                    local_nodes=local_nodes,
                 )
                 hamt_writes.append((sg_after, nodes))
+                local_nodes.update(nodes)
                 sg_before = sg_after
 
             return events_and_context, hamt_writes
