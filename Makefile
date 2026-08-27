@@ -11,8 +11,8 @@ STYLE_RESET := $(shell tput sgr0 2>/dev/null || echo -e "\033[0m")
 
 .PHONY: format
 format: ##H Format with ruff
-	ruff format .
-	ruff check --fix .
+	uv run ruff format .
+	uv run ruff check --fix .
 	cargo +nightly fmt
 
 .PHONY: lint
@@ -25,18 +25,15 @@ p ?=
 .PHONY: test
 test: ##H Run tests, e.g., on tests/storage/
 	cargo +nightly test
-	test "${p}"
 	uv run trial $(p)
 
 .PHONY: build
 build: ##H Build the package (requires hatch)
-	$(VENV)/bin/pip install hatch
-	$(VENV)/bin/hatch build
+	uv run --with hatch hatch build
 
 .PHONY: publish
 publish: build ##H Upload the package to PyPI using twine
-	$(VENV)/bin/pip install twine
-	$(VENV)/bin/twine upload dist/*
+	uv run --with twine twine upload dist/*
 
 .PHONY: clean
 clean: ##H Clean the virtual environment and caches

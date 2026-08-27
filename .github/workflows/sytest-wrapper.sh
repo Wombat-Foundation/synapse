@@ -58,7 +58,7 @@ sed -i 's/unlink $db if -f $db;/unlink $db if -f $db;\n    unlink "$db-wal" if -
 
 echo "--- Patching /sytest/scripts/synapse_sytest.sh to pre-create sytest_template database"
 # Create sytest_template database to quiet speculative DBI connect noise and errors
-/venv/bin/python -c "
+/venv/bin/python <<'PY'
 with open('/sytest/scripts/synapse_sytest.sh', 'r') as f:
     content = f.read()
 
@@ -73,7 +73,7 @@ content = content.replace(
 
 with open('/sytest/scripts/synapse_sytest.sh', 'w') as f:
     f.write(content)
-"
+PY
 
 echo "--- Patching /sytest/scripts/synapse_sytest.sh to use uv sync"
 # Patch synapse_sytest.sh to run 'uv sync' instead of legacy pip/poetry install

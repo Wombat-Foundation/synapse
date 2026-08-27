@@ -138,6 +138,10 @@ def materialize_state_entries(
     root_node_bytes: bytes,
     nodes: Sequence[tuple[bytes, bytes]],
 ) -> list[tuple[str, str, str]]: ...
+
+# Retry with every hash in the second result until it is empty. Unresolved
+# paths omit entries rather than raising, so the first result is incomplete
+# until the retry loop has loaded all missing nodes.
 def lookup_state_entries(
     server_secret: bytes,
     room_id: str,

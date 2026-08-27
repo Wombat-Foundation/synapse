@@ -52,8 +52,6 @@ def build_synapse_client_resource_tree(hs: "HomeServer") -> Mapping[str, Resourc
          map from path to Resource.
     """
     resources = {
-        # Public server statistics for landing page and monitoring
-        "/_synapse/client/server_stats": ServerStatsResource(hs),
         # SSO bits. These are always loaded, whether or not SSO login is actually
         # enabled (they just won't work very well if it's not)
         "/_synapse/client/pick_idp": PickIdpResource(hs),
@@ -69,6 +67,9 @@ def build_synapse_client_resource_tree(hs: "HomeServer") -> Mapping[str, Resourc
         # `/_synapse/client`.
         MEDIA_UPLOAD_LIMIT_EXCEEDED_PATH: MediaUploadLimitExceededResource(hs),
     }
+
+    if hs.config.stats.server_stats_endpoint_enabled:
+        resources["/_synapse/client/server_stats"] = ServerStatsResource(hs)
 
     if hs.config.mas.enabled:
         resources["/_synapse/mas"] = MasResource(hs)

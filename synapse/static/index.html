@@ -5,8 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Synapse // Matrix Homeserver</title>
     <style>
-      @import url("https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700;900&family=Cormorant+Garamond:ital,wght@0,400;0,600;1,400;1,600&family=JetBrains+Mono:wght@300;400;500&display=swap");
-
       :root {
         --bg: #060608;
         --card-bg: rgba(18, 18, 24, 0.75);
@@ -501,23 +499,16 @@
 
       <main class="main-grid">
         <div class="image-wrapper">
-          <img src="sidious-young.webp" alt="young Sidious" />
+          <div class="synapse-mark" role="img" aria-label="Synapse homeserver">SYNAPSE</div>
         </div>
 
         <div class="hero-quote-card">
           <p class="quote-lead">
-            The dark side of the Force is a pathway to many abilities some
-            consider to be unnatural. Power is not given to those who merely
-            desire it, but seized by those with the will to reshape reality.
+            A homeserver is a quiet engine: it stores conversation, connects
+            communities, and keeps the Matrix moving.
           </p>
           <div class="attribution">
-            ~ Sheev Palpatine,
-            <a
-              href="https://starwars.fandom.com/wiki/Darth_Sidious"
-              target="_blank"
-              rel="noopener noreferrer"
-              >"Dictums of the Sith"</a
-            >
+            ~ Synapse project note
           </div>
         </div>
       </main>
@@ -568,6 +559,7 @@
           type="password"
           id="admin-token-input"
           class="sync-input"
+          aria-label="Synapse admin access token"
           placeholder="Paste Synapse Admin Access Token for live DB metrics"
         />
         <button class="sync-btn" onclick="saveAdminToken()">SYNC STATS</button>
@@ -725,18 +717,20 @@
           el.style.display = el.style.display === "none" ? "flex" : "none";
       }
 
+      let adminToken = "";
+
       function saveAdminToken() {
         const input = document.getElementById("admin-token-input");
         if (!input) return;
         const token = input.value.trim();
         if (token) {
-          localStorage.setItem("synapse_admin_token", token);
+          adminToken = token;
           measureTelemetry();
         }
       }
 
       function clearAdminToken() {
-        localStorage.removeItem("synapse_admin_token");
+        adminToken = "";
         const input = document.getElementById("admin-token-input");
         if (input) input.value = "";
         measureTelemetry();
@@ -744,11 +738,7 @@
 
       async function measureTelemetry() {
         const startTime = performance.now();
-        const token = localStorage.getItem("synapse_admin_token") || "";
-        const input = document.getElementById("admin-token-input");
-        if (token && input) {
-          input.value = token;
-        }
+        const token = adminToken;
 
         // 1. Direct Server DB Stats Endpoint (Zero Auth)
         let dbStatsLoaded = false;
@@ -796,6 +786,7 @@
 
         // 2. Matrix Spec & Core Ping
         try {
+          const startTime = performance.now();
           const res = await fetch("/_matrix/client/versions");
           const latency = Math.max(
             1,
@@ -815,8 +806,8 @@
         } catch (err) {
           const latencyEl = document.getElementById("stat-latency");
           const specEl = document.getElementById("stat-spec");
-          if (latencyEl) latencyEl.textContent = "< 1 ms";
-          if (specEl) specEl.textContent = "v1.11";
+          if (latencyEl) latencyEl.textContent = "-- ms";
+          if (specEl) specEl.textContent = "...";
         }
 
         // 3. Fallback discovery if server_stats endpoint is not available
@@ -940,7 +931,9 @@
       }
 
       measureTelemetry();
-      setInterval(measureTelemetry, 15000);
+      document.addEventListener("visibilitychange", () => {
+        if (!document.hidden) measureTelemetry();
+      });
     </script>
   </body>
 </html>

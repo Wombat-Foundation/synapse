@@ -130,12 +130,34 @@ async def resolve_events_with_store(
     if room_version.state_res == StateResolutionVersions.V2_1:
         # calculate the conflicted subgraph
         conflicted_set = set(itertools.chain.from_iterable(conflicted_state.values()))
+    complete_event_graph = all(
+        event_id in event_map
+        for state_set in state_sets
+        for event_id in state_set.values()
+    )
+    if complete_event_graph:
+        to_check = [
+            event_id for state_set in state_sets for event_id in state_set.values()
+        ]
+        checked: set[str] = set()
+        while to_check and complete_event_graph:
+            event_id = to_check.pop()
+            if event_id in checked:
+                continue
+            checked.add(event_id)
+            event = event_map.get(event_id)
+            if event is None:
+                complete_event_graph = False
+                break
+            to_check.extend(event.auth_event_ids())
+
     auth_diff = await _get_auth_chain_difference(
         room_id,
         state_sets,
         event_map,
         state_res_store,
         conflicted_set,
+        complete_event_graph,
     )
     full_conflicted_set = set(
         itertools.chain(
@@ -349,6 +371,7 @@ async def _get_auth_chain_difference(
     unpersisted_events: dict[str, EventBase],
     state_res_store: StateResolutionStore,
     conflicted_state: set[str] | None,
+    complete_event_graph: bool = True,
 ) -> set[str]:
     """Compare the auth chains of each state set and return the set of events
     that only appear in some, but not all of the auth chains.
@@ -372,6 +395,8 @@ async def _get_auth_chain_difference(
 
     if not is_state_res_v21:
         try:
+            if not complete_event_graph:
+                raise ValueError("incomplete event graph")
             import synapse.synapse_rust.state_res as rust_res
 
             return cast(

@@ -1481,6 +1481,15 @@ class EventCreationHandler:
     ) -> tuple[EventBase, UnpersistedEventContext]:
         """Create a new event and unpersisted context for batch persistence."""
 
+        if (
+            builder.room_version.msc4242_state_dags
+            and builder.room_id
+            and prev_state_events is None
+        ):
+            prev_state_events = list(
+                await self.store.get_state_dag_extremities(builder.room_id)
+            )
+
         auth_ids = self._event_auth_handler.compute_auth_events(builder, state_map)
         event = await builder.build(
             prev_event_ids=prev_event_ids,

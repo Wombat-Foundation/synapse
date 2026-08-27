@@ -23,5 +23,11 @@ CREATE TABLE IF NOT EXISTS state_hamt_roots (
     -- See the .postgres delta for the rationale: the retained LtHash
     -- lattice, distinct from the collapsed state_group_id digest, needed
     -- to apply a later incremental update against this root.
-    root_lattice BLOB
+    root_lattice BLOB,
+    published BOOLEAN NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS state_hamt_pending_nodes (
+    structural_hash BLOB PRIMARY KEY,
+    node_bytes BLOB NOT NULL
 );

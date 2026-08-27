@@ -1,9 +1,1 @@
--- Add an explicit publication state so SQL cannot expose a TiKV root before
--- its content-addressed nodes are durable.
-ALTER TABLE state_hamt_roots
-    ADD COLUMN IF NOT EXISTS published BOOLEAN NOT NULL DEFAULT TRUE;
-
-CREATE TABLE IF NOT EXISTS state_hamt_pending_nodes (
-    structural_hash BYTEA PRIMARY KEY,
-    node_bytes BYTEA NOT NULL
-);
+-- Publication support is defined in 01_state_hamt.sql.postgres.

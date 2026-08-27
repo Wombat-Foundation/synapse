@@ -29,5 +29,11 @@ CREATE TABLE IF NOT EXISTS state_hamt_roots (
     -- serve as the base for a later incremental update. Nullable only to
     -- tolerate a row written before this column existed; NULL means "no
     -- usable base for an incremental update from this root", not an error.
-    root_lattice BYTEA
+    root_lattice BYTEA,
+    published BOOLEAN NOT NULL DEFAULT TRUE
+);
+
+CREATE TABLE IF NOT EXISTS state_hamt_pending_nodes (
+    structural_hash BYTEA PRIMARY KEY,
+    node_bytes BYTEA NOT NULL
 );

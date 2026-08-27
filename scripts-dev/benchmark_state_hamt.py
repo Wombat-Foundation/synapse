@@ -92,8 +92,12 @@ def main() -> None:
     )
     parser.add_argument("--members", type=int, default=10_000)
     parser.add_argument("--other-state", type=int, default=32)
-    parser.add_argument("--mutations", type=int, default=100)
-    parser.add_argument("--iterations", type=int, default=20)
+    parser.add_argument(
+        "--mutations", type=int, choices=range(1, 1_000_000_000), default=100
+    )
+    parser.add_argument(
+        "--iterations", type=int, choices=range(1, 1_000_000_000), default=20
+    )
     args = parser.parse_args()
 
     fixture = make_state_fixture(args.members, args.other_state, args.mutations)

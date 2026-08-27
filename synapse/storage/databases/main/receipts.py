@@ -331,15 +331,6 @@ class ReceiptsWorkerStore(SQLBaseStore):
             filtered_room_ids = self._receipts_stream_cache.get_entities_changed(
                 room_ids, from_key.stream
             )
-            if room_ids:
-                logger.info(
-                    "[gg-receipts] get_linearized_receipts_for_rooms room_ids=%s filtered=%s from_key=%s to_key=%s cache_has_data=%s",
-                    sorted(room_ids),
-                    sorted(filtered_room_ids),
-                    from_key.stream,
-                    to_key.get_max_stream_pos(),
-                    self._receipts_stream_cache.has_any_entity_changed(from_key.stream),
-                )
             room_ids = filtered_room_ids
 
         results = await self._get_linearized_receipts_for_rooms(
@@ -413,14 +404,6 @@ class ReceiptsWorkerStore(SQLBaseStore):
             ]
 
         rows = await self.db_pool.runInteraction("get_linearized_receipts_for_room", f)
-
-        logger.info(
-            "[gg-receipts] _get_linearized_receipts_for_room room=%s from_key=%s to_key=%s rows=%d",
-            room_id,
-            from_key.stream if from_key else None,
-            to_key.get_max_stream_pos(),
-            len(rows),
-        )
 
         if not rows:
             return []
@@ -884,11 +867,6 @@ class ReceiptsWorkerStore(SQLBaseStore):
                     row.room_id, row.receipt_type, row.user_id
                 )
                 self._receipts_stream_cache.entity_has_changed(row.room_id, token)
-                logger.info(
-                    "[gg-receipts] process_replication_rows receipts room=%s token=%s",
-                    row.room_id,
-                    token,
-                )
 
         return super().process_replication_rows(stream_name, instance_name, token, rows)
 

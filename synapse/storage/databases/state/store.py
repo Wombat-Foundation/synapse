@@ -992,7 +992,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     local_nodes=local_nodes,
                 )
                 hamt_writes.append((sg_after, root_hash, lattice, nodes))
-                local_nodes.update(nodes)
+                local_nodes = dict(nodes)
                 sg_before = sg_after
 
             return events_and_context, hamt_writes
@@ -1365,4 +1365,8 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             txn,
             table="state_groups",
             keyvalues={"room_id": room_id},
+        )
+        txn.execute(
+            """DELETE FROM state_hamt_roots WHERE state_group NOT IN
+            (SELECT id FROM state_groups)"""
         )

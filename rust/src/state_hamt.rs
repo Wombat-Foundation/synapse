@@ -1825,10 +1825,14 @@ mod tests {
             ("m.room.name".to_owned(), "".to_owned(), "$2".to_owned()),
         ];
 
-        let ((_, _), nodes) = build_root_handle_and_nodes(&server_secret, room_id, entries)
+        let ((root_hash, _), nodes) = build_root_handle_and_nodes(&server_secret, room_id, entries)
             .expect("HAMT root should build");
 
-        let (root_hash, root_bytes) = nodes.last().cloned().expect("root node should exist");
+        let root_bytes = nodes
+            .iter()
+            .find(|(hash, _)| hash == &root_hash)
+            .map(|(_, bytes)| bytes.clone())
+            .expect("root node should exist");
 
         let recovered = materialize_state_entries(
             root_bytes,

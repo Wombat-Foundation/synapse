@@ -42,10 +42,21 @@ docker run -d --name pd "${NETWORK_ARGS[@]}" --ulimit nofile=1048576:1048576 -p 
 
 # Wait until PD has elected a leader. Some endpoints can respond
 # before the single-node PD cluster is ready to bootstrap TiKV.
-until curl -fsS http://$ADVERTISE_PD:2379/pd/api/v1/leader; do
+leader_found=0
+for i in $(seq 1 30); do
+	if curl --max-time 5 -fsS http://$ADVERTISE_PD:2379/pd/api/v1/leader; then
+		leader_found=1
+		break
+	fi
 	echo "Waiting for PD leader..."
 	sleep 2
 done
+
+if [ "$leader_found" -ne 1 ]; then
+	echo "PD did not elect a leader in time"
+	docker logs pd || true
+	exit 1
+fi
 
 # shellcheck disable=SC2086 # NETWORK_ARGS is intentionally two words (--network <name>)
 docker run -d --name tikv "${NETWORK_ARGS[@]}" --ulimit nofile=1048576:1048576 -p 20160:20160 pingcap/tikv:latest \

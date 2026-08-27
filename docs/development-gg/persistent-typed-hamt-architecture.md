@@ -11,7 +11,7 @@ should link back here rather than re-deriving the design.
 Stop treating SQL and TiKV as different state algorithms. Define one logical
 state-store interface and implement it over:
 
-```
+```text
 canonical state identity
         ↓
 persistent typed CHAMP/HAMT roots
@@ -49,7 +49,7 @@ storage-engine failure to fix.
 
 The typed persistent root is the preferred physical representation:
 
-```
+```text
 TypedRoot
  ├── structural_hash       keyed/local tree identity (never cross-server)
  ├── state_group_id        BLAKE2b-256(unkeyed LtHash) — the canonical identity
@@ -80,7 +80,7 @@ end.
 
 Add compact local IDs where useful:
 
-```
+```text
 event_type_id  <-> event type
 state_key_id   <-> (event type, state key)
 short_event_id <-> event ID
@@ -103,7 +103,7 @@ identical `state_group_id` for identical logical state.
 
 Expose a persistent update API instead of full-map rebuild:
 
-```
+```text
 old_root + [(key, insert | replace | delete)] -> new_root
 ```
 
@@ -176,7 +176,7 @@ atomic operation).
 
 TiKV key layout, if/when the TiKV backend is built out to this design:
 
-```
+```text
 hamt:node:<room_prefix>:<structural_hash>
 hamt:root:<room_prefix>:<state_group_or_root_reference>
 dict:event_type:<id>

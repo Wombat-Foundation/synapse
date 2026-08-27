@@ -19,6 +19,7 @@
 #
 import os.path
 import subprocess
+from functools import lru_cache
 
 from incremental import Version
 from zope.interface import implementer
@@ -84,6 +85,7 @@ subjectAltName = %(sanentries)s
 """
 
 
+@lru_cache(maxsize=1)
 def _openssl_x509_supports_set_serial() -> bool:
     result = subprocess.run(
         ["openssl", "x509", "-help"],
