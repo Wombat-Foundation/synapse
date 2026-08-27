@@ -481,6 +481,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         prev_state_group: int | None = None,
         updates: list[tuple[str, str, str]] | None = None,
         local_nodes: dict[bytes, bytes] | None = None,
+        local_roots: dict[int, tuple[bytes, bytes]] | None = None,
     ) -> tuple[bytes, bytes, list[tuple[bytes, bytes]]]:
         """Persist a new state_group's HAMT root and nodes.
 
@@ -519,6 +520,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 prev_state_group,
                 updates,
                 local_nodes=local_nodes,
+                local_roots=local_roots,
             )
         if incremental is not None:
             return incremental
@@ -584,6 +586,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         prev_state_group: int,
         updates: list[tuple[str, str, str]],
         local_nodes: dict[bytes, bytes] | None = None,
+        local_roots: dict[int, tuple[bytes, bytes]] | None = None,
     ) -> tuple[bytes, bytes, list[tuple[bytes, bytes]]] | None:
         """Apply `updates` -- a delta of any size, from a single state event
         to a whole state-resolution/merge result the caller already computed
@@ -607,7 +610,10 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         from synapse.synapse_rust import state_hamt
 
         use_tikv = bool(self.tikv_pd_endpoints)
-        if use_tikv:
+        local_roots = local_roots or {}
+        if use_tikv and prev_state_group in local_roots:
+            prev_root_hash, prev_lattice = local_roots[prev_state_group]
+        elif use_tikv:
             from synapse.synapse_rust import tikv_engine
 
             root_value = tikv_engine.get(
@@ -760,6 +766,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         prev_group: int | None = None,
         updates: list[tuple[str, str, str]] | None = None,
         local_nodes: dict[bytes, bytes] | None = None,
+        local_roots: dict[int, tuple[bytes, bytes]] | None = None,
     ) -> tuple[bytes, bytes, list[tuple[bytes, bytes]]]:
         self.db_pool.simple_insert_txn(
             txn,
@@ -814,6 +821,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             prev_state_group=prev_group,
             updates=updates,
             local_nodes=local_nodes,
+            local_roots=local_roots,
         )
 
     async def _put_state_hamt_objects_after_txn(
@@ -962,6 +970,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             # needs this in-memory cache to find its predecessor's root,
             # rather than reading (nothing) back from TiKV mid-transaction.
             local_nodes: dict[bytes, bytes] = {}
+            local_roots: dict[int, tuple[bytes, bytes]] = {}
 
             for event, context in events_and_context:
                 if not event.is_state():
@@ -990,9 +999,11 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     # instead of rebuilding from all of current_state_ids.
                     updates=[(event.type, event.state_key, event.event_id)],
                     local_nodes=local_nodes,
+                    local_roots=local_roots,
                 )
                 hamt_writes.append((sg_after, root_hash, lattice, nodes))
                 local_nodes = dict(nodes)
+                local_roots[sg_after] = (root_hash, lattice)
                 sg_before = sg_after
 
             return events_and_context, hamt_writes
@@ -1160,25 +1171,37 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             Whether any state groups were actually deleted.
         """
 
-        return await self.db_pool.runInteraction(
+        deleted, state_groups = await self.db_pool.runInteraction(
             "purge_unreferenced_state_groups",
             self._purge_unreferenced_state_groups,
             room_id,
             state_groups_to_sequence_numbers,
         )
+        if self.tikv_pd_endpoints and state_groups:
+            from synapse.synapse_rust import tikv_engine
+
+            await defer_to_thread(
+                self.hs.get_reactor(),
+                tikv_engine.batch_delete,
+                [
+                    _state_hamt_root_tikv_key(self.server_name, int(state_group))
+                    for state_group in state_groups
+                ],
+            )
+        return deleted
 
     def _purge_unreferenced_state_groups(
         self,
         txn: LoggingTransaction,
         room_id: str,
         state_groups_to_sequence_numbers: Mapping[int, int],
-    ) -> bool:
+    ) -> tuple[bool, set[int]]:
         state_groups_to_delete = self._state_deletion_store.get_state_groups_ready_for_potential_deletion_txn(
             txn, state_groups_to_sequence_numbers
         )
 
         if not state_groups_to_delete:
-            return False
+            return False, set()
 
         logger.info(
             "[purge] found %i state groups to delete", len(state_groups_to_delete)
@@ -1262,7 +1285,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             [(sg,) for sg in state_groups_to_delete],
         )
 
-        return True
+        return True, set(state_groups_to_delete)
 
     @trace
     @tag_args
@@ -1322,11 +1345,28 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         return dict(rows)
 
     async def purge_room_state(self, room_id: str) -> None:
-        return await self.db_pool.runInteraction(
+        state_groups = await self.db_pool.simple_select_onecol(
+            table="state_groups",
+            keyvalues={"room_id": room_id},
+            retcol="id",
+            desc="get_state_groups_for_room_purge",
+        )
+        await self.db_pool.runInteraction(
             "purge_room_state",
             self._purge_room_state_txn,
             room_id,
         )
+        if self.tikv_pd_endpoints and state_groups:
+            from synapse.synapse_rust import tikv_engine
+
+            await defer_to_thread(
+                self.hs.get_reactor(),
+                tikv_engine.batch_delete,
+                [
+                    _state_hamt_root_tikv_key(self.server_name, int(state_group))
+                    for state_group in state_groups
+                ],
+            )
 
     def _purge_room_state_txn(
         self,

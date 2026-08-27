@@ -596,7 +596,10 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
 
         node_bytes_by_hash: dict[bytes, bytes] = {root_structural_hash: root_node_bytes}
         seen_hashes = {root_structural_hash}
-        to_fetch = {root_structural_hash}
+        to_fetch = {
+            bytes(child_hash)
+            for child_hash in state_hamt.node_child_hashes(root_node_bytes)
+        }
 
         while to_fetch:
             current_batch = list(to_fetch)

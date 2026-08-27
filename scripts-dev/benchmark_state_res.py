@@ -466,8 +466,12 @@ async def main() -> None:
                     # Merge point! We must resolve the states after the prev events
                     state_sets = []
                     for pid in prev_ids:
-                        if pid in event_states:
-                            state_sets.append(event_states[pid])
+                        if pid not in event_states:
+                            raise ValueError(
+                                f"Event {ev.event_id} references predecessor {pid} "
+                                "which has not appeared earlier in the JSONL input"
+                            )
+                        state_sets.append(event_states[pid])
 
                     if not state_sets:
                         state_before = {}
@@ -498,8 +502,17 @@ async def main() -> None:
                 bookkeeping_s += time.perf_counter() - loop_start
 
             duration = time.perf_counter() - start_time
-            # Get state of the last event
-            final_state = event_states[events_list[-1].event_id]
+            terminal_events = {event.event_id for event in events_list} - {
+                predecessor
+                for event in events_list
+                for predecessor in event.prev_event_ids()
+            }
+            if len(terminal_events) != 1:
+                raise ValueError(
+                    "JSONL DAG must have exactly one forward extremity, found "
+                    f"{len(terminal_events)}"
+                )
+            final_state = event_states[next(iter(terminal_events))]
             return (
                 RunStats(
                     total_s=duration,

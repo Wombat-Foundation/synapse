@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-set -u
+set -euo pipefail
 
 stats_file=${1:-/tmp/postgres-stats.txt}
 : >"$stats_file"

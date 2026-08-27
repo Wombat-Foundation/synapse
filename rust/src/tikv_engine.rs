@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use once_cell::sync::OnceCell;
@@ -13,8 +14,8 @@ use crate::state_hamt::{decode_persisted_node, materialize_from_node_map};
 static RUNTIME: OnceCell<Runtime> = OnceCell::new();
 static CLIENT: OnceCell<RawClient> = OnceCell::new();
 static TX_CLIENT: OnceCell<TransactionClient> = OnceCell::new();
-const READINESS_PROBE_KEY: &[u8] = b"synapse:tikv:readiness-probe";
 const READINESS_PROBE_VALUE: &[u8] = b"ok";
+static READINESS_PROBE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const OPEN_CLIENT_ATTEMPTS: u32 = 60;
 const OPEN_CLIENT_RETRY_DELAY: Duration = Duration::from_secs(2);
 
@@ -29,23 +30,25 @@ fn get_runtime() -> &'static Runtime {
 }
 
 async fn check_raw_kv_ready(client: &RawClient) -> Result<(), String> {
+    let probe_key = format!(
+        "synapse:tikv:readiness-probe:{}",
+        READINESS_PROBE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    )
+    .into_bytes();
     client
-        .put(READINESS_PROBE_KEY.to_vec(), READINESS_PROBE_VALUE.to_vec())
+        .put(probe_key.clone(), READINESS_PROBE_VALUE.to_vec())
         .await
         .map_err(|e| e.to_string())?;
 
     let value = client
-        .get(READINESS_PROBE_KEY.to_vec())
+        .get(probe_key.clone())
         .await
         .map_err(|e| e.to_string())?;
     if value.as_deref() != Some(READINESS_PROBE_VALUE) {
         return Err("TiKV readiness probe returned an unexpected value".to_owned());
     }
 
-    client
-        .delete(READINESS_PROBE_KEY.to_vec())
-        .await
-        .map_err(|e| e.to_string())
+    client.delete(probe_key).await.map_err(|e| e.to_string())
 }
 
 async fn open_ready_client(pd_endpoints: Vec<String>) -> Result<RawClient, String> {
@@ -73,17 +76,19 @@ async fn open_ready_client(pd_endpoints: Vec<String>) -> Result<RawClient, Strin
 
 #[pyfunction]
 pub fn open_client(py: Python<'_>, pd_endpoints: Vec<String>) -> PyResult<()> {
-    if CLIENT.get().is_some() {
+    if CLIENT.get().is_some() && TX_CLIENT.get().is_some() {
         return Ok(());
+    }
+    if CLIENT.get().is_some() || TX_CLIENT.get().is_some() {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "TiKV client is only partially initialized",
+        ));
     }
     let rt = get_runtime();
     let client = py
         .detach(|| rt.block_on(async { open_ready_client(pd_endpoints.clone()).await }))
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
 
-    CLIENT.set(client).map_err(|_| {
-        pyo3::exceptions::PyRuntimeError::new_err("Failed to set TiKV Client instance")
-    })?;
     let tx_client = py
         .detach(|| {
             get_runtime()
@@ -91,8 +96,14 @@ pub fn open_client(py: Python<'_>, pd_endpoints: Vec<String>) -> PyResult<()> {
                 .map_err(|e| e.to_string())
         })
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    // Publish both clients only after both connections have been established;
+    // a failed transaction-client connection must not leave open_client()
+    // appearing successful on subsequent calls.
     TX_CLIENT.set(tx_client).map_err(|_| {
         pyo3::exceptions::PyRuntimeError::new_err("Failed to set TiKV transaction client")
+    })?;
+    CLIENT.set(client).map_err(|_| {
+        pyo3::exceptions::PyRuntimeError::new_err("Failed to set TiKV Client instance")
     })?;
     Ok(())
 }
