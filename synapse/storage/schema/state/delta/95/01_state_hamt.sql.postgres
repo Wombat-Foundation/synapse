@@ -16,6 +16,15 @@ CREATE TABLE IF NOT EXISTS state_hamt_nodes (
     node_bytes BYTEA NOT NULL
 );
 
+-- Nodes for roots which have been committed locally but not yet published to
+-- TiKV.  This is the durable hand-off between the SQL transaction and the
+-- TiKV write; without it a crash in that interval loses the only copy of the
+-- newly-created state tree.
+CREATE TABLE IF NOT EXISTS state_hamt_pending_nodes (
+    structural_hash BYTEA PRIMARY KEY,
+    node_bytes BYTEA NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS state_hamt_roots (
     state_group BIGINT PRIMARY KEY,
     room_prefix BYTEA NOT NULL,
@@ -30,4 +39,5 @@ CREATE TABLE IF NOT EXISTS state_hamt_roots (
     -- tolerate a row written before this column existed; NULL means "no
     -- usable base for an incremental update from this root", not an error.
     root_lattice BYTEA
+    ,published BOOLEAN NOT NULL DEFAULT TRUE
 );

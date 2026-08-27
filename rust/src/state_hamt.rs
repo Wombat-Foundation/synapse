@@ -485,6 +485,9 @@ fn apply_flat_state_updates_impl(
                             "hash collision at depth {depth} with bucket size {bucket_size}"
                         ));
                     }
+                    Err(rezzy::hamt::HamtMutateError::MaxDepthExceeded { depth }) => {
+                        return Err(format!("HAMT maximum depth exceeded at depth {depth}"));
+                    }
                 }
             };
         }
@@ -632,6 +635,9 @@ fn apply_typed_state_updates_impl(
                             return Err(format!(
                                 "hash collision at depth {depth} with bucket size {bucket_size}"
                             ));
+                        }
+                        Err(rezzy::hamt::HamtMutateError::MaxDepthExceeded { depth }) => {
+                            return Err(format!("HAMT maximum depth exceeded at depth {depth}"));
                         }
                     }
                 };

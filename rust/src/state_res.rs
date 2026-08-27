@@ -53,6 +53,7 @@ pub fn get_auth_chain_difference_from_event_graph<'py>(
                 content: (),
                 prev_events: Vec::new(),
                 auth_events: auth_ids,
+                prev_state_events: Vec::new(),
                 depth: 0,
                 rejected: false,
                 soft_fail: false,
@@ -108,6 +109,7 @@ fn resolver_data_to_lean_event(data: EventResolverData) -> LeanEvent<String, Val
         content: data.content,
         prev_events: data.prev_events,
         auth_events: data.auth_events,
+        prev_state_events: data.prev_state_events,
         depth: data.depth,
         rejected: data.rejected,
         soft_fail: data.soft_failed,
@@ -126,6 +128,10 @@ fn py_to_lean_event(py_ev: &Bound<'_, PyAny>) -> PyResult<LeanEvent<String, Valu
 
     let prev_events: Vec<String> = py_ev.call_method0("prev_event_ids")?.extract()?;
     let auth_events: Vec<String> = py_ev.call_method0("auth_event_ids")?.extract()?;
+    let prev_state_events: Vec<String> = py_ev
+        .getattr("prev_state_events")
+        .and_then(|value| value.extract())
+        .unwrap_or_default();
     let rejected_reason: Option<String> = py_ev.getattr("rejected_reason")?.extract()?;
     let soft_failed: bool = py_ev
         .getattr("internal_metadata")?
@@ -147,6 +153,7 @@ fn py_to_lean_event(py_ev: &Bound<'_, PyAny>) -> PyResult<LeanEvent<String, Valu
         content,
         prev_events,
         auth_events,
+        prev_state_events,
         depth,
         rejected: rejected_reason.is_some(),
         soft_fail: soft_failed,

@@ -1,0 +1,8 @@
+-- SQLite supports adding a column with a constant default. Existing roots
+-- were written synchronously and are therefore already published.
+ALTER TABLE state_hamt_roots ADD COLUMN published BOOLEAN NOT NULL DEFAULT 1;
+
+CREATE TABLE IF NOT EXISTS state_hamt_pending_nodes (
+    structural_hash BLOB PRIMARY KEY,
+    node_bytes BLOB NOT NULL
+);

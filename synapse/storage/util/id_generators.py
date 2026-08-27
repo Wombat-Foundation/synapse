@@ -38,8 +38,6 @@ from typing import (
 import attr
 from sortedcontainers import SortedList, SortedSet
 
-from twisted.internet.defer import DeferredLock
-
 from synapse.logging import issue9533_logger
 from synapse.metrics.background_process_metrics import run_as_background_process
 from synapse.storage.database import (
@@ -236,8 +234,6 @@ class MultiWriterIdGenerator(AbstractStreamIdGenerator):
 
         # We lock as some functions may be called from DB threads.
         self._lock = threading.Lock()
-        # Serialize local stream_positions upserts scheduled after writes.
-        self._stream_positions_update_lock = DeferredLock()
 
         # Note: If we are a negative stream then we still store all the IDs as
         # positive to make life easier for us, and simply negate the IDs when we
@@ -580,7 +576,9 @@ class MultiWriterIdGenerator(AbstractStreamIdGenerator):
                 run_as_background_process,
                 "MultiWriterIdGenerator._update_table",
                 self.server_name,
-                self._update_stream_positions,
+                self._db.runInteraction,
+                "MultiWriterIdGenerator._update_table",
+                self._update_stream_positions_table_txn,
             )
 
         return self._return_factor * next_id
@@ -625,7 +623,9 @@ class MultiWriterIdGenerator(AbstractStreamIdGenerator):
                 run_as_background_process,
                 "MultiWriterIdGenerator._update_table",
                 self.server_name,
-                self._update_stream_positions,
+                self._db.runInteraction,
+                "MultiWriterIdGenerator._update_table",
+                self._update_stream_positions_table_txn,
             )
 
         return [self._return_factor * next_id for next_id in next_ids]
@@ -868,16 +868,6 @@ class MultiWriterIdGenerator(AbstractStreamIdGenerator):
         pos = self.get_current_token_for_writer(self._instance_name)
         txn.execute(sql, (self._stream_name, self._instance_name, pos))
 
-    async def _update_stream_positions(self) -> None:
-        """Persist the current writer position, serializing local updates."""
-
-        async with self._stream_positions_update_lock:
-            await self._db.runInteraction(
-                "MultiWriterIdGenerator._update_table",
-                self._update_stream_positions_table_txn,
-                db_autocommit=True,
-            )
-
     async def get_max_allocated_token(self) -> int:
         return await self._db.runInteraction(
             "get_max_allocated_token", self._sequence_gen.get_max_allocated
@@ -985,6 +975,10 @@ class _MultiWriterCtxManager:
         # for. If we don't do this then we'll often hit serialization errors due
         # to the fact we default to REPEATABLE READ isolation levels.
         if self.id_gen._writers:
-            await self.id_gen._update_stream_positions()
+            await self.id_gen._db.runInteraction(
+                "MultiWriterIdGenerator._update_table",
+                self.id_gen._update_stream_positions_table_txn,
+                db_autocommit=True,
+            )
 
         return False

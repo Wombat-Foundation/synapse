@@ -435,13 +435,65 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
             txn,
             table="state_hamt_roots",
             keyvalues={"state_group": state_group},
-            retcols=("room_prefix", "root_structural_hash"),
+            retcols=("room_prefix", "root_structural_hash", "published"),
             allow_none=True,
         )
         if row is None:
             return None
         room_prefix = bytes(row[0])
         root_structural_hash = bytes(row[1])
+        published = bool(row[2])
+
+        if not published:
+            # A crash can leave the SQL transaction committed after the root
+            # and its durable hand-off nodes, but before TiKV publication.
+            # Read that hand-off directly; it is complete for this root.
+            root_bytes = self.db_pool.simple_select_one_onecol_txn(
+                txn,
+                table="state_hamt_pending_nodes",
+                keyvalues={"structural_hash": bytearray(root_structural_hash)},
+                retcol="node_bytes",
+                allow_none=True,
+            )
+            if root_bytes is None:
+                return None
+            nodes = {root_structural_hash: bytes(root_bytes)}
+            from synapse.synapse_rust import state_hamt
+
+            # Walk the staged content-addressed tree. A root produced by a
+            # batch may point at nodes from an earlier, already-published
+            # root, so consult TiKV after checking the durable SQL hand-off.
+            while True:
+                needed = {
+                    child
+                    for node in nodes.values()
+                    for child in state_hamt.node_child_hashes(node)
+                    if child not in nodes
+                }
+                if not needed:
+                    return state_hamt.materialize_state_entries(
+                        nodes[root_structural_hash], list(nodes.items())
+                    )
+                rows = self.db_pool.simple_select_many_txn(
+                    txn,
+                    table="state_hamt_pending_nodes",
+                    column="structural_hash",
+                    iterable=[bytearray(h) for h in needed],
+                    keyvalues={},
+                    retcols=("structural_hash", "node_bytes"),
+                )
+                nodes.update({bytes(h): bytes(b) for h, b in rows})
+                unresolved = needed - nodes.keys()
+                if unresolved:
+                    key_to_hash = {
+                        _state_hamt_node_tikv_key(room_prefix, h): h for h in unresolved
+                    }
+                    rows = tikv_engine.batch_get(list(key_to_hash))
+                    nodes.update(
+                        {key_to_hash[bytes(key)]: bytes(value) for key, value in rows}
+                    )
+                    if unresolved - nodes.keys():
+                        return None
 
         return tikv_engine.materialize_state_hamt(room_prefix, root_structural_hash)
 
