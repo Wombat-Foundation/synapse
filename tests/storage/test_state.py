@@ -68,7 +68,7 @@ class StateStoreTestCase(HomeserverTestCase):
         self.get_success(
             self.store.store_room(
                 self.room.to_string(),
-                room_creator_user_id="@creator:text",
+                room_creator_user_id=self.u_alice.to_string(),
                 is_public=True,
                 room_version=RoomVersions.V1,
             )
@@ -400,23 +400,26 @@ class StateStoreTestCase(HomeserverTestCase):
         self.get_success(
             self.store.store_room(
                 room2.to_string(),
-                room_creator_user_id="@creator:text",
+                room_creator_user_id=self.u_alice.to_string(),
                 is_public=True,
                 room_version=RoomVersions.V1,
             )
         )
-        self.inject_state_event(room2, self.u_alice, EventTypes.Create, "", {})
-        event3 = self.inject_state_event(
+        event3 = self.inject_state_event(room2, self.u_alice, EventTypes.Create, "", {})
+        event4 = self.inject_state_event(
             room2, self.u_alice, EventTypes.Topic, "", {"topic": "Room 2 Topic"}
         )
         sg3 = self.get_success(self.store._get_state_group_for_event(event3.event_id))
-        assert sg1 is not None and sg2 is not None and sg3 is not None
+        sg4 = self.get_success(self.store._get_state_group_for_event(event4.event_id))
+        assert (
+            sg1 is not None and sg2 is not None and sg3 is not None and sg4 is not None
+        )
 
-        # Look up m.room.name across all three state groups
+        # Look up m.room.name across state groups
         state_filter = StateFilter.from_types([(EventTypes.Name, "")])
         res = self.get_success(
             self.storage.state.stores.state._get_state_groups_from_groups(
-                [sg1, sg2, sg3], state_filter
+                [sg1, sg2, sg4], state_filter
             )
         )
         self.assertEqual(
@@ -424,7 +427,7 @@ class StateStoreTestCase(HomeserverTestCase):
             {
                 sg1: {},
                 sg2: {(EventTypes.Name, ""): event2.event_id},
-                sg3: {},
+                sg4: {},
             },
         )
 
