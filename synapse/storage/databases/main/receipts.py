@@ -375,10 +375,10 @@ class ReceiptsWorkerStore(SQLBaseStore):
     ) -> Sequence[JsonMapping]:
         """See get_linearized_receipts_for_room"""
 
-        def f(txn: LoggingTransaction) -> list[tuple[str, str, str, str]]:
+        def f(txn: LoggingTransaction) -> list[ReceiptInRoom]:
             if from_key:
                 sql = """
-                    SELECT stream_id, instance_name, receipt_type, user_id, event_id, data
+                    SELECT stream_id, instance_name, receipt_type, user_id, event_id, thread_id, data
                     FROM receipts_linearized
                     WHERE room_id = ? AND stream_id > ? AND stream_id <= ?
                 """
@@ -388,7 +388,7 @@ class ReceiptsWorkerStore(SQLBaseStore):
                 )
             else:
                 sql = """
-                    SELECT stream_id, instance_name, receipt_type, user_id, event_id, data
+                    SELECT stream_id, instance_name, receipt_type, user_id, event_id, thread_id, data
                     FROM receipts_linearized WHERE
                     room_id = ? AND stream_id <= ?
                 """
@@ -396,8 +396,14 @@ class ReceiptsWorkerStore(SQLBaseStore):
                 txn.execute(sql, (room_id, to_key.get_max_stream_pos()))
 
             return [
-                (receipt_type, user_id, event_id, data)
-                for stream_id, instance_name, receipt_type, user_id, event_id, data in txn
+                ReceiptInRoom(
+                    receipt_type=receipt_type,
+                    user_id=user_id,
+                    event_id=event_id,
+                    thread_id=thread_id,
+                    data=db_to_json(data),
+                )
+                for stream_id, instance_name, receipt_type, user_id, event_id, thread_id, data in txn
                 if MultiWriterStreamToken.is_stream_position_in_range(
                     from_key, to_key, instance_name, stream_id
                 )
@@ -408,13 +414,13 @@ class ReceiptsWorkerStore(SQLBaseStore):
         if not rows:
             return []
 
-        content: JsonDict = {}
-        for receipt_type, user_id, event_id, data in rows:
-            content.setdefault(event_id, {}).setdefault(receipt_type, {})[user_id] = (
-                db_to_json(data)
-            )
-
-        return [{"type": EduTypes.RECEIPT, "room_id": room_id, "content": content}]
+        return [
+            {
+                "type": EduTypes.RECEIPT,
+                "room_id": room_id,
+                "content": ReceiptInRoom.merge_to_content(rows),
+            }
+        ]
 
     @cachedList(
         cached_method_name="_get_linearized_receipts_for_room",
