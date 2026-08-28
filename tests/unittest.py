@@ -25,8 +25,10 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import secrets
 import time
+import uuid
 from typing import (
     AbstractSet,
     Any,
@@ -536,7 +538,21 @@ class HomeserverTestCase(TestCase):
         """
         Get a default HomeServer config dict.
         """
-        config = default_config(server_name="test")
+        if not hasattr(self, "_tikv_namespace"):
+            if (
+                hasattr(self, "hs")
+                and self.hs
+                and hasattr(self.hs, "config")
+                and self.hs.config.database.tikv_namespace
+            ):
+                self._tikv_namespace = self.hs.config.database.tikv_namespace
+            else:
+                self._tikv_namespace = f"trial-{os.getpid()}-{uuid.uuid4().hex}"
+
+        config = default_config(
+            server_name="test",
+            tikv_namespace=self._tikv_namespace,
+        )
 
         # apply any additional config which was specified via the override_config
         # decorator.

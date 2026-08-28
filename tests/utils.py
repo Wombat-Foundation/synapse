@@ -140,16 +140,27 @@ def setupdb() -> None:
 
 @overload
 def default_config(
-    *, server_name: str, parse: Literal[False] = ...
+    *,
+    server_name: str,
+    parse: Literal[False] = ...,
+    tikv_namespace: str | None = ...,
 ) -> dict[str, object]: ...
 
 
 @overload
-def default_config(*, server_name: str, parse: Literal[True]) -> HomeServerConfig: ...
+def default_config(
+    *,
+    server_name: str,
+    parse: Literal[True],
+    tikv_namespace: str | None = ...,
+) -> HomeServerConfig: ...
 
 
 def default_config(
-    *, server_name: str, parse: bool = False
+    *,
+    server_name: str,
+    parse: bool = False,
+    tikv_namespace: str | None = None,
 ) -> dict[str, object] | HomeServerConfig:
     """
     Create a reasonable test config.
@@ -157,6 +168,8 @@ def default_config(
     Args:
         server_name: homeserver name
         parse: TODO
+        tikv_namespace: Optional TiKV namespace to use. If not specified and
+            TIKV_PD_ENDPOINTS is configured, a unique namespace is generated.
     """
     config_dict = {
         "server_name": server_name,
@@ -235,10 +248,12 @@ def default_config(
     if TIKV_PD_ENDPOINTS:
         # Trial workers use separate SQL databases but share this TiKV cluster.
         # State-group ids restart in each database, so isolate their HAMT keys
-        # uniquely per HomeServer instance.
+        # uniquely per test database/homeserver setup.
+        if tikv_namespace is None:
+            tikv_namespace = f"trial-{os.getpid()}-{uuid.uuid4().hex}"
         config_dict["tikv"] = {
             "pd_endpoints": TIKV_PD_ENDPOINTS,
-            "namespace": f"trial-{os.getpid()}-{uuid.uuid4().hex}",
+            "namespace": tikv_namespace,
         }
 
     if parse:
