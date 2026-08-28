@@ -397,6 +397,14 @@ class StateStoreTestCase(HomeserverTestCase):
 
         # Create room 2 with Create and Topic events
         room2 = RoomID.from_string("!room2:test")
+        self.get_success(
+            self.store.store_room(
+                room2.to_string(),
+                room_creator_user_id="@creator:text",
+                is_public=True,
+                room_version=RoomVersions.V1,
+            )
+        )
         self.inject_state_event(room2, self.u_alice, EventTypes.Create, "", {})
         event3 = self.inject_state_event(
             room2, self.u_alice, EventTypes.Topic, "", {"topic": "Room 2 Topic"}
