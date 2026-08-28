@@ -4092,6 +4092,7 @@ user_consent:
 This setting has the following sub-options:
 
 * `enabled` (boolean): Set to false to disable room and user statistics. Note that doing so may cause certain features (such as the room directory) not to work correctly. Defaults to `true`.
+
 * `server_stats_endpoint_enabled` (boolean): Enable the authenticated `/_synapse/client/server_stats` endpoint. Requests require a server-admin access token. This is disabled by default. Defaults to `false`.
 
 Example configuration:
