@@ -22,7 +22,7 @@
 import logging
 import random
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any, Mapping, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, Optional, Sequence, cast
 
 from canonicaljson import encode_canonical_json
 
@@ -1426,46 +1426,7 @@ class EventCreationHandler:
             else:
                 context = await self.state.calculate_context_info(event)
 
-        if requester and requester.app_service_id:
-            context.app_service = self.store.get_app_service_by_id(
-                requester.app_service_id
-            )
-
-        res, new_content = await self._third_party_event_rules.check_event_allowed(
-            event, context
-        )
-        if res is False:
-            logger.info(
-                "Event %s forbidden by third-party rules",
-                event,
-            )
-            raise SynapseError(
-                403, "This event is not allowed in this context", Codes.FORBIDDEN
-            )
-        elif new_content is not None:
-            # the third-party rules want to replace the event. We'll need to build a new
-            # event.
-            event, context = await self._rebuild_event_after_third_party_rules(
-                new_content, event
-            )
-
-        self.validator.validate_new(event, self.config)
-        await self._validate_event_relation(event)
-
-        if event.type == EventTypes.CallInvite:
-            room_id = event.room_id
-            room_info = await self.store.get_room_with_stats(room_id)
-            assert room_info is not None
-
-            if room_info.join_rules == JoinRules.PUBLIC:
-                raise SynapseError(
-                    403,
-                    "Call invites are not allowed in public rooms.",
-                    Codes.FORBIDDEN,
-                )
-        logger.debug("Created event %s", event.event_id)
-
-        return event, context
+        return await self._post_build_validate_client_event(event, context, requester)
 
     async def create_new_client_event_for_batch(
         self,
@@ -1504,6 +1465,18 @@ class EventCreationHandler:
             state_group_before_event=current_state_group,
         )
 
+        return cast(
+            tuple[EventBase, UnpersistedEventContext],
+            await self._post_build_validate_client_event(event, context, requester),
+        )
+
+    async def _post_build_validate_client_event(
+        self,
+        event: EventBase,
+        context: UnpersistedEventContextBase,
+        requester: Requester | None,
+    ) -> tuple[EventBase, UnpersistedEventContextBase]:
+        """Perform shared post-build validation, appservice assignment, and third-party checks."""
         if requester and requester.app_service_id:
             context.app_service = self.store.get_app_service_by_id(
                 requester.app_service_id

@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration as StdDuration, Instant};
 
 use lru::LruCache;
 use once_cell::sync::OnceCell;
@@ -152,6 +153,25 @@ async fn open_ready_client(pd_endpoints: Vec<String>) -> Result<RawClient, Strin
     ))
 }
 
+/// How long a failed `open_client` attempt is remembered before the next
+/// caller is allowed to retry against the network again.
+///
+/// `open_client` is called once per `StateStore` construction -- i.e. once
+/// per test-case `HomeServer` in a trial run, or once per worker restart in
+/// production. Without this, a genuinely unreachable TiKV cluster meant
+/// every single caller paid `open_ready_client`'s full multi-attempt retry
+/// budget (up to ~14s) from scratch, compounding into what looks like an
+/// indefinite hang across a large test suite. This is a short-TTL negative
+/// cache, not a permanent one, so a cluster that comes up mid-run is still
+/// picked up promptly by the next caller after the TTL lapses.
+const OPEN_CLIENT_NEGATIVE_CACHE_TTL: StdDuration = StdDuration::from_secs(5);
+type OpenClientFailure = Mutex<Option<(Vec<String>, Instant, String)>>;
+static OPEN_CLIENT_FAILURE: OnceCell<OpenClientFailure> = OnceCell::new();
+
+fn open_client_failure_cache() -> &'static OpenClientFailure {
+    OPEN_CLIENT_FAILURE.get_or_init(|| Mutex::new(None))
+}
+
 #[pyfunction]
 pub fn open_client(py: Python<'_>, pd_endpoints: Vec<String>) -> PyResult<()> {
     if CLIENT.get().is_some() && TX_CLIENT.get().is_some() {
@@ -162,27 +182,62 @@ pub fn open_client(py: Python<'_>, pd_endpoints: Vec<String>) -> PyResult<()> {
             "TiKV client is only partially initialized",
         ));
     }
-    let rt = get_runtime();
-    let client = py
-        .detach(|| rt.block_on(async { open_ready_client(pd_endpoints.clone()).await }))
-        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
 
-    let tx_client = py
-        .detach(|| {
-            get_runtime()
-                .block_on(TransactionClient::new(pd_endpoints))
-                .map_err(|e| e.to_string())
-        })
-        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    if let Some((cached_endpoints, failed_at, err)) =
+        open_client_failure_cache().lock().unwrap().as_ref()
+    {
+        if cached_endpoints == &pd_endpoints && failed_at.elapsed() < OPEN_CLIENT_NEGATIVE_CACHE_TTL
+        {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "TiKV cluster at {:?} failed to connect {:.1}s ago; not retrying yet \
+                 (retries again after {:.0}s): {}",
+                pd_endpoints,
+                failed_at.elapsed().as_secs_f64(),
+                OPEN_CLIENT_NEGATIVE_CACHE_TTL.as_secs_f64(),
+                err
+            )));
+        }
+    }
+
+    let record_failure = |err: &str| {
+        *open_client_failure_cache().lock().unwrap() =
+            Some((pd_endpoints.clone(), Instant::now(), err.to_owned()));
+    };
+
+    let rt = get_runtime();
+    let client =
+        match py.detach(|| rt.block_on(async { open_ready_client(pd_endpoints.clone()).await })) {
+            Ok(client) => client,
+            Err(e) => {
+                record_failure(&e);
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(e));
+            }
+        };
+
+    let tx_client = match py.detach(|| {
+        get_runtime()
+            .block_on(TransactionClient::new(pd_endpoints.clone()))
+            .map_err(|e| e.to_string())
+    }) {
+        Ok(tx_client) => tx_client,
+        Err(e) => {
+            record_failure(&e);
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(e));
+        }
+    };
     // Publish both clients only after both connections have been established;
     // a failed transaction-client connection must not leave open_client()
     // appearing successful on subsequent calls.
-    TX_CLIENT.set(tx_client).map_err(|_| {
-        pyo3::exceptions::PyRuntimeError::new_err("Failed to set TiKV transaction client")
-    })?;
-    CLIENT.set(client).map_err(|_| {
-        pyo3::exceptions::PyRuntimeError::new_err("Failed to set TiKV Client instance")
-    })?;
+    if TX_CLIENT.set(tx_client).is_err() && TX_CLIENT.get().is_none() {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "Failed to set TiKV transaction client",
+        ));
+    }
+    if CLIENT.set(client).is_err() && CLIENT.get().is_none() {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "Failed to set TiKV Client instance",
+        ));
+    }
     Ok(())
 }
 
@@ -761,6 +816,46 @@ mod tests {
     fn prefix_scan_upper_bound_has_no_successor_for_all_ff_or_empty() {
         assert_eq!(prefix_scan_upper_bound(&[0xFF, 0xFF]), Vec::<u8>::new());
         assert_eq!(prefix_scan_upper_bound(&[]), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn open_client_negative_cache_records_and_matches_by_endpoint() {
+        // Exercises the real process-wide cache via `open_client_failure_cache()`.
+        // Uses an endpoint string unique to this test so it can't collide
+        // with another test's entry if tests run in parallel within this
+        // process.
+        let endpoints = vec!["unit-test-only-negative-cache:2379".to_owned()];
+        let other_endpoints = vec!["unit-test-only-negative-cache-2:2379".to_owned()];
+
+        {
+            let mut cache = open_client_failure_cache().lock().unwrap();
+            assert!(
+                cache.is_none() || cache.as_ref().unwrap().0 != endpoints,
+                "test endpoint should not already be cached"
+            );
+            *cache = Some((
+                endpoints.clone(),
+                Instant::now(),
+                "connection refused".to_owned(),
+            ));
+        }
+
+        // Same endpoints, fresh failure: still within the negative-cache TTL.
+        {
+            let cache = open_client_failure_cache().lock().unwrap();
+            let (cached_endpoints, failed_at, _err) = cache.as_ref().unwrap();
+            assert_eq!(cached_endpoints, &endpoints);
+            assert!(failed_at.elapsed() < OPEN_CLIENT_NEGATIVE_CACHE_TTL);
+        }
+
+        // A different endpoint list must never be treated as a cache hit for
+        // this one -- open_client's lookup compares endpoints, not just
+        // "is anything cached".
+        {
+            let cache = open_client_failure_cache().lock().unwrap();
+            let (cached_endpoints, _, _) = cache.as_ref().unwrap();
+            assert_ne!(cached_endpoints, &other_endpoints);
+        }
     }
 
     #[test]

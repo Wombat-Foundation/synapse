@@ -109,9 +109,9 @@ with open('/sytest/lib/SyTest/Homeserver/Synapse.pm', 'r') as f:
 
 anchor = '        databases => \\%db_configs,'
 injection = '''        databases => \\%db_configs,
-        ( \$ENV{SYNAPSE_TIKV_PD_ENDPOINTS} ? (
-            tikv => { pd_endpoints => [ map { s/^\\\\s+|\\\\s+\$//gr } split /,/, \$ENV{SYNAPSE_TIKV_PD_ENDPOINTS} ],
-        } ) : () ),'''
+        ( ( my @ep = grep { length } map { s/^\\\\s+|\\\\s+\$//gr } split /,/, ( \$ENV{SYNAPSE_TIKV_PD_ENDPOINTS} // '' ) ) ? (
+            tikv => { pd_endpoints => [ @ep ] },
+        ) : () ),'''
 
 assert anchor in content, 'Could not find databases anchor in Synapse.pm'
 content = content.replace(anchor, injection, 1)

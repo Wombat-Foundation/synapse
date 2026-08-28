@@ -194,13 +194,6 @@ properties:
           - type: string
             const: untracked
         default: true
-      server_stats_endpoint_enabled:
-        type: boolean
-        description: >-
-          Enable the authenticated `/_synapse/client/server_stats` endpoint.
-          Requests require a server-admin access token. This is disabled by
-          default.
-        default: false
       include_offline_users_on_sync:
         type: boolean
         description: >-
@@ -5142,6 +5135,13 @@ properties:
           may cause certain features (such as the room directory) not to work
           correctly.
         default: true
+      server_stats_endpoint_enabled:
+        type: boolean
+        description: >-
+          Enable the authenticated `/_synapse/client/server_stats` endpoint.
+          Requests require a server-admin access token. This is disabled by
+          default.
+        default: false
     examples:
       - enabled: false
   server_notices:

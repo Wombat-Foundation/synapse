@@ -282,8 +282,6 @@ This setting has the following sub-options:
 
   Defaults to `true`.
 
-* `server_stats_endpoint_enabled` (boolean): Enable the authenticated `/_synapse/client/server_stats` endpoint. Requests require a server-admin access token. This is disabled by default. Defaults to `false`.
-
 * `include_offline_users_on_sync` (boolean): When clients perform an initial or `full_state` sync, presence results for offline users are not included by default. Setting `include_offline_users_on_sync` to `true` will always include offline users in the results. Defaults to `false`.
 
 * `last_active_granularity` (duration): How long after a user was last active that they are still shown as "currently active" to other users. Larger values reduce the rate of presence updates sent to other users and servers.
@@ -4094,6 +4092,7 @@ user_consent:
 This setting has the following sub-options:
 
 * `enabled` (boolean): Set to false to disable room and user statistics. Note that doing so may cause certain features (such as the room directory) not to work correctly. Defaults to `true`.
+* `server_stats_endpoint_enabled` (boolean): Enable the authenticated `/_synapse/client/server_stats` endpoint. Requests require a server-admin access token. This is disabled by default. Defaults to `false`.
 
 Example configuration:
 ```yaml

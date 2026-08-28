@@ -80,6 +80,7 @@ const V1_COPY_KEYS: [&str; 6] = [
 
 /// The format used to convert an event from its federation shape to the shape
 /// sent to clients.
+#[allow(clippy::clone_on_copy)]
 #[pyclass(eq, eq_int, frozen, from_py_object)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum EventFormat {

@@ -795,10 +795,9 @@ class RoomsCreateTestCase(RoomBase):
         self.assertEqual(HTTPStatus.OK, channel.code, channel.result)
         self.assertTrue("room_id" in channel.json_body)
         assert channel.resource_usage is not None
-        # State persistence writes full SQL snapshots either way, but with
-        # TiKV configured, state-group rows are offloaded to TiKV instead of
-        # the state_groups_state/state_group_edges tables, so fewer SQL
-        # transactions are needed.
+        # When TiKV is configured, HAMT nodes and root pointers move from
+        # SQL tables (state_hamt_nodes / state_hamt_roots) to TiKV, reducing
+        # the number of SQL transactions needed.
         expected_txn_count = 26 if self.hs.config.database.tikv_pd_endpoints else 35
         self.assertEqual(expected_txn_count, channel.resource_usage.db_txn_count)
 

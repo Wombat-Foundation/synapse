@@ -24,6 +24,7 @@ from typing import (
     TYPE_CHECKING,
     Iterable,
     Mapping,
+    Sequence,
     cast,
 )
 
@@ -1612,6 +1613,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             "purge_room_state",
             self._purge_room_state_txn,
             room_id,
+            state_groups,
         )
         if self.tikv_pd_endpoints and state_groups:
             from synapse.synapse_rust import tikv_engine
@@ -1629,6 +1631,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         self,
         txn: LoggingTransaction,
         room_id: str,
+        state_groups: Sequence[int] = (),
     ) -> None:
         # Delete all edges that reference a state group linked to room_id
         logger.info("[purge] removing %s from state_group_edges", room_id)
@@ -1663,7 +1666,11 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             table="state_groups",
             keyvalues={"room_id": room_id},
         )
-        txn.execute(
-            """DELETE FROM state_hamt_roots WHERE state_group NOT IN
-            (SELECT id FROM state_groups)"""
-        )
+        if state_groups:
+            self.db_pool.simple_delete_many_txn(
+                txn,
+                table="state_hamt_roots",
+                column="state_group",
+                values=state_groups,
+                keyvalues={},
+            )
