@@ -371,7 +371,7 @@ async def _get_auth_chain_difference(
     unpersisted_events: dict[str, EventBase],
     state_res_store: StateResolutionStore,
     conflicted_state: set[str] | None,
-    complete_event_graph: bool = True,
+    complete_event_graph: bool = False,
 ) -> set[str]:
     """Compare the auth chains of each state set and return the set of events
     that only appear in some, but not all of the auth chains.
