@@ -4,7 +4,7 @@ from typing import Any
 
 from opentracing import Tracer as OpenTracingTracer
 
-from .reporter import _Reporter
+from .reporter import BaseReporter
 from .span import Span
 
 class Tracer(OpenTracingTracer):
@@ -28,6 +28,6 @@ class Config:
         scope_manager: Any = ...,
     ) -> None: ...
     def create_tracer(
-        self, reporter: _Reporter, sampler: Any, throttler: Any = ...
+        self, reporter: BaseReporter, sampler: Any, throttler: Any = ...
     ) -> Tracer: ...
     def initialize_tracer(self, io_loop: Any = ...) -> Tracer | None: ...
