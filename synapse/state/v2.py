@@ -130,7 +130,7 @@ async def resolve_events_with_store(
     if room_version.state_res == StateResolutionVersions.V2_1:
         # calculate the conflicted subgraph
         conflicted_set = set(itertools.chain.from_iterable(conflicted_state.values()))
-    complete_event_graph = all(
+    complete_event_graph = room_version.state_res == StateResolutionVersions.V2 and all(
         event_id in event_map
         for state_set in state_sets
         for event_id in state_set.values()
