@@ -506,16 +506,6 @@ jobs:
           SYNAPSE_POSTGRES_USER: postgres
           SYNAPSE_POSTGRES_PASSWORD: postgres
           SYNAPSE_TEST_TIKV_PD_ENDPOINTS: ${{ matrix.job.database == 'tikv' && '172.17.0.1:2379' || '' }}
-      - name: Dump PostgreSQL statistics
-        if: ${{ always() && matrix.job.postgres-version }}
-        run: .ci/scripts/dump_postgres_stats.sh /tmp/postgres-stats.txt
-      - name: Upload PostgreSQL statistics
-        if: ${{ always() && matrix.job.postgres-version }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: postgres-stats-${{ matrix.job.postgres-version }}
-          path: /tmp/postgres-stats.txt
-          if-no-files-found: warn
       - name: Dump logs
         # Logs are most useful when the command fails, always include them.
         if: ${{ always() }}
