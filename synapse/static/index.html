@@ -3,6 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" type="image/svg+xml" href="matrix-logo.svg" />
     <title>Sithnapse // Matrix Homeserver</title>
     <style>
       :root {
@@ -489,7 +490,9 @@
     <div class="container">
       <header>
         <div class="node-title" id="server-title">
-          Sithnapse (Synapse Dark... but runs like it's lite)
+          <span id="server-title-text"
+            >Sithnapse (Synapse Dark... but runs like it's lite)</span
+          >
         </div>
         <div class="node-status">
           <span class="status-dot"></span>
@@ -812,7 +815,7 @@
               const vStr = stats.server_version.startsWith("v")
                 ? stats.server_version
                 : `v${stats.server_version}`;
-              const titleEl = document.getElementById("server-title");
+              const titleEl = document.getElementById("server-title-text");
               const engineEl = document.getElementById("stat-engine-sub");
               if (titleEl)
                 titleEl.textContent = `Sithnapse ${vStr} (Synapse Dark... but runs like it's lite)`;
@@ -857,7 +860,7 @@
                 const vStr = fedData.server.version.startsWith("v")
                   ? fedData.server.version
                   : `v${fedData.server.version}`;
-                const titleEl = document.getElementById("server-title");
+                const titleEl = document.getElementById("server-title-text");
                 const engineEl = document.getElementById("stat-engine-sub");
                 if (titleEl)
                   titleEl.textContent = `Sithnapse ${vStr} (Synapse Dark... but runs like it's lite)`;
