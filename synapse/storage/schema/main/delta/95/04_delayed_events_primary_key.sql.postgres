@@ -1,0 +1,4 @@
+-- Delay IDs are global opaque identifiers. The store addresses delayed events
+-- by delay_id alone, so make that invariant a primary-key constraint.
+ALTER TABLE delayed_events DROP CONSTRAINT delayed_events_pkey;
+ALTER TABLE delayed_events ADD PRIMARY KEY (delay_id);

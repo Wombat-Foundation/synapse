@@ -158,12 +158,17 @@ class StateStoreTestCase(HomeserverTestCase):
         )
 
     def test_exact_state_filter_uses_selective_hamt_lookup(self) -> None:
-        self.inject_state_event(self.room, self.u_alice, EventTypes.Create, "", {})
+        create = self.inject_state_event(
+            self.room, self.u_alice, EventTypes.Create, "", {}
+        )
         name = self.inject_state_event(
             self.room, self.u_alice, EventTypes.Name, "", {"name": "test room"}
         )
+        topic = self.inject_state_event(
+            self.room, self.u_alice, EventTypes.Topic, "", {"topic": "test topic"}
+        )
         state_group = self.get_success(
-            self.store._get_state_group_for_event(name.event_id)
+            self.store._get_state_group_for_event(topic.event_id)
         )
         assert state_group is not None
 
@@ -189,7 +194,34 @@ class StateStoreTestCase(HomeserverTestCase):
             )
 
         self.assertDictEqual(
-            result[state_group], {(EventTypes.Name, ""): name.event_id}
+            result[state_group],
+            {
+                (EventTypes.Name, ""): name.event_id,
+                (EventTypes.Topic, ""): topic.event_id,
+            },
+        )
+
+        # An empty key set excludes that type while ``include_others`` still
+        # selects every non-enumerated type, alongside explicitly requested
+        # entries. This must use full materialization rather than accidentally
+        # treating the empty set as an exact lookup.
+        result = self.get_success(
+            self.store.db_pool.runInteraction(
+                "test_exact_state_filter_uses_selective_hamt_lookup_include_others",
+                self.state_datastore._get_state_groups_from_groups_txn,
+                [state_group],
+                StateFilter.freeze(
+                    {EventTypes.Name: set(), EventTypes.Create: {""}},
+                    include_others=True,
+                ),
+            )
+        )
+        self.assertDictEqual(
+            result[state_group],
+            {
+                (EventTypes.Create, ""): create.event_id,
+                (EventTypes.Topic, ""): topic.event_id,
+            },
         )
 
     def test_empty_state_group_does_not_retry(self) -> None:
@@ -250,13 +282,8 @@ class StateStoreTestCase(HomeserverTestCase):
         )
         assert state_group is not None
 
-        # `state_hamt_roots.root_structural_hash` has a foreign key into
-        # `state_hamt_nodes`, so we can't simulate a dangling pointer by
-        # deleting the node it references. Instead, insert the corrupt
-        # replacement node first (satisfying the FK on its own, as the
-        # referenced side), then repoint the existing root at it -- this
-        # keeps the FK fully enforced throughout, and simulates corrupt
-        # node *content* rather than a missing row.
+        # Insert a corrupt replacement node, then repoint the root at it. This
+        # simulates corrupt node content rather than a missing node row.
         garbage_structural_hash = random_string(16).encode("ascii")
         self.get_success(
             self.store.db_pool.simple_insert(
@@ -301,8 +328,7 @@ class StateStoreTestCase(HomeserverTestCase):
         content hash); only the root pointer (state_group -> room_prefix +
         root_hash) lives in per-instance SQL `state_hamt_roots`. So the
         corruption is simulated by inserting an undecodable node into TiKV
-        (and into SQL `state_hamt_nodes` so the root FK stays satisfiable) and
-        repointing the SQL root pointer at it.
+        and repointing the SQL root pointer at it.
         """
         if not self.state_datastore.tikv_pd_endpoints:
             self.skipTest("Requires TiKV -- set SYNAPSE_TEST_TIKV_PD_ENDPOINTS to run")

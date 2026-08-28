@@ -138,17 +138,21 @@ def materialize_state_entries(
     root_node_bytes: bytes,
     nodes: Sequence[tuple[bytes, bytes]],
 ) -> list[tuple[str, str, str]]: ...
-
-# Retry with every hash in the second result until it is empty. Unresolved
-# paths omit entries rather than raising, so the first result is incomplete
-# until the retry loop has loaded all missing nodes.
 def lookup_state_entries(
     server_secret: bytes,
     room_id: str,
     root_node_bytes: bytes,
     nodes: Sequence[tuple[bytes, bytes]],
     keys: Sequence[tuple[str, str]],
-) -> tuple[list[tuple[str, str, str]], list[bytes]]: ...
+) -> tuple[list[tuple[str, str, str]], list[bytes]]:
+    """Look up selected state entries in a persisted flat HAMT.
+
+    Returns ``(entries, missing)``. When ``missing`` is non-empty, ``entries``
+    is incomplete: an unresolved node path omits its entries rather than
+    raising. Fetch every returned hash, add the nodes to ``nodes``, and retry
+    until ``missing`` is empty before treating ``entries`` as complete.
+    """
+
 def node_child_hashes(node_bytes: bytes) -> list[bytes]: ...
 def reachability_audit(
     root_node_bytes: bytes,

@@ -282,6 +282,8 @@ This setting has the following sub-options:
 
   Defaults to `true`.
 
+* `server_stats_endpoint_enabled` (boolean): Enable the authenticated `/_synapse/client/server_stats` endpoint. Requests require a server-admin access token. This is disabled by default. Defaults to `false`.
+
 * `include_offline_users_on_sync` (boolean): When clients perform an initial or `full_state` sync, presence results for offline users are not included by default. Setting `include_offline_users_on_sync` to `true` will always include offline users in the results. Defaults to `false`.
 
 * `last_active_granularity` (duration): How long after a user was last active that they are still shown as "currently active" to other users. Larger values reduce the rate of presence updates sent to other users and servers.
@@ -3299,7 +3301,7 @@ use_appservice_legacy_authorization: true
 
 If none is specified, the `registration_shared_secret` is used, if one is given; otherwise, a secret key is derived from the signing key.
 
-> ⚠️ **Warning** – Replacing an existing `macaroon_secret_key` with a new one will lead to invalidation of access tokens for all guest users. It will also break unsubscribe links in emails sent before the change. An unlucky user might encounter a broken SSO login flow and would have to start again.
+> ⚠️ **Warning** – Replacing an existing `macaroon_secret_key` with a new one will lead to invalidation of access tokens for all guest users. It will also break unsubscribe links in emails sent before the change. An unlucky user might encounter a broken SSO login flow and would have to start again. When HAMT state storage is enabled, it also changes the structural key used to address persisted HAMT nodes. Existing HAMT state must be migrated or rebuilt before rotating this secret.
 
 Defaults to `null`.
 

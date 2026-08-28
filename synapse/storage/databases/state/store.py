@@ -19,7 +19,6 @@
 #
 #
 
-import hashlib
 import logging
 from typing import (
     TYPE_CHECKING,
@@ -562,9 +561,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             (state_key[0], state_key[1], event_id)
             for state_key, event_id in current_state_ids.items()
         ]
-
-    def _state_hamt_secret(self) -> bytes:
-        return hashlib.sha256(self.hs.config.key.macaroon_secret_key).digest()
 
     def _prefetch_tikv_hamt_blocking(
         self,

@@ -183,8 +183,8 @@ Changes in SCHEMA_VERSION = 95
 
 
 SCHEMA_COMPAT_VERSION = (
-    # Transitive links are no longer written to `event_auth_chain_links`
-    # TODO: On the next compat bump, update the primary key of `delayed_events`
+    # HAMT state roots are authoritative in TiKV, and delayed-event IDs are
+    # globally unique rather than scoped to a user localpart.
     95
 )
 """Limit on how far the synapse codebase can be rolled back without breaking db compat

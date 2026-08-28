@@ -53,7 +53,7 @@ from synapse.api.errors import (
 from synapse.api.room_versions import KNOWN_ROOM_VERSIONS
 from synapse.api.urls import ConsentURIBuilder
 from synapse.event_auth import validate_event_for_room_version
-from synapse.events import EventBase, relation_from_event
+from synapse.events import EventBase, event_exists_in_state_dag, relation_from_event
 from synapse.events.builder import EventBuilder
 from synapse.events.py_protocol import supports_msc4242_state_dag
 from synapse.events.snapshot import (
@@ -1794,10 +1794,16 @@ class EventCreationHandler:
         ] = []
         state_map = dict(state_map)
         depth = None
+        prev_state_events: list[str] | None = None
+        room_version = await self.store.get_room_version(room_id)
+        if room_version.msc4242_state_dags:
+            prev_state_events = list(
+                await self.store.get_state_dag_extremities(room_id)
+            )
 
         for event_dict in event_dicts:
             builder = self.event_builder_factory.for_room_version(
-                await self.store.get_room_version(room_id), event_dict
+                room_version, event_dict
             )
             event, context = await self.create_new_client_event_for_batch(
                 builder=builder,
@@ -1808,6 +1814,7 @@ class EventCreationHandler:
                 # state_map since it is modified below.
                 state_map=dict(state_map),
                 current_state_group=current_state_group,
+                prev_state_events=prev_state_events,
             )
             events_and_contexts_to_send.append((event, context))
 
@@ -1817,6 +1824,8 @@ class EventCreationHandler:
                 # If this is a state event, we need to update the state map
                 # so that it can be used for the next event.
                 state_map[(event.type, event.state_key)] = event.event_id
+                if room_version.msc4242_state_dags and event_exists_in_state_dag(event):
+                    prev_state_events = [event.event_id]
 
         datastore = self.hs.get_datastores().state
         events_and_context = (

@@ -747,11 +747,16 @@
         const startTime = performance.now();
         const token = adminToken;
 
-        // 1. Direct Server DB Stats Endpoint (Zero Auth)
+        // 1. Optional authenticated server DB stats endpoint. It is disabled by
+        // default and requires both an admin token and stats.server_stats_endpoint_enabled.
         let dbStatsLoaded = false;
         try {
-          const statsRes = await fetch("/_synapse/client/server_stats");
-          if (statsRes.ok) {
+          const statsRes = token
+            ? await fetch("/_synapse/client/server_stats", {
+                headers: { Authorization: `Bearer ${token}` },
+              })
+            : null;
+          if (statsRes && statsRes.ok) {
             const stats = await statsRes.json();
             dbStatsLoaded = true;
 

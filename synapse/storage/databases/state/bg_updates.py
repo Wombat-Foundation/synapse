@@ -164,6 +164,9 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         super().__init__(database, db_conn, hs)
         self.tikv_namespace = hs.config.database.tikv_namespace or hs.hostname
 
+    def _state_hamt_secret(self) -> bytes:
+        return hashlib.sha256(self.hs.config.key.macaroon_secret_key).digest()
+
     @trace
     @tag_args
     def _count_state_group_hops_txn(
@@ -246,7 +249,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
 
         groups = missing_groups
 
-        logger.warning(
+        logger.debug(
             "Falling back to legacy state-group reads for %s (state_groups_state is "
             "not populated on this branch; expect empty results)",
             groups,
@@ -409,8 +412,8 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
 
         # The results shouldn't be considered mutable.
         if missing_groups:
-            logger.warning(
-                "[gg-state] legacy fallback for %s returned %s state entries "
+            logger.debug(
+                "Legacy fallback for %s returned %s state entries "
                 "(state_groups_state is empty on this branch)",
                 missing_groups,
                 {group: len(results[group]) for group in missing_groups},
@@ -548,10 +551,11 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
                 f"Missing HAMT root node for state group {state_group}: {root_hash.hex()}"
             )
         nodes: dict[bytes, bytes] = {root_hash: bytes(root_bytes)}
+        secret = self._state_hamt_secret()
 
         while True:
             entries, missing = state_hamt.lookup_state_entries(
-                hashlib.sha256(self.hs.config.key.macaroon_secret_key).digest(),
+                secret,
                 room_id,
                 root_bytes,
                 list(nodes.items()),
@@ -599,8 +603,8 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
             allow_none=True,
         )
         if root is None:
-            logger.warning(
-                "[gg-state] SQL HAMT materialization: no state_hamt_roots row for "
+            logger.debug(
+                "SQL HAMT materialization: no state_hamt_roots row for "
                 "state_group %s -> falls through to empty legacy fallback",
                 state_group,
             )
@@ -616,7 +620,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         )
         if root_node is None:
             logger.warning(
-                "[gg-state] SQL HAMT materialization: state_hamt_roots row exists for "
+                "SQL HAMT materialization: state_hamt_roots row exists for "
                 "state_group %s but root node %s is missing from state_hamt_nodes",
                 state_group,
                 root_structural_hash.hex(),
@@ -672,9 +676,8 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
             node_bytes_by_hash[root_structural_hash],
             list(node_bytes_by_hash.items()),
         )
-        logger.info(
-            "[gg-state] SQL HAMT materialization succeeded for state_group %s "
-            "(%d entries)",
+        logger.debug(
+            "SQL HAMT materialization succeeded for state_group %s (%d entries)",
             state_group,
             len(entries),
         )
@@ -778,10 +781,11 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
             )
         root_bytes = bytes(root_node)
         nodes: dict[bytes, bytes] = {root_hash: root_bytes}
+        secret = self._state_hamt_secret()
 
         while True:
             entries, missing = state_hamt.lookup_state_entries(
-                hashlib.sha256(self.hs.config.key.macaroon_secret_key).digest(),
+                secret,
                 room_id,
                 root_bytes,
                 list(nodes.items()),

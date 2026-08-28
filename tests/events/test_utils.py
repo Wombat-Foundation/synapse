@@ -21,8 +21,6 @@
 
 from typing import TYPE_CHECKING, Any, Mapping
 
-from twisted.trial import unittest
-
 from synapse.api.constants import EventContentFields
 from synapse.api.room_versions import RoomVersions
 from synapse.events import EventBase
@@ -41,6 +39,7 @@ from synapse.events.utils import (
 from synapse.types import JsonDict
 from synapse.util.frozenutils import freeze
 
+from tests import unittest
 from tests.test_utils.event_builders import make_test_event
 from tests.unittest import HomeserverTestCase
 

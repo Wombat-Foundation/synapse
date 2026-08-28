@@ -182,6 +182,27 @@ main() {
     return 1
   fi
 
+  # Compute this before deciding whether to rebuild images. The version-check
+  # test also runs with --fast and --editable, where the standard-image build
+  # branch below is skipped.
+  pkg_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml | head -n1)"
+  git_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+  [ -n "$git_branch" ] && git_branch="b=$git_branch"
+  git_tag="$(git describe --exact-match 2>/dev/null || true)"
+  [ -n "$git_tag" ] && git_tag="t=$git_tag"
+  git_commit="$(git rev-parse --short HEAD 2>/dev/null || true)"
+  git_dirty=""
+  if git describe --dirty=-this_is_a_dirty_checkout 2>/dev/null | grep -q -- '-this_is_a_dirty_checkout$'; then
+    git_dirty="dirty"
+  fi
+  git_version="$(IFS=,; echo "${git_branch:+$git_branch,}${git_tag:+$git_tag,}${git_commit:+$git_commit,}${git_dirty:+$git_dirty,}" | sed 's/,$//')"
+  if [ -n "$git_version" ]; then
+    synapse_version_string="$pkg_version ($git_version)"
+  else
+    synapse_version_string="$pkg_version"
+  fi
+  export SYNAPSE_VERSION_STRING="$synapse_version_string"
+
   if [ -n "$use_editable_synapse" ]; then
     if [[ -e synapse/synapse_rust.abi3.so ]]; then
       # In an editable install, back up the host's compiled Rust module to prevent
@@ -239,42 +260,6 @@ main() {
       # We remove the `egg-info` as it can contain outdated information which won't line
       # up with our current reality.
       rm -rf matrix_synapse.egg-info/
-      # Figure out the Synapse version string in our current checkout.
-      #
-      # This intentionally avoids `uv run python -c '...'`: nothing in this workflow
-      # runs `uv sync` beforehand, so `uv run` would implicitly build a fresh venv
-      # (compiling the Rust extension and installing ~109 packages) just to import
-      # `synapse.util` and read a version string. Instead, replicate the same
-      # git-aware version logic as `matrix_common.versionstring.get_distribution_version_string`
-      # (which `synapse.util.SYNAPSE_VERSION` is built from) directly in bash, using
-      # only `pyproject.toml` and `git` -- no Python environment required.
-      pkg_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml | head -n1)"
-      # `|| true`, not `&& true`: this script runs under `set -e`, and `git
-      # describe --exact-match` fails on basically every commit that isn't
-      # exactly on a tag (the normal case). `cmd && true` does NOT swallow
-      # that failure -- `&&` short-circuits, so the compound command's exit
-      # status is still `cmd`'s failure, which (being inside `$(...)` in a
-      # plain assignment, not an `if`/`while` condition) triggers `-e` and
-      # kills the whole script. `|| true` is what actually neutralizes it.
-      git_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-      [ -n "$git_branch" ] && git_branch="b=$git_branch"
-      git_tag="$(git describe --exact-match 2>/dev/null || true)"
-      [ -n "$git_tag" ] && git_tag="t=$git_tag"
-      git_commit="$(git rev-parse --short HEAD 2>/dev/null || true)"
-      git_dirty=""
-      if git describe --dirty=-this_is_a_dirty_checkout 2>/dev/null | grep -q -- '-this_is_a_dirty_checkout$'; then
-        git_dirty="dirty"
-      fi
-      git_version="$(IFS=,; echo "${git_branch:+$git_branch,}${git_tag:+$git_tag,}${git_commit:+$git_commit,}${git_dirty:+$git_dirty,}" | sed 's/,$//')"
-      if [ -n "$git_version" ]; then
-        synapse_version_string="$pkg_version ($git_version)"
-      else
-        synapse_version_string="$pkg_version"
-      fi
-      # Exported so that `synapse_version_check_test.go` can reuse this instead of
-      # separately shelling out to `uv run` (see comment there for why that's slow).
-      export SYNAPSE_VERSION_STRING="$synapse_version_string"
-
       # Build the base Synapse image from the local checkout
       echo_if_github "::group::Build Docker image: matrixdotorg/synapse"
       $CONTAINER_RUNTIME build ${DOCKER_BUILD_ARGS:-} \

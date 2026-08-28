@@ -77,9 +77,15 @@ class BaseStreamTestCase(unittest.HomeserverTestCase):
 
         # Make a new HomeServer object for the worker
         self.reactor.lookups["testserv"] = "1.2.3.4"
+        worker_config = self._get_worker_hs_config()
+        if self.hs.config.database.tikv_pd_endpoints:
+            # This worker is wired to the main process's database pool below,
+            # so it must use the same TiKV namespace for the shared state-group
+            # IDs. Other test homeservers keep their unique namespace.
+            worker_config["tikv"]["namespace"] = self.hs.config.database.tikv_namespace
         self.worker_hs = self.setup_test_homeserver(
             homeserver_to_use=GenericWorkerServer,
-            config=self._get_worker_hs_config(),
+            config=worker_config,
             reactor=self.reactor,
             federation_http_client=None,
         )
@@ -346,6 +352,8 @@ class BaseMultiWorkerStreamTestCase(unittest.HomeserverTestCase):
         config = self._get_worker_hs_config()
         config["worker_app"] = worker_app
         config.update(extra_config or {})
+        if self.hs.config.database.tikv_pd_endpoints:
+            config["tikv"]["namespace"] = self.hs.config.database.tikv_namespace
 
         worker_hs = self.setup_test_homeserver(
             homeserver_to_use=GenericWorkerServer,

@@ -461,7 +461,12 @@ async def main() -> None:
                     state_before: dict[tuple[str, str], str] = {}
                 elif len(prev_ids) == 1:
                     prev_id = prev_ids[0]
-                    state_before = dict(event_states.get(prev_id, {}))
+                    if prev_id not in event_states:
+                        raise ValueError(
+                            f"Event {ev.event_id} references predecessor {prev_id} "
+                            "which has not appeared earlier in the JSONL input"
+                        )
+                    state_before = dict(event_states[prev_id])
                 else:
                     # Merge point! We must resolve the states after the prev events
                     state_sets = []

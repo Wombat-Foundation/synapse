@@ -68,7 +68,8 @@ fn get_runtime() -> &'static Runtime {
 
 async fn check_raw_kv_ready(client: &RawClient) -> Result<(), String> {
     let probe_key = format!(
-        "synapse:tikv:readiness-probe:{}",
+        "synapse:tikv:readiness-probe:{}:{}",
+        std::process::id(),
         READINESS_PROBE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     )
     .into_bytes();
@@ -77,15 +78,23 @@ async fn check_raw_kv_ready(client: &RawClient) -> Result<(), String> {
         .await
         .map_err(|e| e.to_string())?;
 
-    let value = client
-        .get(probe_key.clone())
-        .await
-        .map_err(|e| e.to_string())?;
-    if value.as_deref() != Some(READINESS_PROBE_VALUE) {
-        return Err("TiKV readiness probe returned an unexpected value".to_owned());
+    let probe_result = async {
+        let value = client
+            .get(probe_key.clone())
+            .await
+            .map_err(|e| e.to_string())?;
+        if value.as_deref() != Some(READINESS_PROBE_VALUE) {
+            return Err("TiKV readiness probe returned an unexpected value".to_owned());
+        }
+        Ok(())
     }
+    .await;
 
-    client.delete(probe_key).await.map_err(|e| e.to_string())
+    // A successful write must be cleaned up even if the read failed. The
+    // readiness key is process-unique, so this can never delete another
+    // process's probe.
+    let delete_result = client.delete(probe_key).await.map_err(|e| e.to_string());
+    probe_result.and(delete_result)
 }
 
 async fn open_ready_client(pd_endpoints: Vec<String>) -> Result<RawClient, String> {

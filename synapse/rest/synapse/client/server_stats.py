@@ -15,7 +15,7 @@ from http import HTTPStatus
 from typing import TYPE_CHECKING
 
 from synapse.api.constants import Direction
-from synapse.api.errors import SynapseError
+from synapse.api.errors import AuthError
 from synapse.http.server import DirectServeJsonResource
 from synapse.http.site import SynapseRequest
 from synapse.storage.databases.main.transactions import DestinationSortOrder
@@ -39,7 +39,7 @@ class ServerStatsResource(DirectServeJsonResource):
     async def _async_render_GET(self, request: SynapseRequest) -> tuple[int, JsonDict]:
         requester = await self._auth.get_user_by_req(request)
         if not await self._auth.is_server_admin(requester):
-            raise SynapseError(403, "Server admin access required")
+            raise AuthError(403, "Server admin access required")
         total_users = await self.store.count_all_users()
         public_rooms = await self.store.count_public_rooms(
             network_tuple=None,
