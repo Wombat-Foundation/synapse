@@ -503,6 +503,46 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
 
         return results, missing_groups
 
+    def _materialize_state_hamts_from_tikv_direct(
+        self, state_groups: list[int]
+    ) -> tuple[dict[int, list[tuple[str, str, str]]], list[int]]:
+        """Materialize several state groups from TiKV in one node traversal.
+
+        The root records are fetched together, then Rust walks every reachable
+        HAMT in lockstep. This deduplicates both root RPCs and node fetches for
+        roots that share subtrees, without holding a SQL transaction open.
+        """
+        from synapse.synapse_rust import tikv_engine
+
+        if not state_groups:
+            return {}, []
+
+        root_key_to_group = {
+            _state_hamt_root_tikv_key(self.tikv_namespace, state_group): state_group
+            for state_group in state_groups
+        }
+        roots: dict[int, tuple[bytes, bytes]] = {}
+        for root_key, root_value in tikv_engine.batch_get(list(root_key_to_group)):
+            state_group = root_key_to_group[bytes(root_key)]
+            room_prefix, root_hash, _lattice, _stored_room_id = _decode_state_hamt_root(
+                bytes(root_value)
+            )
+            roots[state_group] = (room_prefix, root_hash)
+
+        missing_groups = [
+            state_group for state_group in state_groups if state_group not in roots
+        ]
+        present_groups = [
+            state_group for state_group in state_groups if state_group in roots
+        ]
+        if not present_groups:
+            return {}, missing_groups
+
+        entries_by_root = tikv_engine.materialize_state_hamts(
+            self.tikv_namespace, [roots[state_group] for state_group in present_groups]
+        )
+        return dict(zip(present_groups, entries_by_root)), missing_groups
+
     def _materialize_state_hamt_from_tikv_direct(
         self, state_group: int
     ) -> list[tuple[str, str, str]] | None:

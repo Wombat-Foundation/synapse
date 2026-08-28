@@ -14,3 +14,6 @@ def materialize_state_hamt(
     room_prefix: bytes,
     root_structural_hash: bytes,
 ) -> list[tuple[str, str, str]] | None: ...
+def materialize_state_hamts(
+    namespace: str, roots: list[tuple[bytes, bytes]]
+) -> list[list[tuple[str, str, str]]]: ...

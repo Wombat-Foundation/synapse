@@ -489,6 +489,85 @@ async fn materialize_state_hamt_async(
     materialize_from_node_map(&root_structural_hash, &node_map)
 }
 
+/// Materialize several HAMT roots in one TiKV traversal.
+///
+/// Each BFS layer is fetched across every requested root at once. Nodes are
+/// keyed by both their room prefix and structural hash: structural hashes are
+/// only meaningful inside the room-scoped TiKV keyspace, while roots for the
+/// same room can share fetched subtrees.
+async fn materialize_state_hamts_async(
+    namespace: &str,
+    roots: Vec<([u8; ROOM_PREFIX_LEN], StructuralHash)>,
+) -> Result<Vec<Vec<(String, String, String)>>, String> {
+    let client = get_client().await?;
+    type NodeLocation = ([u8; ROOM_PREFIX_LEN], StructuralHash);
+
+    let mut node_map: HashMap<NodeLocation, Arc<HamtNode<String, String>>> = HashMap::new();
+    let mut seen: HashSet<NodeLocation> = roots.iter().copied().collect();
+    let mut to_fetch = seen.clone();
+
+    while !to_fetch.is_empty() {
+        let current_batch: Vec<NodeLocation> = to_fetch.drain().collect();
+
+        for chunk in current_batch.chunks(NODE_FETCH_BATCH_SIZE) {
+            let key_to_location: HashMap<Vec<u8>, NodeLocation> = chunk
+                .iter()
+                .map(|(room_prefix, hash)| {
+                    (
+                        node_tikv_key(namespace, room_prefix, hash),
+                        (*room_prefix, *hash),
+                    )
+                })
+                .collect();
+            let keys: Vec<Vec<u8>> = key_to_location.keys().cloned().collect();
+            let rows = client.batch_get(keys).await.map_err(|e| e.to_string())?;
+
+            if rows.len() != chunk.len() {
+                return Err(format!(
+                    "Missing HAMT node(s): expected {}, got {}",
+                    chunk.len(),
+                    rows.len()
+                ));
+            }
+
+            for pair in rows {
+                let (key, node_bytes): (tikv_client::Key, tikv_client::Value) = pair.into();
+                let key: Vec<u8> = key.into();
+                let (room_prefix, expected_hash) = key_to_location
+                    .get(&key)
+                    .copied()
+                    .ok_or_else(|| "TiKV returned an unexpected HAMT node key".to_owned())?;
+                let node = decode_persisted_node(&node_bytes)?;
+                if node.structural_hash != expected_hash {
+                    return Err("HAMT node hash does not match its TiKV key".to_owned());
+                }
+
+                for child in &node.children {
+                    let child_location = (room_prefix, child.structural_hash());
+                    if seen.insert(child_location) {
+                        to_fetch.insert(child_location);
+                    }
+                }
+
+                node_map.insert((room_prefix, expected_hash), node);
+            }
+        }
+    }
+
+    roots
+        .into_iter()
+        .map(|(room_prefix, root_hash)| {
+            let nodes = node_map
+                .iter()
+                .filter_map(|((node_prefix, hash), node)| {
+                    (*node_prefix == room_prefix).then_some((*hash, node.clone()))
+                })
+                .collect();
+            materialize_from_node_map(&root_hash, &nodes)
+        })
+        .collect()
+}
+
 /// Materialize a state group's full state map directly from TiKV, in pure
 /// Rust. `room_prefix` and `root_structural_hash` come from the TiKV root
 /// record, so this needs no room_id or room-version lookup.
@@ -520,6 +599,37 @@ pub fn materialize_state_hamt(
     .map_err(pyo3::exceptions::PyRuntimeError::new_err)
 }
 
+/// Materialize several state groups' full state maps directly from TiKV.
+///
+/// The input and output order is preserved. Callers should use this only for
+/// multi-root reads; the single-root function avoids the small setup cost for
+/// the common case.
+#[pyfunction]
+#[pyo3(text_signature = "(namespace, roots, /)")]
+pub fn materialize_state_hamts(
+    py: Python<'_>,
+    namespace: String,
+    roots: Vec<(Vec<u8>, Vec<u8>)>,
+) -> PyResult<Vec<Vec<(String, String, String)>>> {
+    let roots = roots
+        .into_iter()
+        .map(|(room_prefix, root_hash)| {
+            let room_prefix: [u8; ROOM_PREFIX_LEN] = room_prefix.try_into().map_err(|_| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "room_prefix must be {ROOM_PREFIX_LEN} bytes"
+                ))
+            })?;
+            let root_hash: StructuralHash = root_hash.try_into().map_err(|_| {
+                pyo3::exceptions::PyValueError::new_err("root_structural_hash must be 16 bytes")
+            })?;
+            Ok((room_prefix, root_hash))
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    let rt = get_runtime();
+    py.detach(|| rt.block_on(materialize_state_hamts_async(&namespace, roots)))
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+}
+
 pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     let child_module = PyModule::new(py, "tikv_engine")?;
     child_module.add_function(wrap_pyfunction!(open_client, &child_module)?)?;
@@ -532,6 +642,7 @@ pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     child_module.add_function(wrap_pyfunction!(batch_delete, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(scan_prefix, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(materialize_state_hamt, &child_module)?)?;
+    child_module.add_function(wrap_pyfunction!(materialize_state_hamts, &child_module)?)?;
 
     m.add_submodule(&child_module)?;
 

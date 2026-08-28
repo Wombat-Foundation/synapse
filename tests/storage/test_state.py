@@ -834,22 +834,31 @@ class StateStoreTestCase(HomeserverTestCase):
         # while nonexistent_group never exists in TiKV or SQL
         responses = [None, [(EventTypes.Create, "", event.event_id)]]
 
-        def mock_mat(sg: int) -> list[tuple[str, str, str]] | None:
-            if sg == state_group:
-                return (
-                    responses.pop(0)
-                    if responses
-                    else [(EventTypes.Create, "", event.event_id)]
-                )
-            return None
+        def mock_mat(
+            groups: list[int],
+        ) -> tuple[dict[int, list[tuple[str, str, str]]], list[int]]:
+            entries = (
+                responses.pop(0)
+                if responses
+                else [(EventTypes.Create, "", event.event_id)]
+            )
+            return (
+                {state_group: entries} if state_group in groups and entries else {},
+                [group for group in groups if group != state_group or not entries],
+            )
 
         self._enable_mock_tikv()
         try:
             with (
                 patch.object(
                     self.state_datastore,
-                    "_materialize_state_hamt_from_tikv_direct",
+                    "_materialize_state_hamts_from_tikv_direct",
                     side_effect=mock_mat,
+                ),
+                patch.object(
+                    self.state_datastore,
+                    "_materialize_state_hamt_from_tikv_direct",
+                    return_value=None,
                 ),
                 patch.object(
                     self.state_datastore.hs.get_clock(),
@@ -906,17 +915,24 @@ class StateStoreTestCase(HomeserverTestCase):
         )
         nonexistent_group = 9999992
 
-        def mock_mat(sg: int) -> list[tuple[str, str, str]] | None:
-            if sg == valid_group:
-                return [(EventTypes.Create, "", event.event_id)]
-            return None
+        def mock_mat(
+            groups: list[int],
+        ) -> tuple[dict[int, list[tuple[str, str, str]]], list[int]]:
+            return (
+                (
+                    {valid_group: [(EventTypes.Create, "", event.event_id)]}
+                    if valid_group in groups
+                    else {}
+                ),
+                [group for group in groups if group != valid_group],
+            )
 
         self._enable_mock_tikv()
         try:
             with (
                 patch.object(
                     self.state_datastore,
-                    "_materialize_state_hamt_from_tikv_direct",
+                    "_materialize_state_hamts_from_tikv_direct",
                     side_effect=mock_mat,
                 ),
                 patch.object(
