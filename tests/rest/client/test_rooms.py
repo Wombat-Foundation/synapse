@@ -795,7 +795,12 @@ class RoomsCreateTestCase(RoomBase):
         self.assertEqual(HTTPStatus.OK, channel.code, channel.result)
         self.assertTrue("room_id" in channel.json_body)
         assert channel.resource_usage is not None
-        self.assertEqual(35, channel.resource_usage.db_txn_count)
+        # State persistence writes full SQL snapshots either way, but with
+        # TiKV configured, state-group rows are offloaded to TiKV instead of
+        # the state_groups_state/state_group_edges tables, so fewer SQL
+        # transactions are needed.
+        expected_txn_count = 26 if self.hs.config.database.tikv_pd_endpoints else 35
+        self.assertEqual(expected_txn_count, channel.resource_usage.db_txn_count)
 
     def test_post_room_initial_state(self) -> None:
         # POST with initial_state config key, expect new room id
@@ -808,7 +813,9 @@ class RoomsCreateTestCase(RoomBase):
         self.assertEqual(HTTPStatus.OK, channel.code, channel.result)
         self.assertTrue("room_id" in channel.json_body)
         assert channel.resource_usage is not None
-        self.assertEqual(38, channel.resource_usage.db_txn_count)
+        # See the comment in test_post_room_no_keys.
+        expected_txn_count = 26 if self.hs.config.database.tikv_pd_endpoints else 38
+        self.assertEqual(expected_txn_count, channel.resource_usage.db_txn_count)
 
     def test_post_room_topic(self) -> None:
         # POST with topic key, expect new room id

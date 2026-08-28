@@ -847,6 +847,16 @@ class StateStoreTestCase(HomeserverTestCase):
                 [group for group in groups if group != state_group or not entries],
             )
 
+        def mock_mat_single(sg: int) -> list[tuple[str, str, str]] | None:
+            # `state_group` genuinely exists in SQL, so once the nonexistent
+            # group is filtered out before the retry loop, the remaining
+            # single-group retry takes this singular code path rather than
+            # the batched one -- mirror mock_mat's resolution for it here.
+            if sg == state_group:
+                entries_by_group, _ = mock_mat([sg])
+                return entries_by_group.get(sg)
+            return None
+
         self._enable_mock_tikv()
         try:
             with (
@@ -858,7 +868,7 @@ class StateStoreTestCase(HomeserverTestCase):
                 patch.object(
                     self.state_datastore,
                     "_materialize_state_hamt_from_tikv_direct",
-                    return_value=None,
+                    side_effect=mock_mat_single,
                 ),
                 patch.object(
                     self.state_datastore.hs.get_clock(),

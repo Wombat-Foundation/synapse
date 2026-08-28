@@ -226,6 +226,30 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 groups,
             )
 
+            if missing_groups:
+                # A missing group is either (a) genuinely purged/never
+                # existed, in which case no amount of retrying will ever
+                # produce a TiKV root and we should resolve to {} right
+                # away, or (b) mid-publication: its `state_groups` row is
+                # already visible but the TiKV write hasn't landed yet, in
+                # which case we retry. Filtering on `state_groups` existence
+                # here, before the retry loop, keeps case (a) from paying
+                # the retry backoff for a root that will never appear.
+                existing_rows = await self.db_pool.simple_select_many_batch(
+                    table="state_groups",
+                    column="id",
+                    iterable=missing_groups,
+                    retcols=("id",),
+                    desc="_get_state_groups_from_groups.check_missing_before_retry",
+                )
+                existing_in_sql = {group for (group,) in existing_rows}
+                for group in missing_groups:
+                    if group not in existing_in_sql:
+                        tikv_results[group] = {}
+                missing_groups = [
+                    group for group in missing_groups if group in existing_in_sql
+                ]
+
             for attempt in range(1, TIKV_ROOT_PUBLICATION_ATTEMPTS):
                 if not missing_groups:
                     return tikv_results
