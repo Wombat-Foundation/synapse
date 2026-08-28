@@ -33,9 +33,10 @@ from twisted.internet import defer
 from twisted.internet.defer import Deferred, ensureDeferred
 from twisted.internet.testing import MemoryReactor
 
-from synapse.api.errors import SynapseError
+from synapse.api.errors import HttpResponseException, SynapseError
 from synapse.crypto import keyring
 from synapse.crypto.keyring import (
+    KeyLookupError,
     PerspectivesKeyFetcher,
     ServerKeyFetcher,
     StoreKeyFetcher,
@@ -510,6 +511,75 @@ class ServerKeyFetcherTestCase(unittest.HomeserverTestCase):
 
         keys = self.get_success(fetcher.get_keys(SERVER_NAME, ["key1"], 0))
         self.assertEqual(keys, {})
+
+    def test_failed_fetch_backs_off_and_clears_on_success(self) -> None:
+        """MSC4499: a failed direct key fetch for a server MUST NOT trigger a
+        fresh outbound probe again until the backoff interval elapses, and a
+        subsequent successful fetch MUST clear that backoff state."""
+        self.reactor.advance(100)
+
+        SERVER_NAME = "server2"
+        fetcher = ServerKeyFetcher(self.hs)
+        testkey = signedjson.key.generate_signing_key("ver1")
+        testverifykey = signedjson.key.get_verify_key(testkey)
+        testverifykey_id = "ed25519:ver1"
+        VALID_UNTIL_TS = self.clock.time_msec() + 1000 * 1000
+
+        response = {
+            "server_name": SERVER_NAME,
+            "old_verify_keys": {},
+            "valid_until_ts": VALID_UNTIL_TS,
+            "verify_keys": {
+                testverifykey_id: {
+                    "key": signedjson.key.encode_verify_key_base64(testverifykey)
+                }
+            },
+        }
+        signedjson.sign.sign_json(response, SERVER_NAME, testkey)
+
+        call_count = 0
+
+        async def get_json(destination: str, path: str, **kwargs: Any) -> JsonDict:
+            nonlocal call_count
+            call_count += 1
+            raise HttpResponseException(502, "Failed to fetch", b"")
+
+        self.http_client.get_json.side_effect = get_json
+
+        # First attempt fails and should record a backoff.
+        self.get_failure(
+            fetcher.get_server_verify_keys_v2_direct(SERVER_NAME), Exception
+        )
+        self.assertEqual(call_count, 1)
+
+        # A second attempt immediately afterwards must fail fast against the
+        # negative cache rather than making another outbound request.
+        self.get_failure(
+            fetcher.get_server_verify_keys_v2_direct(SERVER_NAME), KeyLookupError
+        )
+        self.assertEqual(call_count, 1)
+
+        # Advance past the (default 1 minute) backoff floor: the next attempt
+        # should be allowed through again.
+        self.reactor.advance(61)
+
+        async def get_json_success(
+            destination: str, path: str, **kwargs: Any
+        ) -> JsonDict:
+            nonlocal call_count
+            call_count += 1
+            return response
+
+        self.http_client.get_json.side_effect = get_json_success
+
+        keys = self.get_success(fetcher.get_server_verify_keys_v2_direct(SERVER_NAME))
+        self.assertIn(testverifykey_id, keys)
+        self.assertEqual(call_count, 2)
+
+        # Backoff state should now be cleared: an immediate subsequent
+        # attempt is allowed through (not fast-failed) even though we're
+        # nowhere near a full interval since the successful fetch.
+        self.assertTrue(fetcher._backoff.should_attempt(SERVER_NAME))
 
 
 class PerspectivesKeyFetcherTestCase(unittest.HomeserverTestCase):
