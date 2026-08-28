@@ -588,6 +588,49 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
     ) -> list[tuple[str, str, str]] | None:
         return self._materialize_state_hamt_from_tikv_direct(state_group)
 
+    def _lookup_state_hamts_from_tikv_direct(
+        self, state_groups: list[int], keys: list[tuple[str, str]]
+    ) -> tuple[dict[int, list[tuple[str, str, str]]], list[int]]:
+        """Selective HAMT key lookup across several state groups in one TiKV traversal.
+
+        Root records are fetched in a single TiKV batch_get, structural keys are derived,
+        and Rust traverses the trees across all groups in lockstep with shared BFS node
+        batching and L1 node caching.
+        """
+        from synapse.synapse_rust import state_hamt, tikv_engine
+
+        if not state_groups:
+            return {}, []
+
+        root_key_to_group = {
+            _state_hamt_root_tikv_key(self.tikv_namespace, state_group): state_group
+            for state_group in state_groups
+        }
+        roots: dict[int, tuple[bytes, bytes, bytes]] = {}
+        secret = self._state_hamt_secret()
+        for root_key, root_value in tikv_engine.batch_get(list(root_key_to_group)):
+            state_group = root_key_to_group[bytes(root_key)]
+            room_prefix, root_hash, _lattice, stored_room_id = _decode_state_hamt_root(
+                bytes(root_value)
+            )
+            structural_key = state_hamt.room_structural_key(secret, stored_room_id)
+            roots[state_group] = (room_prefix, root_hash, structural_key)
+
+        missing_groups = [
+            state_group for state_group in state_groups if state_group not in roots
+        ]
+        present_groups = [
+            state_group for state_group in state_groups if state_group in roots
+        ]
+        if not present_groups:
+            return {}, missing_groups
+
+        queries = [
+            (roots[sg][0], roots[sg][1], roots[sg][2], keys) for sg in present_groups
+        ]
+        entries_by_group = tikv_engine.lookup_state_hamts(self.tikv_namespace, queries)
+        return dict(zip(present_groups, entries_by_group)), missing_groups
+
     def _lookup_state_hamt_from_tikv_direct(
         self,
         state_group: int,

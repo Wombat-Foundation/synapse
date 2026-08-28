@@ -481,6 +481,11 @@ class StateStoreTestCase(HomeserverTestCase):
         def mock_batch_get(keys: list[bytes]) -> list[tuple[bytes, bytes]]:
             res = []
             for k in keys:
+                if k == _state_hamt_root_tikv_key(
+                    self.state_datastore.tikv_namespace, 1234
+                ):
+                    res.append((k, encoded_root))
+                    continue
                 for h, nb in nodes:
                     if k == _state_hamt_node_tikv_key(
                         self.state_datastore.tikv_namespace, room_prefix, h
@@ -512,7 +517,23 @@ class StateStoreTestCase(HomeserverTestCase):
                 )
                 self.assertIsNone(entries_absent)
 
-                # 3. Full materialization
+                # 3. Multi-group selective key lookup
+                with patch(
+                    "synapse.synapse_rust.tikv_engine.lookup_state_hamts",
+                    return_value=[[(EventTypes.Name, "", "$name:test")]],
+                ) as mock_lookup:
+                    multi_res, missing = (
+                        self.state_datastore._lookup_state_hamts_from_tikv_direct(
+                            [1234, 9999], [(EventTypes.Name, "")]
+                        )
+                    )
+                    self.assertEqual(missing, [9999])
+                    self.assertEqual(
+                        multi_res, {1234: [(EventTypes.Name, "", "$name:test")]}
+                    )
+                    mock_lookup.assert_called_once()
+
+                # 4. Full materialization
                 with patch(
                     "synapse.synapse_rust.tikv_engine.materialize_state_hamt",
                     return_value=entries,
@@ -526,6 +547,49 @@ class StateStoreTestCase(HomeserverTestCase):
                     assert entries_full is not None
                     self.assertIn((EventTypes.Create, "", "$create:test"), entries_full)
                     self.assertIn((EventTypes.Name, "", "$name:test"), entries_full)
+
+    def test_multi_group_exact_filter_under_tikv_uses_batch_lookup(self) -> None:
+        """Verify that fetching exact state filter across multiple groups uses _lookup_state_hamts_from_tikv_direct."""
+        from unittest.mock import patch
+
+        event1 = self.inject_state_event(
+            self.room, self.u_alice, EventTypes.Create, "", {}
+        )
+        sg1 = self.get_success(self.store._get_state_group_for_event(event1.event_id))
+        event2 = self.inject_state_event(
+            self.room, self.u_alice, EventTypes.Name, "", {"name": "room_name"}
+        )
+        sg2 = self.get_success(self.store._get_state_group_for_event(event2.event_id))
+        assert sg1 is not None and sg2 is not None
+
+        # Enable pure TiKV mode
+        self.state_datastore.tikv_pd_endpoints = ["127.0.0.1:2379"]
+        state_filter = StateFilter.from_types([(EventTypes.Name, "")])
+
+        with patch.object(
+            self.state_datastore,
+            "_lookup_state_hamts_from_tikv_direct",
+            return_value=(
+                {
+                    sg1: [],
+                    sg2: [(EventTypes.Name, "", event2.event_id)],
+                },
+                [],
+            ),
+        ) as mock_batch_lookup:
+            res = self.get_success(
+                self.storage.state.stores.state._get_state_groups_from_groups(
+                    [sg1, sg2], state_filter
+                )
+            )
+            mock_batch_lookup.assert_called_once()
+            self.assertEqual(
+                res,
+                {
+                    sg1: {},
+                    sg2: {(EventTypes.Name, ""): event2.event_id},
+                },
+            )
 
     def test_fallback_sql_does_not_call_tikv_in_transaction(self) -> None:
         """Verify that pure SQL fallback mode (use_tikv=False) makes zero TiKV calls inside runInteraction."""

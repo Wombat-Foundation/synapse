@@ -190,10 +190,20 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             ) -> tuple[dict[int, StateMap[str]], list[int]]:
                 res: dict[int, StateMap[str]] = {}
                 missing: list[int] = []
-                if exact_keys is None and len(target_groups) > 1:
-                    entries_by_group, missing = (
-                        self._materialize_state_hamts_from_tikv_direct(target_groups)
-                    )
+                if len(target_groups) > 1:
+                    entries_by_group: dict[int, list[tuple[str, str, str]]]
+                    if exact_keys is not None:
+                        entries_by_group, missing = (
+                            self._lookup_state_hamts_from_tikv_direct(
+                                target_groups, exact_keys
+                            )
+                        )
+                    else:
+                        entries_by_group, missing = (
+                            self._materialize_state_hamts_from_tikv_direct(
+                                target_groups
+                            )
+                        )
                     for group, batch_entries in entries_by_group.items():
                         batch_state_map: MutableStateMap[str] = {}
                         for typ, state_key, event_id in batch_entries:

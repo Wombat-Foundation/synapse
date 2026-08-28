@@ -17,3 +17,7 @@ def materialize_state_hamt(
 def materialize_state_hamts(
     namespace: str, roots: list[tuple[bytes, bytes]]
 ) -> list[list[tuple[str, str, str]]]: ...
+def lookup_state_hamts(
+    namespace: str,
+    queries: list[tuple[bytes, bytes, bytes, list[tuple[str, str]]]],
+) -> list[list[tuple[str, str, str]]]: ...

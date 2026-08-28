@@ -211,7 +211,7 @@ fn build_typed_root_nodes_and_lattice(
 }
 
 #[must_use]
-fn room_structural_key_raw(server_secret: &[u8; 32], room_id: &str) -> [u8; 32] {
+pub(crate) fn room_structural_key_raw(server_secret: &[u8; 32], room_id: &str) -> [u8; 32] {
     let mut mac =
         <HmacSha256 as Mac>::new_from_slice(server_secret).expect("HMAC can take key of any size");
     mac.update(room_id.as_bytes());
@@ -285,7 +285,7 @@ fn collect_persisted_nodes(
     nodes.push((persisted.structural_hash, persisted.encode_v1()));
 }
 
-fn build_root_handle_and_nodes(
+pub(crate) fn build_root_handle_and_nodes(
     server_secret: &[u8; 32],
     room_id: &str,
     entries: Vec<(String, String, String)>,

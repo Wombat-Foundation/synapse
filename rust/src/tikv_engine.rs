@@ -13,7 +13,7 @@ use tikv_client::{RawClient, TransactionClient};
 use tokio::runtime::Runtime;
 use tokio::time::{sleep, timeout, Duration};
 
-use crate::state_hamt::{decode_persisted_node, materialize_from_node_map};
+use crate::state_hamt::{decode_persisted_node, lookup_from_node_map, materialize_from_node_map};
 
 static RUNTIME: OnceCell<Runtime> = OnceCell::new();
 static CLIENT: OnceCell<RawClient> = OnceCell::new();
@@ -766,6 +766,175 @@ pub fn materialize_state_hamts(
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)
 }
 
+type SelectiveQuery = (
+    [u8; ROOM_PREFIX_LEN],
+    StructuralHash,
+    [u8; 32],
+    Vec<(String, String)>,
+);
+type PySelectiveQuery = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<(String, String)>);
+
+/// Look up specific state keys across several HAMT roots in one TiKV traversal.
+///
+/// Traverses each BFS layer across every requested root at once, querying the
+/// in-memory node cache first and batch-fetching missing child nodes across all
+/// requested trees simultaneously.
+async fn lookup_state_hamts_async(
+    namespace: &str,
+    queries: Vec<SelectiveQuery>,
+) -> Result<Vec<Vec<(String, String, String)>>, String> {
+    let client = get_client().await?;
+    type NodeLocation = ([u8; ROOM_PREFIX_LEN], StructuralHash);
+
+    let mut node_map: HashMap<NodeLocation, Arc<HamtNode<String, String>>> = HashMap::new();
+    let mut seen: HashSet<NodeLocation> = queries.iter().map(|(p, h, _, _)| (*p, *h)).collect();
+    let mut to_fetch: HashSet<NodeLocation> = seen.clone();
+
+    while !to_fetch.is_empty() {
+        let current_batch: Vec<NodeLocation> = to_fetch.drain().collect();
+
+        let mut still_missing = Vec::with_capacity(current_batch.len());
+        {
+            let mut cache = node_cache().lock().unwrap();
+            for (room_prefix, hash) in current_batch {
+                let key = node_tikv_key(namespace, &room_prefix, &hash);
+                match cache.get(&key) {
+                    Some(node) => {
+                        let node = node.clone();
+                        node_map.insert((room_prefix, hash), node);
+                    }
+                    None => still_missing.push((room_prefix, hash)),
+                }
+            }
+        }
+
+        for chunk in still_missing.chunks(NODE_FETCH_BATCH_SIZE) {
+            let key_to_location: HashMap<Vec<u8>, NodeLocation> = chunk
+                .iter()
+                .map(|(room_prefix, hash)| {
+                    (
+                        node_tikv_key(namespace, room_prefix, hash),
+                        (*room_prefix, *hash),
+                    )
+                })
+                .collect();
+            let keys: Vec<Vec<u8>> = key_to_location.keys().cloned().collect();
+            let rows = client.batch_get(keys).await.map_err(|e| e.to_string())?;
+
+            if rows.len() != chunk.len() {
+                return Err(format!(
+                    "Missing HAMT node(s): expected {}, got {}",
+                    chunk.len(),
+                    rows.len()
+                ));
+            }
+
+            for pair in rows {
+                let (key, node_bytes): (tikv_client::Key, tikv_client::Value) = pair.into();
+                let key: Vec<u8> = key.into();
+                let (room_prefix, expected_hash) = key_to_location
+                    .get(&key)
+                    .copied()
+                    .ok_or_else(|| "TiKV returned an unexpected HAMT node key".to_owned())?;
+                let node = decode_persisted_node(&node_bytes)?;
+                if node.structural_hash != expected_hash {
+                    return Err("HAMT node hash does not match its TiKV key".to_owned());
+                }
+
+                node_cache().lock().unwrap().put(key, node.clone());
+                node_map.insert((room_prefix, expected_hash), node);
+            }
+        }
+
+        // Group loaded nodes by room prefix so we can query each room's tree
+        type PrefixNodeMap = HashMap<StructuralHash, Arc<HamtNode<String, String>>>;
+        let mut nodes_by_prefix: HashMap<[u8; ROOM_PREFIX_LEN], PrefixNodeMap> = HashMap::new();
+        for ((room_prefix, hash), node) in &node_map {
+            nodes_by_prefix
+                .entry(*room_prefix)
+                .or_default()
+                .insert(*hash, Arc::clone(node));
+        }
+
+        for (room_prefix, root_hash, structural_key, keys) in &queries {
+            if let Some(prefix_nodes) = nodes_by_prefix.get(room_prefix) {
+                if prefix_nodes.contains_key(root_hash) {
+                    let (_entries, missing) =
+                        lookup_from_node_map(root_hash, structural_key, keys, prefix_nodes)?;
+                    for missing_hash in missing {
+                        let child_loc = (*room_prefix, missing_hash);
+                        if seen.insert(child_loc) {
+                            to_fetch.insert(child_loc);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    type PrefixNodeMap = HashMap<StructuralHash, Arc<HamtNode<String, String>>>;
+    let mut nodes_by_prefix: HashMap<[u8; ROOM_PREFIX_LEN], PrefixNodeMap> = HashMap::new();
+    for ((room_prefix, hash), node) in node_map {
+        nodes_by_prefix
+            .entry(room_prefix)
+            .or_default()
+            .insert(hash, node);
+    }
+
+    queries
+        .into_iter()
+        .map(|(room_prefix, root_hash, structural_key, keys)| {
+            let prefix_nodes = nodes_by_prefix.get(&room_prefix).ok_or_else(|| {
+                format!(
+                    "Missing nodes for room prefix: {}",
+                    hex::encode(room_prefix)
+                )
+            })?;
+            let (entries, missing) =
+                lookup_from_node_map(&root_hash, &structural_key, &keys, prefix_nodes)?;
+            if !missing.is_empty() {
+                return Err(format!(
+                    "Unresolved missing nodes after fetch loop for root {:02x?}",
+                    root_hash
+                ));
+            }
+            Ok(entries)
+        })
+        .collect()
+}
+
+/// Look up specific state keys across several state groups directly from TiKV.
+///
+/// Each query is a tuple of `(room_prefix, root_structural_hash, structural_key, keys)`.
+#[pyfunction]
+#[pyo3(text_signature = "(namespace, queries, /)")]
+pub fn lookup_state_hamts(
+    py: Python<'_>,
+    namespace: String,
+    queries: Vec<PySelectiveQuery>,
+) -> PyResult<Vec<Vec<(String, String, String)>>> {
+    let parsed_queries = queries
+        .into_iter()
+        .map(|(room_prefix, root_hash, structural_key, keys)| {
+            let room_prefix: [u8; ROOM_PREFIX_LEN] = room_prefix.try_into().map_err(|_| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "room_prefix must be {ROOM_PREFIX_LEN} bytes"
+                ))
+            })?;
+            let root_hash: StructuralHash = root_hash.try_into().map_err(|_| {
+                pyo3::exceptions::PyValueError::new_err("root_structural_hash must be 16 bytes")
+            })?;
+            let structural_key: [u8; 32] = structural_key.try_into().map_err(|_| {
+                pyo3::exceptions::PyValueError::new_err("structural_key must be 32 bytes")
+            })?;
+            Ok((room_prefix, root_hash, structural_key, keys))
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    let rt = get_runtime();
+    py.detach(|| rt.block_on(lookup_state_hamts_async(&namespace, parsed_queries)))
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+}
+
 pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     let child_module = PyModule::new(py, "tikv_engine")?;
     child_module.add_function(wrap_pyfunction!(open_client, &child_module)?)?;
@@ -779,6 +948,7 @@ pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     child_module.add_function(wrap_pyfunction!(scan_prefix, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(materialize_state_hamt, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(materialize_state_hamts, &child_module)?)?;
+    child_module.add_function(wrap_pyfunction!(lookup_state_hamts, &child_module)?)?;
 
     m.add_submodule(&child_module)?;
 
@@ -934,5 +1104,44 @@ mod tests {
         assert!(!is_retryable_txn_error(
             &tikv_client::Error::MultipleKeyErrors(vec![tikv_client::Error::Unimplemented])
         ));
+    }
+
+    #[test]
+    fn node_cache_with_selective_lookup() {
+        use crate::state_hamt::{
+            build_root_handle_and_nodes, decode_persisted_node, lookup_from_node_map,
+            room_structural_key_raw,
+        };
+
+        let secret = [42u8; 32];
+        let room_id = "!test_room:example.com";
+        let structural_key = room_structural_key_raw(&secret, room_id);
+        let entries = vec![
+            (
+                "m.room.name".to_string(),
+                "".to_string(),
+                "$event1".to_string(),
+            ),
+            (
+                "m.room.topic".to_string(),
+                "".to_string(),
+                "$event2".to_string(),
+            ),
+        ];
+        let ((root_hash, _sg), nodes) =
+            build_root_handle_and_nodes(&secret, room_id, entries).unwrap();
+        let mut node_map = HashMap::new();
+        for (h, node_bytes) in nodes {
+            let node = decode_persisted_node(&node_bytes).unwrap();
+            node_map.insert(h, node);
+        }
+
+        let keys = vec![("m.room.name".to_string(), "".to_string())];
+        let (found, missing) =
+            lookup_from_node_map(&root_hash, &structural_key, &keys, &node_map).unwrap();
+        assert!(missing.is_empty());
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, "m.room.name");
+        assert_eq!(found[0].2, "$event1");
     }
 }
