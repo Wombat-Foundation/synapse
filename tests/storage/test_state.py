@@ -937,6 +937,12 @@ class StateStoreTestCase(HomeserverTestCase):
                 [group for group in groups if group != valid_group],
             )
 
+        def mock_mat_single(sg: int) -> list[tuple[str, str, str]] | None:
+            if sg == valid_group:
+                entries_by_group, _ = mock_mat([sg])
+                return entries_by_group.get(sg)
+            return None
+
         self._enable_mock_tikv()
         try:
             with (
@@ -944,6 +950,11 @@ class StateStoreTestCase(HomeserverTestCase):
                     self.state_datastore,
                     "_materialize_state_hamts_from_tikv_direct",
                     side_effect=mock_mat,
+                ),
+                patch.object(
+                    self.state_datastore,
+                    "_materialize_state_hamt_from_tikv_direct",
+                    side_effect=mock_mat_single,
                 ),
                 patch.object(
                     self.state_datastore.hs.get_clock(),
