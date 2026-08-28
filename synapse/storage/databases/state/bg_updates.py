@@ -485,16 +485,26 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         )
 
         bulk_results: dict[int, list[tuple[str, str, str]] | None] | None = None
-        if len(groups) > 1 and exact_keys is None and not use_tikv:
-            bulk_results = self._materialize_state_hamt_from_postgres_many_txn(
-                txn, groups
-            )
+        bulk_selective_results: dict[int, list[tuple[str, str, str]] | None] | None = (
+            None
+        )
+        if len(groups) > 1 and not use_tikv:
+            if exact_keys is None:
+                bulk_results = self._materialize_state_hamt_from_postgres_many_txn(
+                    txn, groups
+                )
+            else:
+                bulk_selective_results = self._lookup_state_hamt_from_postgres_many_txn(
+                    txn, groups, exact_keys
+                )
 
         for group in groups:
             if exact_keys is not None:
                 entries = (
                     self._lookup_state_hamt_from_tikv(txn, group, exact_keys)
                     if use_tikv
+                    else bulk_selective_results[group]
+                    if bulk_selective_results is not None
                     else self._lookup_state_hamt_from_postgres_txn(
                         txn, group, exact_keys
                     )
@@ -917,6 +927,99 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
                     "Missing HAMT child nodes for state group "
                     f"{state_group}: {[node_hash.hex() for node_hash in unresolved]}"
                 )
+
+    def _lookup_state_hamt_from_postgres_many_txn(
+        self,
+        txn: LoggingTransaction,
+        groups: list[int],
+        keys: list[tuple[str, str]],
+    ) -> dict[int, list[tuple[str, str, str]] | None]:
+        """Selective HAMT key lookup across several state groups, sharing node
+        fetches -- the SQL-mode mirror of the TiKV batched selective lookup
+        (`lookup_state_hamts`/`lookup_state_hamts_core` in tikv_engine.rs).
+
+        Each round, every group attempts to resolve `keys` against whatever
+        nodes have been fetched so far; any node hashes still missing across
+        *all* groups are merged into one shared batch fetch for the next
+        round, so groups needing a node in common only ever fetch it once.
+        """
+        from synapse.synapse_rust import state_hamt
+
+        root_rows = self.db_pool.simple_select_many_txn(
+            txn,
+            table="state_hamt_roots",
+            column="state_group",
+            iterable=groups,
+            keyvalues={},
+            retcols=("state_group", "root_structural_hash"),
+        )
+        roots = {int(group): bytes(root_hash) for group, root_hash in root_rows}
+        results: dict[int, list[tuple[str, str, str]] | None] = dict.fromkeys(
+            groups, None
+        )
+        if not roots:
+            return results
+
+        room_id_rows = self.db_pool.simple_select_many_txn(
+            txn,
+            table="state_groups",
+            column="id",
+            iterable=list(roots.keys()),
+            keyvalues={},
+            retcols=("id", "room_id"),
+        )
+        room_ids = {int(group): room_id for group, room_id in room_id_rows}
+        secret = self._state_hamt_secret()
+
+        def try_resolve_all() -> set[bytes]:
+            """Attempt selective resolution for every group against the
+            nodes fetched so far. Returns the union of node hashes still
+            missing across all groups (deduped, and excluding anything
+            already fetched -- defensive, mirrors the single-group loop)."""
+            still_missing: set[bytes] = set()
+            for group, root_hash in roots.items():
+                entries, missing = state_hamt.lookup_state_entries(
+                    secret,
+                    room_ids[group],
+                    node_bytes_by_hash[root_hash],
+                    list(node_bytes_by_hash.items()),
+                    keys,
+                )
+                results[group] = entries
+                still_missing.update(
+                    bytes(node_hash)
+                    for node_hash in missing
+                    if bytes(node_hash) not in node_bytes_by_hash
+                )
+            return still_missing
+
+        node_bytes_by_hash: dict[bytes, bytes] = {}
+        to_fetch = set(roots.values())
+        while to_fetch:
+            current_batch = list(to_fetch)
+            for chunk in batch_iter(current_batch, 100):
+                rows = [
+                    (bytes(node_hash), bytes(node_bytes))
+                    for node_hash, node_bytes in self.db_pool.simple_select_many_txn(
+                        txn,
+                        table="state_hamt_nodes",
+                        column="structural_hash",
+                        iterable=[bytearray(node_hash) for node_hash in chunk],
+                        keyvalues={},
+                        retcols=("structural_hash", "node_bytes"),
+                    )
+                ]
+                missing_from_db = set(chunk) - {node_hash for node_hash, _ in rows}
+                if missing_from_db:
+                    raise RuntimeError(
+                        "Missing HAMT nodes for state groups "
+                        f"{groups}: {[node_hash.hex() for node_hash in missing_from_db]}"
+                    )
+                node_bytes_by_hash.update(rows)
+
+            to_fetch = try_resolve_all()
+
+        return results
 
 
 class StateBackgroundUpdateStore(StateGroupBackgroundUpdateStore):

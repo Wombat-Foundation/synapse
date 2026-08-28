@@ -631,6 +631,57 @@ class StateStoreTestCase(HomeserverTestCase):
                 },
             )
 
+    def test_multi_group_exact_filter_under_pure_sql_shares_node_fetches(self) -> None:
+        """SQL-mode mirror of test_multi_group_exact_filter_under_tikv_uses_batch_lookup:
+        with no TiKV configured, a selective (exact_keys) lookup across several
+        state groups must go through _lookup_state_hamt_from_postgres_many_txn,
+        not the singular per-group SQL loop, and must return correct per-group
+        results without mocking anything -- this exercises the real SQL HAMT
+        node-sharing path end to end."""
+        event1 = self.inject_state_event(
+            self.room, self.u_alice, EventTypes.Create, "", {}
+        )
+        sg1 = self.get_success(self.store._get_state_group_for_event(event1.event_id))
+        event2 = self.inject_state_event(
+            self.room, self.u_alice, EventTypes.Name, "", {"name": "room_name"}
+        )
+        sg2 = self.get_success(self.store._get_state_group_for_event(event2.event_id))
+        assert sg1 is not None and sg2 is not None
+        assert not self.state_datastore.tikv_pd_endpoints
+
+        state_filter = StateFilter.from_types([(EventTypes.Name, "")])
+
+        with (
+            patch.object(
+                self.state_datastore,
+                "_lookup_state_hamt_from_postgres_many_txn",
+                wraps=self.state_datastore._lookup_state_hamt_from_postgres_many_txn,
+            ) as mock_many,
+            patch.object(
+                self.state_datastore,
+                "_lookup_state_hamt_from_postgres_txn",
+                wraps=self.state_datastore._lookup_state_hamt_from_postgres_txn,
+            ) as mock_singular,
+        ):
+            res = self.get_success(
+                self.storage.state.stores.state._get_state_groups_from_groups(
+                    [sg1, sg2], state_filter
+                )
+            )
+
+        # The batched path was used exactly once for both groups together;
+        # the per-group singular path was never reached.
+        mock_many.assert_called_once()
+        mock_singular.assert_not_called()
+
+        self.assertEqual(
+            res,
+            {
+                sg1: {},
+                sg2: {(EventTypes.Name, ""): event2.event_id},
+            },
+        )
+
     def test_fallback_sql_does_not_call_tikv_in_transaction(self) -> None:
         """Verify that pure SQL fallback mode (use_tikv=False) makes zero TiKV calls inside runInteraction."""
         from unittest.mock import patch
