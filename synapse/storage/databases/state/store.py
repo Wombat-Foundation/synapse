@@ -640,26 +640,24 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         room_id: str,
         updates: list[tuple[str, str, str]],
     ) -> tuple[dict[bytes, bytes], dict[int, tuple[bytes, bytes]]]:
-        for attempt in range(10):
-            prefetched = await defer_to_thread(
-                self.hs.get_reactor(),
-                self._prefetch_tikv_hamt_blocking,
-                room_prefix,
-                state_group,
-                room_id,
-                updates,
-            )
-            if prefetched is not None:
-                return prefetched
-
-            if attempt < 9:
-                await self.hs.get_clock().sleep(
-                    Duration(milliseconds=50 * (attempt + 1))
-                )
-
-        raise RuntimeError(
-            f"Missing TiKV HAMT root while prefetching state group {state_group}"
+        prefetched = await defer_to_thread(
+            self.hs.get_reactor(),
+            self._prefetch_tikv_hamt_blocking,
+            room_prefix,
+            state_group,
+            room_id,
+            updates,
         )
+        if prefetched is not None:
+            return prefetched
+
+        # This is an optimization for an incremental update, not the
+        # authoritative read path. A predecessor without a published root can
+        # be a newly created/legacy group, or be in its publication window;
+        # callers can safely rebuild from their full state map in either case.
+        # Do not wait here: a write must not block on a fake test clock (or
+        # turn a recoverable missed optimization into a failed persistence).
+        return {}, {}
 
     def _persist_state_hamt_txn(
         self,

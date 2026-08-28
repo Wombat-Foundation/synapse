@@ -86,6 +86,7 @@ subjectAltName = %(sanentries)s
 
 
 @lru_cache(maxsize=1)
+@functools.lru_cache(maxsize=None)
 def _openssl_x509_supports_set_serial() -> bool:
     result = subprocess.run(
         ["openssl", "x509", "-help"],

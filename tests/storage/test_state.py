@@ -767,6 +767,13 @@ class StateStoreTestCase(HomeserverTestCase):
                 desc="test_unresolved.insert_sg",
             )
         )
+        self.get_success(
+            self.store.db_pool.simple_insert(
+                table="state_group_edges",
+                values={"state_group": state_group, "prev_state_group": 1},
+                desc="test_unresolved.insert_edge",
+            )
+        )
 
         self._enable_mock_tikv()
         try:

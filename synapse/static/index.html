@@ -561,16 +561,18 @@
 
       <!-- Admin Token Synchronization Bar -->
       <div class="sync-bar" id="sync-container" style="display: none">
-        <span>⚡ ADMIN DB PROBE:</span>
+      <div class="sync-bar" id="sync-container" style="display: none">
+        <label for="admin-token-input">⚡ ADMIN DB PROBE:</label>
         <input
           type="password"
           id="admin-token-input"
           class="sync-input"
-          aria-label="Synapse admin access token"
           placeholder="Paste Synapse Admin Access Token for live DB metrics"
         />
-        <button class="sync-btn" onclick="saveAdminToken()">SYNC STATS</button>
-        <button class="sync-toggle-btn" onclick="clearAdminToken()">
+        <button type="button" class="sync-btn" onclick="saveAdminToken()">
+          SYNC STATS
+        </button>
+        <button type="button" class="sync-toggle-btn" onclick="clearAdminToken()">
           CLEAR
         </button>
       </div>
@@ -797,12 +799,13 @@
         } catch (e) {}
 
         // 2. Matrix Spec & Core Ping
+        // 2. Matrix Spec & Core Ping
         try {
-          const startTime = performance.now();
+          const pingStart = performance.now();
           const res = await fetch("/_matrix/client/versions");
           const latency = Math.max(
             1,
-            Math.round(performance.now() - startTime),
+            Math.round(performance.now() - pingStart),
           );
           const latencyEl = document.getElementById("stat-latency");
           if (latencyEl) latencyEl.textContent = `${latency} ms`;
@@ -818,8 +821,8 @@
         } catch (err) {
           const latencyEl = document.getElementById("stat-latency");
           const specEl = document.getElementById("stat-spec");
-          if (latencyEl) latencyEl.textContent = "-- ms";
-          if (specEl) specEl.textContent = "...";
+          if (latencyEl) latencyEl.textContent = "unavailable";
+          if (specEl) specEl.textContent = "unavailable";
         }
 
         // 3. Fallback discovery if server_stats endpoint is not available
@@ -944,8 +947,13 @@
 
       measureTelemetry();
       document.addEventListener("visibilitychange", () => {
-        if (!document.hidden) measureTelemetry();
-      });
+      measureTelemetry();
+      // Refresh only while the tab is visible, and at a low frequency.
+      setInterval(() => {
+        if (document.visibilityState === "visible") {
+          measureTelemetry();
+        }
+      }, 60000);
     </script>
   </body>
 </html>

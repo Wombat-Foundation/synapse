@@ -41,14 +41,16 @@ def install_dependencies() -> None:
         cmd.append("--locked")
 
     print(f"Running: {' '.join(cmd)}", file=sys.stderr)
-    subprocess.run(
-        cmd,
-        cwd=REPO_ROOT,
-        check=True,
-        stdout=sys.stderr,
-    )
-    if not had_lockfile:
-        lockfile.unlink(missing_ok=True)
+    try:
+        subprocess.run(
+            cmd,
+            cwd=REPO_ROOT,
+            check=True,
+            stdout=sys.stderr,
+        )
+    finally:
+        if not had_lockfile:
+            lockfile.unlink(missing_ok=True)
 
 
 def run_make_full_schema(output_dir: Path, script: Path) -> None:
