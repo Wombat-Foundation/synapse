@@ -581,6 +581,87 @@ class ServerKeyFetcherTestCase(unittest.HomeserverTestCase):
         # nowhere near a full interval since the successful fetch.
         self.assertTrue(fetcher._backoff.should_attempt(SERVER_NAME))
 
+    def test_first_seen_wins_rejects_colliding_key_body(self) -> None:
+        """MSC4499 First Seen Wins: a second, self-signed-valid response that
+        reuses an already-bound key ID with a *different* key body MUST be
+        rejected -- the original binding is retained, both in what's
+        returned to the caller and in what's persisted (so a later notary
+        query keeps serving the original, not the spurious one)."""
+        self.reactor.advance(100)
+
+        SERVER_NAME = "server2"
+        KEY_ID = "ed25519:ver1"
+        fetcher = ServerKeyFetcher(self.hs)
+
+        original_key = signedjson.key.generate_signing_key("ver1")
+        original_verify_key = signedjson.key.get_verify_key(original_key)
+        VALID_UNTIL_TS = self.clock.time_msec() + 1000 * 1000
+
+        original_response = {
+            "server_name": SERVER_NAME,
+            "old_verify_keys": {},
+            "valid_until_ts": VALID_UNTIL_TS,
+            "verify_keys": {
+                KEY_ID: {
+                    "key": signedjson.key.encode_verify_key_base64(original_verify_key)
+                }
+            },
+        }
+        signedjson.sign.sign_json(original_response, SERVER_NAME, original_key)
+
+        async def get_original(destination: str, path: str, **kwargs: Any) -> JsonDict:
+            return original_response
+
+        self.http_client.get_json.side_effect = get_original
+        keys = self.get_success(fetcher.get_keys(SERVER_NAME, [KEY_ID], 0))
+        self.assertEqual(keys[KEY_ID].verify_key.encode(), original_verify_key.encode())
+
+        # A second, differently-keyed but *validly self-signed* response
+        # claiming the same key ID -- the spurious collision.
+        spurious_key = signedjson.key.generate_signing_key("ver1")
+        spurious_verify_key = signedjson.key.get_verify_key(spurious_key)
+        self.assertNotEqual(original_verify_key.encode(), spurious_verify_key.encode())
+
+        spurious_response = {
+            "server_name": SERVER_NAME,
+            "old_verify_keys": {},
+            "valid_until_ts": VALID_UNTIL_TS,
+            "verify_keys": {
+                KEY_ID: {
+                    "key": signedjson.key.encode_verify_key_base64(spurious_verify_key)
+                }
+            },
+        }
+        signedjson.sign.sign_json(spurious_response, SERVER_NAME, spurious_key)
+
+        async def get_spurious(destination: str, path: str, **kwargs: Any) -> JsonDict:
+            return spurious_response
+
+        self.http_client.get_json.side_effect = get_spurious
+        # Clear the ServerKeyFetcher's queue/cache state by using a fresh
+        # fetcher instance -- avoids the negative-cache backoff (a separate
+        # concern) from short-circuiting this second, deliberately-forced
+        # fetch attempt.
+        fetcher2 = ServerKeyFetcher(self.hs)
+        keys2 = self.get_success(fetcher2.get_keys(SERVER_NAME, [KEY_ID], 0))
+
+        # The caller must still see the *original* key body -- not the
+        # spurious one -- for this key ID.
+        self.assertEqual(
+            keys2[KEY_ID].verify_key.encode(), original_verify_key.encode()
+        )
+
+        # And the persisted record must likewise still be the original: a
+        # fresh notary-style read from the store returns the original body.
+        stored = self.get_success(
+            self.hs.get_datastores().main.get_existing_verify_keys(
+                SERVER_NAME, [KEY_ID]
+            )
+        )
+        self.assertEqual(
+            stored[KEY_ID].verify_key.encode(), original_verify_key.encode()
+        )
+
 
 class PerspectivesKeyFetcherTestCase(unittest.HomeserverTestCase):
     def make_homeserver(self, reactor: MemoryReactor, clock: Clock) -> HomeServer:
