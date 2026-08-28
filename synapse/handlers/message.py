@@ -2465,12 +2465,19 @@ class EventCreationHandler:
 
         # Construct a new EventBuilder and validate it, which helps with the
         # rest of these checks.
+        create_event_as_room_id = (
+            original_event.room_version.msc4291_room_ids_as_hashes
+            and original_event.type == EventTypes.Create
+            and hasattr(original_event, "state_key")
+            and original_event.state_key == ""
+        )
         try:
             builder = self.event_builder_factory.for_room_version(
                 original_event.room_version, third_party_result
             )
             self.validator.validate_builder(builder)
-            assert builder.room_id is not None
+            if not create_event_as_room_id:
+                assert builder.room_id is not None
         except SynapseError as e:
             raise Exception(
                 "Third party rules module created an invalid event: " + e.msg,
@@ -2521,7 +2528,13 @@ class EventCreationHandler:
             state_group_before = getattr(
                 original_context, "state_group_before_event", None
             )
-            partial_state = getattr(original_context, "partial_state", False)
+            # `calculate_context_info` requires `partial_state` to be `None`
+            # whenever `state_ids_before_event` is empty/falsy (e.g. the
+            # very first event in a room, where the state before it is
+            # `{}`), and non-`None` otherwise.
+            partial_state = (
+                getattr(original_context, "partial_state", False) if state_map else None
+            )
             context = await self.state.calculate_context_info(
                 event,
                 state_ids_before_event=state_map,
@@ -2532,10 +2545,16 @@ class EventCreationHandler:
 
         # modules can send new state events, so we re-calculate the auth events just in
         # case.
-        prev_event_ids = await self.store.get_prev_events_for_room(builder.room_id)
+        if builder.room_id is not None:
+            prev_event_ids = await self.store.get_prev_events_for_room(builder.room_id)
+        else:
+            prev_event_ids = []
 
         prev_state_events = None
-        if original_event.room_version.msc4242_state_dags:
+        if (
+            original_event.room_version.msc4242_state_dags
+            and builder.room_id is not None
+        ):
             prev_state_events = list(
                 await self.store.get_state_dag_extremities(builder.room_id)
             )
