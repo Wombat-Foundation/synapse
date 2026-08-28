@@ -505,9 +505,6 @@ jobs:
           SYNAPSE_POSTGRES_HOST: /var/run/postgresql
           SYNAPSE_POSTGRES_USER: postgres
           SYNAPSE_POSTGRES_PASSWORD: postgres
-          # Keep per-test databases until the diagnostics step below. Without
-          # this, the normal test cleanup drops the workload we need to inspect.
-          SYNAPSE_LEAVE_DB: 1
           SYNAPSE_TEST_TIKV_PD_ENDPOINTS: ${{ matrix.job.database == 'tikv' && '172.17.0.1:2379' || '' }}
       - name: Dump PostgreSQL statistics
         if: ${{ always() && matrix.job.postgres-version }}

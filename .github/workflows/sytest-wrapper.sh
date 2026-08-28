@@ -78,16 +78,19 @@ PY
 echo "--- Patching /sytest/scripts/synapse_sytest.sh to use uv sync"
 # Patch synapse_sytest.sh to run 'uv sync' instead of legacy pip/poetry install
 # We use the absolute path /venv/bin/python to avoid any container PATH issues
-/venv/bin/python -c "
+/venv/bin/python <<'PY'
+import os
+
 with open('/sytest/scripts/synapse_sytest.sh', 'r') as f:
     content = f.read()
 
+uv_args = os.environ.get('UV_ARGS', '')
 # Assertions to ensure we are patching the expected script and have not drifted silently
 assert 'poetry install -vv --extras all' in content or 'pip install' in content, 'Upstream synapse_sytest.sh has drifted: expected installation commands not found'
 
-content = content.replace('poetry install -vv --extras all', '/venv/bin/uv sync --all-extras $UV_ARGS')
-content = content.replace('/venv/bin/pip install -q --upgrade --upgrade-strategy eager --no-cache-dir /synapse[all]', '(cd /synapse && /venv/bin/uv sync --all-extras $UV_ARGS)')
-content = content.replace('/venv/bin/pip install --no-deps --no-index --find-links /pypi-offline-cache /synapse', '(cd /synapse && /venv/bin/uv sync --all-extras $UV_ARGS)')
+content = content.replace('poetry install -vv --extras all', f'/venv/bin/uv sync --all-extras {uv_args}')
+content = content.replace('/venv/bin/pip install -q --upgrade --upgrade-strategy eager --no-cache-dir /synapse[all]', f'(cd /synapse && /venv/bin/uv sync --all-extras {uv_args})')
+content = content.replace('/venv/bin/pip install --no-deps --no-index --find-links /pypi-offline-cache /synapse', f'(cd /synapse && /venv/bin/uv sync --all-extras {uv_args})')
 
 # Confirm replacements actually succeeded
 assert 'poetry install -vv --extras all' not in content, 'Failed to replace poetry install command'
@@ -95,30 +98,29 @@ assert '/synapse[all]' not in content, 'Failed to replace legacy pip install com
 
 with open('/sytest/scripts/synapse_sytest.sh', 'w') as f:
     f.write(content)
-"
+PY
 
 echo "--- Patching /sytest/lib/SyTest/Homeserver/Synapse.pm to inject TiKV config"
 # When SYNAPSE_TIKV_PD_ENDPOINTS is set, add a `tikv` block to the homeserver
 # config that sytest generates, so the HAMT state backend runs against a real
 # TiKV cluster (mirrors trial-tikv / complement-tikv).
-/venv/bin/python -c "
-import re
-
+/venv/bin/python <<'PY'
 with open('/sytest/lib/SyTest/Homeserver/Synapse.pm', 'r') as f:
     content = f.read()
 
 anchor = '        databases => \\%db_configs,'
 injection = '''        databases => \\%db_configs,
-        ( ( my @ep = grep { length } map { s/^\\\\s+|\\\\s+\$//gr } split /,/, ( \$ENV{SYNAPSE_TIKV_PD_ENDPOINTS} // '' ) ) ? (
-            tikv => { pd_endpoints => [ @ep ] },
-        ) : () ),'''
+        ( do {
+            my @ep = grep { length } map { s/^\\s+|\\s+$//gr } split /,/, ( $ENV{SYNAPSE_TIKV_PD_ENDPOINTS} // '' );
+            @ep ? ( tikv => { pd_endpoints => \\@ep } ) : ();
+        } ),'''
 
 assert anchor in content, 'Could not find databases anchor in Synapse.pm'
 content = content.replace(anchor, injection, 1)
 
 with open('/sytest/lib/SyTest/Homeserver/Synapse.pm', 'w') as f:
     f.write(content)
-"
+PY
 
 echo "--- Executing SyTest via synapse_sytest.sh"
 exec /sytest/scripts/synapse_sytest.sh
