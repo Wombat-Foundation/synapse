@@ -8,7 +8,7 @@ use rezzy::hamt::{HamtNode, StructuralHash};
 use sha2::{Digest, Sha256};
 use tikv_client::{RawClient, TransactionClient};
 use tokio::runtime::Runtime;
-use tokio::time::{sleep, Duration};
+use tokio::time::{sleep, timeout, Duration};
 
 use crate::state_hamt::{decode_persisted_node, materialize_from_node_map};
 
@@ -17,8 +17,9 @@ static CLIENT: OnceCell<RawClient> = OnceCell::new();
 static TX_CLIENT: OnceCell<TransactionClient> = OnceCell::new();
 const READINESS_PROBE_VALUE: &[u8] = b"ok";
 static READINESS_PROBE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-const OPEN_CLIENT_ATTEMPTS: u32 = 60;
-const OPEN_CLIENT_RETRY_DELAY: Duration = Duration::from_secs(2);
+const OPEN_CLIENT_ATTEMPTS: u32 = 5;
+const OPEN_CLIENT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(2);
+const OPEN_CLIENT_RETRY_DELAY: Duration = Duration::from_secs(1);
 const TRANSACTION_WRITE_ATTEMPTS: u32 = 5;
 const TRANSACTION_WRITE_RETRY_DELAY: Duration = Duration::from_millis(10);
 
@@ -101,12 +102,23 @@ async fn open_ready_client(pd_endpoints: Vec<String>) -> Result<RawClient, Strin
     let mut last_error = String::new();
 
     for attempt in 1..=OPEN_CLIENT_ATTEMPTS {
-        match RawClient::new(pd_endpoints.clone()).await {
-            Ok(client) => match check_raw_kv_ready(&client).await {
-                Ok(()) => return Ok(client),
-                Err(e) => last_error = e,
-            },
-            Err(e) => last_error = e.to_string(),
+        match timeout(OPEN_CLIENT_ATTEMPT_TIMEOUT, async {
+            let client = RawClient::new(pd_endpoints.clone())
+                .await
+                .map_err(|e| e.to_string())?;
+            check_raw_kv_ready(&client).await?;
+            Ok::<RawClient, String>(client)
+        })
+        .await
+        {
+            Ok(Ok(client)) => return Ok(client),
+            Ok(Err(e)) => last_error = e,
+            Err(_) => {
+                last_error = format!(
+                    "timed out after {} seconds",
+                    OPEN_CLIENT_ATTEMPT_TIMEOUT.as_secs()
+                );
+            }
         }
 
         if attempt < OPEN_CLIENT_ATTEMPTS {
@@ -115,7 +127,7 @@ async fn open_ready_client(pd_endpoints: Vec<String>) -> Result<RawClient, Strin
     }
 
     Err(format!(
-        "TiKV cluster is reachable but not ready for raw KV operations after {} attempts: {}",
+        "TiKV cluster did not become ready for raw KV operations after {} attempts: {}",
         OPEN_CLIENT_ATTEMPTS, last_error
     ))
 }

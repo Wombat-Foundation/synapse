@@ -1364,6 +1364,85 @@ mod tests {
     }
 
     #[test]
+    fn apply_typed_state_updates_removes_empty_type_directory_entry() {
+        let server_secret = [33u8; 32];
+        let room_id = "!room:test.example";
+        let entries = vec![
+            (
+                "m.room.create".to_owned(),
+                String::new(),
+                "$create".to_owned(),
+            ),
+            (
+                "m.room.join_rules".to_owned(),
+                String::new(),
+                "$join_rules".to_owned(),
+            ),
+        ];
+        let (typed_root, lattice, nodes) =
+            build_typed_root_nodes_and_lattice(&server_secret, room_id, entries)
+                .expect("initial typed root should build");
+        assert!(
+            typed_root
+                .directory
+                .iter()
+                .any(|(event_type, _)| event_type == "m.room.join_rules"),
+            "initial directory should contain the removed event type"
+        );
+        let empty_subtree_hash = rezzy::hamt::build_hamt(
+            &typed_subtree_key(
+                &room_structural_key_raw(&server_secret, room_id),
+                "m.room.join_rules",
+            ),
+            Vec::<(String, String)>::new(),
+        )
+        .expect("empty typed subtree should build")
+        .structural_hash;
+
+        let applied = expect_applied_typed(
+            apply_typed_state_updates_impl(
+                &server_secret,
+                room_id,
+                &typed_root.encode_v1().expect("typed root should encode"),
+                nodes.iter().map(|(h, b)| (h.to_vec(), b.clone())).collect(),
+                &lattice_to_bytes(&lattice),
+                vec![("m.room.join_rules".to_owned(), String::new(), None)],
+            ),
+            "removing a type's final state entry should apply",
+        );
+        let applied_root =
+            TypedRoot::decode_v1(&applied.typed_root_bytes).expect("applied root should decode");
+
+        let (rebuilt_root, _, _) = build_typed_root_nodes_and_lattice(
+            &server_secret,
+            room_id,
+            vec![(
+                "m.room.create".to_owned(),
+                String::new(),
+                "$create".to_owned(),
+            )],
+        )
+        .expect("full rebuild should build");
+
+        assert_eq!(applied_root.directory, rebuilt_root.directory);
+        assert_eq!(applied_root.structural_hash, rebuilt_root.structural_hash);
+        assert!(
+            !applied_root
+                .directory
+                .iter()
+                .any(|(event_type, _)| event_type == "m.room.join_rules"),
+            "an emptied subtree must not remain in the typed root directory"
+        );
+        assert!(
+            applied
+                .new_nodes
+                .iter()
+                .any(|(hash, _)| *hash == empty_subtree_hash),
+            "the emptied subtree remains an emitted immutable node"
+        );
+    }
+
+    #[test]
     fn apply_typed_state_updates_reports_missing_node_for_retry() {
         let server_secret = [32u8; 32];
         let room_id = "!room:test.example";
