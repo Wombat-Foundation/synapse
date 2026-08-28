@@ -1498,6 +1498,14 @@ class EventCreationHandler:
             else:
                 prev_state_events = []
 
+        if builder.room_version.msc4242_state_dags and prev_state_events is None:
+            if builder.room_id is not None:
+                prev_state_events = list(
+                    await self.store.get_state_dag_extremities(builder.room_id)
+                )
+            else:
+                prev_state_events = []
+
         auth_ids = self._event_auth_handler.compute_auth_events(builder, state_map)
         event = await builder.build(
             prev_event_ids=prev_event_ids,

@@ -69,6 +69,7 @@ fn get_runtime() -> &'static Runtime {
 
 async fn check_raw_kv_ready(client: &RawClient) -> Result<(), String> {
     let probe_key = format!(
+    let probe_key = format!(
         "synapse:tikv:readiness-probe:{}:{}",
         std::process::id(),
         READINESS_PROBE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
