@@ -324,16 +324,19 @@ class StateStoreTestCase(HomeserverTestCase):
     def test_state_group_hamt_corruption_does_not_fallback_to_sql_tikv(self) -> None:
         """TiKV equivalent of test_state_group_hamt_corruption_does_not_fallback_to_sql.
 
-        When TiKV is configured, the full HAMT trie lives in TiKV (keyed by
-        content hash); only the root pointer (state_group -> room_prefix +
-        root_hash) lives in per-instance SQL `state_hamt_roots`. So the
-        corruption is simulated by inserting an undecodable node into TiKV
-        and repointing the SQL root pointer at it.
+        When TiKV is configured, both the full HAMT trie and its root pointer
+        live in TiKV. The corruption is simulated by inserting an undecodable
+        node and repointing the TiKV root record at it.
         """
         if not self.state_datastore.tikv_pd_endpoints:
             self.skipTest("Requires TiKV -- set SYNAPSE_TEST_TIKV_PD_ENDPOINTS to run")
 
-        from synapse.storage.databases.state.bg_updates import _state_hamt_node_tikv_key
+        from synapse.storage.databases.state.bg_updates import (
+            _decode_state_hamt_root,
+            _encode_state_hamt_root,
+            _state_hamt_node_tikv_key,
+            _state_hamt_root_tikv_key,
+        )
         from synapse.synapse_rust import tikv_engine
 
         event = self.inject_state_event(
@@ -344,17 +347,12 @@ class StateStoreTestCase(HomeserverTestCase):
         )
         assert state_group is not None
 
-        # Read the per-instance SQL root pointer.
-        row = self.get_success(
-            self.store.db_pool.simple_select_one(
-                table="state_hamt_roots",
-                keyvalues={"state_group": state_group},
-                retcols=("room_prefix", "root_structural_hash"),
-                allow_none=True,
-            )
+        root_key = _state_hamt_root_tikv_key(
+            self.state_datastore.tikv_namespace, state_group
         )
-        assert row is not None, "Expected a HAMT root pointer to exist in SQL"
-        room_prefix = bytes(row[0])
+        root_value = tikv_engine.get(root_key)
+        assert root_value is not None, "Expected a HAMT root record to exist in TiKV"
+        room_prefix, _root_hash, lattice, room_id = _decode_state_hamt_root(root_value)
 
         garbage_structural_hash = random_string(16).encode("ascii")
         garbage_node_key = _state_hamt_node_tikv_key(
@@ -362,15 +360,11 @@ class StateStoreTestCase(HomeserverTestCase):
         )
         tikv_engine.put(garbage_node_key, b"not a valid persisted HAMT node")
 
-        self.get_success(
-            self.store.db_pool.simple_update_one(
-                table="state_hamt_roots",
-                keyvalues={"state_group": state_group},
-                updatevalues={
-                    "root_structural_hash": bytearray(garbage_structural_hash)
-                },
-                desc="test_state_group_hamt_corruption.repoint_root",
-            )
+        tikv_engine.put(
+            root_key,
+            _encode_state_hamt_root(
+                room_prefix, garbage_structural_hash, lattice, room_id=room_id
+            ),
         )
 
         # If a HAMT root exists, missing/corrupt nodes are data corruption.
@@ -901,6 +895,13 @@ class StateStoreTestCase(HomeserverTestCase):
                     "event_id": "$unresolved:test",
                 },
                 desc="test_unresolved.insert_sg",
+            )
+        )
+        self.get_success(
+            self.store.db_pool.simple_insert(
+                table="state_group_edges",
+                values={"state_group": unresolved_group, "prev_state_group": 1},
+                desc="test_unresolved.insert_edge",
             )
         )
         nonexistent_group = 9999992

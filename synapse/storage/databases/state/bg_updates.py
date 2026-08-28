@@ -145,9 +145,13 @@ def put_state_hamt_objects(
     if use_tikv:
         from synapse.synapse_rust import tikv_engine
 
-        # Roots are published in the same MVCC transaction as all nodes. A
-        # reader can therefore never observe a root without its tree.
-        tikv_engine.transactional_batch_put(pairs + roots)
+        # State nodes are read through TiKV's Raw KV API, so they must also be
+        # written through Raw KV: transactional and raw data use distinct
+        # keyspaces. Publish roots only after every immutable node has been
+        # written; readers that observe the small remaining visibility window
+        # use the bounded retry in `_get_state_groups_from_groups`.
+        tikv_engine.batch_put(pairs)
+        tikv_engine.batch_put(roots)
 
 
 class StateGroupBackgroundUpdateStore(SQLBaseStore):
