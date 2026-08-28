@@ -19,6 +19,7 @@
 #
 #
 
+import hashlib
 import itertools
 import json
 import logging
@@ -84,8 +85,9 @@ class KeyStore(CacheInvalidationWorkerStore):
         ts_added_ms: int,
         verify_keys: dict[str, FetchKeyResult],
         response_json: JsonDict,
-    ) -> None:
-        """Stores the keys for the given server that we got from `from_server`.
+    ) -> dict[str, FetchKeyResult]:
+        """Stores the keys for the given server that we got from `from_server`,
+        atomically enforcing MSC4499 First Seen Wins.
 
         Args:
             server_name: The owner of the keys
@@ -93,80 +95,125 @@ class KeyStore(CacheInvalidationWorkerStore):
             ts_added_ms: When we're adding the keys
             verify_keys: The decoded keys
             response_json: The full *signed* response JSON that contains the keys.
+
+        Returns:
+            The authoritative map of key_id -> FetchKeyResult (retaining any
+            previously-bound key bodies on collision).
         """
 
         key_json_bytes = encode_canonical_json(response_json)
 
-        def store_server_keys_response_txn(txn: LoggingTransaction) -> None:
-            self.db_pool.simple_upsert_many_txn(
-                txn,
-                table="server_signature_keys",
-                key_names=("server_name", "key_id"),
-                key_values=[(server_name, key_id) for key_id in verify_keys],
-                value_names=(
-                    "from_server",
-                    "ts_added_ms",
-                    "ts_valid_until_ms",
-                    "verify_key",
+        def store_server_keys_response_txn(
+            txn: LoggingTransaction,
+        ) -> dict[str, FetchKeyResult]:
+            # Transactionally enforce MSC4499 First Seen Wins:
+            # Query existing keys inside this transaction to detect any concurrent
+            # write that committed before this transaction began.
+            existing_rows = cast(
+                list[tuple[str, bytes | memoryview, int]],
+                self.db_pool.simple_select_many_txn(
+                    txn,
+                    table="server_signature_keys",
+                    column="key_id",
+                    iterable=list(verify_keys.keys()),
+                    keyvalues={"server_name": server_name},
+                    retcols=("key_id", "verify_key", "ts_valid_until_ms"),
                 ),
-                value_values=[
-                    (
-                        from_server,
-                        ts_added_ms,
-                        fetch_result.valid_until_ts,
-                        db_binary_type(fetch_result.verify_key.encode()),
-                    )
-                    for fetch_result in verify_keys.values()
-                ],
             )
-
-            self.db_pool.simple_upsert_many_txn(
-                txn,
-                table="server_keys_json",
-                key_names=("server_name", "key_id", "from_server"),
-                key_values=[
-                    (server_name, key_id, from_server) for key_id in verify_keys
-                ],
-                value_names=(
-                    "ts_added_ms",
-                    "ts_valid_until_ms",
-                    "key_json",
-                ),
-                value_values=[
-                    (
-                        ts_added_ms,
-                        fetch_result.valid_until_ts,
-                        db_binary_type(key_json_bytes),
-                    )
-                    for fetch_result in verify_keys.values()
-                ],
-            )
-
-            # invalidate takes a tuple corresponding to the params of
-            # _get_server_keys_json. _get_server_keys_json only takes one
-            # param, which is itself the 2-tuple (server_name, key_id).
-            #
-            # Invalidate the local cache directly, but we can only send
-            # primitive types per argument over replication, so JSON-encode the
-            # nested key and unpack it on the receiving side (see
-            # `CacheInvalidationWorkerStore.process_replication_rows`).
-            for key_id in verify_keys:
-                txn.call_after(
-                    self._get_server_keys_json.invalidate,
-                    ((server_name, key_id),),
+            existing_key_map = {
+                key_id: FetchKeyResult(
+                    verify_key=decode_verify_key_bytes(key_id, bytes(v_key)),
+                    valid_until_ts=ts_valid_until_ms,
                 )
-            self._send_invalidation_to_replication_bulk(
-                txn,
-                self._get_server_keys_json.__name__,
-                [(json.dumps([server_name, key_id]),) for key_id in verify_keys],
-            )
-            self._invalidate_cache_and_stream_bulk(
-                txn,
-                self.get_server_key_json_for_remote,
-                [(server_name, key_id) for key_id in verify_keys],
-            )
+                for key_id, v_key, ts_valid_until_ms in existing_rows
+            }
 
-        await self.db_pool.runInteraction(
+            final_keys: dict[str, FetchKeyResult] = dict(verify_keys)
+            keys_to_persist: dict[str, FetchKeyResult] = dict(verify_keys)
+
+            for key_id, existing_result in existing_key_map.items():
+                candidate = verify_keys.get(key_id)
+                if candidate is None:
+                    continue
+                if candidate.verify_key.encode() != existing_result.verify_key.encode():
+                    logger.warning(
+                        "MSC4499: key ID collision for %s %s -- retaining original "
+                        "key body (First Seen Wins). cached_sha256=%s new_sha256=%s",
+                        server_name,
+                        key_id,
+                        hashlib.sha256(existing_result.verify_key.encode()).hexdigest(),
+                        hashlib.sha256(candidate.verify_key.encode()).hexdigest(),
+                    )
+                    final_keys[key_id] = existing_result
+                    keys_to_persist.pop(key_id, None)
+
+            if keys_to_persist:
+                self.db_pool.simple_upsert_many_txn(
+                    txn,
+                    table="server_signature_keys",
+                    key_names=("server_name", "key_id"),
+                    key_values=[(server_name, key_id) for key_id in keys_to_persist],
+                    value_names=(
+                        "from_server",
+                        "ts_added_ms",
+                        "ts_valid_until_ms",
+                        "verify_key",
+                    ),
+                    value_values=[
+                        (
+                            from_server,
+                            ts_added_ms,
+                            fetch_result.valid_until_ts,
+                            db_binary_type(fetch_result.verify_key.encode()),
+                        )
+                        for fetch_result in keys_to_persist.values()
+                    ],
+                )
+
+                self.db_pool.simple_upsert_many_txn(
+                    txn,
+                    table="server_keys_json",
+                    key_names=("server_name", "key_id", "from_server"),
+                    key_values=[
+                        (server_name, key_id, from_server) for key_id in keys_to_persist
+                    ],
+                    value_names=(
+                        "ts_added_ms",
+                        "ts_valid_until_ms",
+                        "key_json",
+                    ),
+                    value_values=[
+                        (
+                            ts_added_ms,
+                            fetch_result.valid_until_ts,
+                            db_binary_type(key_json_bytes),
+                        )
+                        for fetch_result in keys_to_persist.values()
+                    ],
+                )
+
+                for key_id in keys_to_persist:
+                    txn.call_after(
+                        self._get_server_keys_json.invalidate,
+                        ((server_name, key_id),),
+                    )
+                self._send_invalidation_to_replication_bulk(
+                    txn,
+                    self._get_server_keys_json.__name__,
+                    [
+                        (json.dumps([server_name, key_id]),)
+                        for key_id in keys_to_persist
+                    ],
+                )
+                self._invalidate_cache_and_stream_bulk(
+                    txn,
+                    self.get_server_key_json_for_remote,
+                    [(server_name, key_id) for key_id in keys_to_persist],
+                )
+
+            return final_keys
+
+        return await self.db_pool.runInteraction(
             "store_server_keys_response", store_server_keys_response_txn
         )
 

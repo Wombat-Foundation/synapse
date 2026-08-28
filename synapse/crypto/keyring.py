@@ -20,7 +20,6 @@
 #
 
 import abc
-import hashlib
 import logging
 from contextlib import ExitStack
 from http import HTTPStatus
@@ -754,47 +753,18 @@ class BaseV2KeyFetcher(KeyFetcher):
                 )
 
         # MSC4499 First Seen Wins: a key ID (algorithm:key_id) is a permanent
-        # 1:1 binding to a key body once observed. If this response claims a
-        # *different* body for a key ID we've already bound, the original
-        # binding remains authoritative -- retain it, reject the new one,
-        # and log the collision loudly. Crucially, a rejected key ID is
-        # dropped from what we persist below: the response's own
-        # response_json (which `store_server_keys_response` also caches, for
-        # notary re-serving) must never overwrite the record for that key ID
-        # with data derived from the rejected body.
-        existing_keys = await self.store.get_existing_verify_keys(
-            server_name, list(verify_keys.keys())
+        # 1:1 binding to a key body once observed. `store_server_keys_response`
+        # enforces this atomically inside the database transaction: if a colliding
+        # key ID has already been persisted (either previously or concurrently),
+        # the original binding is retained, the colliding candidate is dropped,
+        # and the authoritative keys are returned to the caller.
+        return await self.store.store_server_keys_response(
+            server_name=server_name,
+            from_server=from_server,
+            ts_added_ms=time_added_ms,
+            verify_keys=verify_keys,
+            response_json=response_json,
         )
-        keys_to_store = dict(verify_keys)
-        for key_id, existing_result in existing_keys.items():
-            candidate = verify_keys.get(key_id)
-            if candidate is None:
-                continue
-            if candidate.verify_key.encode() != existing_result.verify_key.encode():
-                logger.warning(
-                    "MSC4499: key ID collision for %s %s -- retaining original "
-                    "key body (First Seen Wins). cached_sha256=%s new_sha256=%s",
-                    server_name,
-                    key_id,
-                    hashlib.sha256(existing_result.verify_key.encode()).hexdigest(),
-                    hashlib.sha256(candidate.verify_key.encode()).hexdigest(),
-                )
-                # Return the retained original to the caller (so signature
-                # verification against this key ID still uses the correct
-                # body), but don't persist the rejected candidate.
-                verify_keys[key_id] = existing_result
-                del keys_to_store[key_id]
-
-        if keys_to_store:
-            await self.store.store_server_keys_response(
-                server_name=server_name,
-                from_server=from_server,
-                ts_added_ms=time_added_ms,
-                verify_keys=keys_to_store,
-                response_json=response_json,
-            )
-
-        return verify_keys
 
 
 class PerspectivesKeyFetcher(BaseV2KeyFetcher):
