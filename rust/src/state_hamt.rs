@@ -211,7 +211,7 @@ fn build_typed_root_nodes_and_lattice(
 }
 
 #[must_use]
-pub(crate) fn room_structural_key_raw(server_secret: &[u8; 32], room_id: &str) -> [u8; 32] {
+pub fn room_structural_key_raw(server_secret: &[u8; 32], room_id: &str) -> [u8; 32] {
     let mut mac =
         <HmacSha256 as Mac>::new_from_slice(server_secret).expect("HMAC can take key of any size");
     mac.update(room_id.as_bytes());
@@ -231,7 +231,7 @@ pub(crate) fn room_structural_key_raw(server_secret: &[u8; 32], room_id: &str) -
 /// (the official per-room-version marker) rather than comparing version
 /// numbers, since which versions get hash-based room IDs is not simply "v12
 /// and above" (e.g. experimental/Hydra versions).
-pub(crate) fn room_tikv_prefix_raw(
+pub fn room_tikv_prefix_raw(
     server_secret: &[u8; 32],
     room_id: &str,
     msc4291_room_ids_as_hashes: bool,
@@ -285,7 +285,7 @@ fn collect_persisted_nodes(
     nodes.push((persisted.structural_hash, persisted.encode_v1()));
 }
 
-pub(crate) fn build_root_handle_and_nodes(
+pub fn build_root_handle_and_nodes(
     server_secret: &[u8; 32],
     room_id: &str,
     entries: Vec<(String, String, String)>,
@@ -301,7 +301,7 @@ pub(crate) fn build_root_handle_and_nodes(
 /// digest — so a caller can later apply incremental updates against this
 /// root via [`apply_flat_state_updates_impl`] without recomputing the
 /// lattice from scratch. See docs/development-gg/persistent-typed-hamt-architecture.md.
-fn build_root_handle_nodes_and_lattice(
+pub fn build_root_handle_nodes_and_lattice(
     server_secret: &[u8; 32],
     room_id: &str,
     entries: Vec<(String, String, String)>,

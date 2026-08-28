@@ -110,42 +110,76 @@ class KeyStore(CacheInvalidationWorkerStore):
             # Query existing keys inside this transaction to detect any concurrent
             # write that committed before this transaction began.
             existing_rows = cast(
-                list[tuple[str, bytes | memoryview, int]],
+                list[tuple[str, bytes | memoryview, int, str]],
                 self.db_pool.simple_select_many_txn(
                     txn,
                     table="server_signature_keys",
                     column="key_id",
                     iterable=list(verify_keys.keys()),
                     keyvalues={"server_name": server_name},
-                    retcols=("key_id", "verify_key", "ts_valid_until_ms"),
+                    retcols=(
+                        "key_id",
+                        "verify_key",
+                        "ts_valid_until_ms",
+                        "from_server",
+                    ),
                 ),
             )
             existing_key_map = {
-                key_id: FetchKeyResult(
-                    verify_key=decode_verify_key_bytes(key_id, bytes(v_key)),
-                    valid_until_ts=ts_valid_until_ms,
+                key_id: (
+                    FetchKeyResult(
+                        verify_key=decode_verify_key_bytes(key_id, bytes(v_key)),
+                        valid_until_ts=ts_valid_until_ms,
+                    ),
+                    existing_from_server,
                 )
-                for key_id, v_key, ts_valid_until_ms in existing_rows
+                for key_id, v_key, ts_valid_until_ms, existing_from_server in existing_rows
             }
 
             final_keys: dict[str, FetchKeyResult] = dict(verify_keys)
             keys_to_persist: dict[str, FetchKeyResult] = dict(verify_keys)
 
-            for key_id, existing_result in existing_key_map.items():
+            for (
+                key_id,
+                (existing_result, existing_from_server),
+            ) in existing_key_map.items():
                 candidate = verify_keys.get(key_id)
                 if candidate is None:
                     continue
                 if candidate.verify_key.encode() != existing_result.verify_key.encode():
-                    logger.warning(
-                        "MSC4499: key ID collision for %s %s -- retaining original "
-                        "key body (First Seen Wins). cached_sha256=%s new_sha256=%s",
-                        server_name,
-                        key_id,
-                        hashlib.sha256(existing_result.verify_key.encode()).hexdigest(),
-                        hashlib.sha256(candidate.verify_key.encode()).hexdigest(),
-                    )
-                    final_keys[key_id] = existing_result
-                    keys_to_persist.pop(key_id, None)
+                    # MSC4499 Two-Tier Binding: A direct fetch from the origin server
+                    # (`from_server == server_name`) overrides a provisional binding
+                    # learned from a notary (`existing_from_server != server_name`).
+                    if (
+                        existing_from_server != server_name
+                        and from_server == server_name
+                    ):
+                        logger.warning(
+                            "MSC4499: overriding provisional notary binding for %s %s with "
+                            "direct origin fetch. notary_from=%s cached_sha256=%s new_sha256=%s",
+                            server_name,
+                            key_id,
+                            existing_from_server,
+                            hashlib.sha256(
+                                existing_result.verify_key.encode()
+                            ).hexdigest(),
+                            hashlib.sha256(candidate.verify_key.encode()).hexdigest(),
+                        )
+                        # Candidate is retained in final_keys and keys_to_persist
+                    else:
+                        # Standard First Seen Wins (direct-vs-direct or notary-vs-notary):
+                        logger.warning(
+                            "MSC4499: key ID collision for %s %s -- retaining original "
+                            "key body (First Seen Wins). cached_sha256=%s new_sha256=%s",
+                            server_name,
+                            key_id,
+                            hashlib.sha256(
+                                existing_result.verify_key.encode()
+                            ).hexdigest(),
+                            hashlib.sha256(candidate.verify_key.encode()).hexdigest(),
+                        )
+                        final_keys[key_id] = existing_result
+                        keys_to_persist.pop(key_id, None)
 
             if keys_to_persist:
                 self.db_pool.simple_upsert_many_txn(
