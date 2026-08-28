@@ -34,7 +34,7 @@ if [ -n "$NETWORK" ]; then
 	NETWORK_ARGS=(--network "$NETWORK")
 fi
 
-docker run -d --name pd "${NETWORK_ARGS[@]}" --ulimit nofile=1048576:1048576 -p 2379:2379 pingcap/pd:latest \
+docker run -d --name pd "${NETWORK_ARGS[@]}" --tmpfs /data:rw,noexec,nosuid,size=1g --ulimit nofile=1048576:1048576 -p 2379:2379 pingcap/pd:latest \
 	--name=pd \
 	--client-urls=http://0.0.0.0:2379 \
 	--advertise-client-urls=http://$ADVERTISE_PD:2379 \
@@ -59,7 +59,7 @@ if [ "$leader_found" -ne 1 ]; then
 fi
 
 # shellcheck disable=SC2086 # NETWORK_ARGS is intentionally two words (--network <name>)
-docker run -d --name tikv "${NETWORK_ARGS[@]}" --ulimit nofile=1048576:1048576 -p 20160:20160 pingcap/tikv:latest \
+docker run -d --name tikv "${NETWORK_ARGS[@]}" --tmpfs /data:rw,noexec,nosuid,size=2g --ulimit nofile=1048576:1048576 -p 20160:20160 pingcap/tikv:latest \
 	--addr=0.0.0.0:20160 \
 	--advertise-addr=$ADVERTISE_TIKV:20160 \
 	--data-dir=/data \
