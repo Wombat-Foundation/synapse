@@ -2040,4 +2040,98 @@ mod tests {
         assert!(unreachable.contains(&orphan_root_hash.to_vec()));
         assert!(!unreachable.contains(&live_root_hash.to_vec()));
     }
+
+    #[test]
+    fn multi_room_selective_lookup_divergent_shapes() {
+        let server_secret = [33u8; 32];
+        let room_id_1 = "!room1:test.example";
+        let room_id_2 = "!room2:test.example";
+        let key_1 = room_structural_key_raw(&server_secret, room_id_1);
+        let key_2 = room_structural_key_raw(&server_secret, room_id_2);
+
+        // Room 1: 50 member events (deep tree) + room name
+        let mut entries_1 = vec![("m.room.name".to_owned(), "".to_owned(), "$name1".to_owned())];
+        for i in 0..50 {
+            entries_1.push((
+                "m.room.member".to_owned(),
+                format!("@user{i}:test.example"),
+                format!("$event_1_{i}"),
+            ));
+        }
+
+        // Room 2: different types (topic, join_rules, power_levels)
+        let entries_2 = vec![
+            (
+                "m.room.topic".to_owned(),
+                "".to_owned(),
+                "$topic2".to_owned(),
+            ),
+            (
+                "m.room.join_rules".to_owned(),
+                "".to_owned(),
+                "$rules2".to_owned(),
+            ),
+            (
+                "m.room.power_levels".to_owned(),
+                "".to_owned(),
+                "$power2".to_owned(),
+            ),
+        ];
+
+        let ((root_hash_1, _), nodes_1) =
+            build_root_handle_and_nodes(&server_secret, room_id_1, entries_1).unwrap();
+        let ((root_hash_2, _), nodes_2) =
+            build_root_handle_and_nodes(&server_secret, room_id_2, entries_2).unwrap();
+
+        // Shared multi-room node map (simulating the shared node cache/fetcher)
+        let mut combined_nodes: HashMap<StructuralHash, Arc<HamtNode<String, String>>> =
+            HashMap::new();
+        for (h, node_bytes) in nodes_1.into_iter().chain(nodes_2) {
+            let node = decode_persisted_node(&node_bytes).unwrap();
+            combined_nodes.insert(h, node);
+        }
+
+        // 1. Look up m.room.member @user25:test.example in Room 1
+        let query_1 = vec![(
+            "m.room.member".to_owned(),
+            "@user25:test.example".to_owned(),
+        )];
+        let (found_1, missing_1) =
+            lookup_from_node_map(&root_hash_1, &key_1, &query_1, &combined_nodes).unwrap();
+        assert!(missing_1.is_empty());
+        assert_eq!(
+            found_1,
+            vec![(
+                "m.room.member".to_owned(),
+                "@user25:test.example".to_owned(),
+                "$event_1_25".to_owned()
+            )]
+        );
+
+        // 2. Look up m.room.topic and m.room.power_levels in Room 2
+        let query_2 = vec![
+            ("m.room.topic".to_owned(), "".to_owned()),
+            ("m.room.power_levels".to_owned(), "".to_owned()),
+        ];
+        let (found_2, missing_2) =
+            lookup_from_node_map(&root_hash_2, &key_2, &query_2, &combined_nodes).unwrap();
+        assert!(missing_2.is_empty());
+        assert_eq!(found_2.len(), 2);
+        assert!(found_2.contains(&(
+            "m.room.topic".to_owned(),
+            "".to_owned(),
+            "$topic2".to_owned()
+        )));
+        assert!(found_2.contains(&(
+            "m.room.power_levels".to_owned(),
+            "".to_owned(),
+            "$power2".to_owned()
+        )));
+
+        // 3. Verify cross-room isolation: Querying room 2 for room 1's key returns empty
+        let (found_isolated, missing_isolated) =
+            lookup_from_node_map(&root_hash_2, &key_2, &query_1, &combined_nodes).unwrap();
+        assert!(missing_isolated.is_empty());
+        assert!(found_isolated.is_empty());
+    }
 }

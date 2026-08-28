@@ -380,6 +380,46 @@ class StateStoreTestCase(HomeserverTestCase):
             str(failure.value),
         )
 
+    def test_multi_group_selective_lookup_real_tikv(self) -> None:
+        """Verify multi-group selective lookup against real TiKV with multiple divergent rooms."""
+        if not self.state_datastore.tikv_pd_endpoints:
+            self.skipTest("Requires TiKV -- set SYNAPSE_TEST_TIKV_PD_ENDPOINTS to run")
+
+        # Create room 1 with Create and Name events
+        event1 = self.inject_state_event(
+            self.room, self.u_alice, EventTypes.Create, "", {}
+        )
+        sg1 = self.get_success(self.store._get_state_group_for_event(event1.event_id))
+        event2 = self.inject_state_event(
+            self.room, self.u_alice, EventTypes.Name, "", {"name": "Room 1 Name"}
+        )
+        sg2 = self.get_success(self.store._get_state_group_for_event(event2.event_id))
+
+        # Create room 2 with Create and Topic events
+        room2 = RoomID.from_string("!room2:test")
+        self.inject_state_event(room2, self.u_alice, EventTypes.Create, "", {})
+        event3 = self.inject_state_event(
+            room2, self.u_alice, EventTypes.Topic, "", {"topic": "Room 2 Topic"}
+        )
+        sg3 = self.get_success(self.store._get_state_group_for_event(event3.event_id))
+        assert sg1 is not None and sg2 is not None and sg3 is not None
+
+        # Look up m.room.name across all three state groups
+        state_filter = StateFilter.from_types([(EventTypes.Name, "")])
+        res = self.get_success(
+            self.storage.state.stores.state._get_state_groups_from_groups(
+                [sg1, sg2, sg3], state_filter
+            )
+        )
+        self.assertEqual(
+            res,
+            {
+                sg1: {},
+                sg2: {(EventTypes.Name, ""): event2.event_id},
+                sg3: {},
+            },
+        )
+
     def test_prefetch_tikv_hamt_blocking_missing_child_raises(self) -> None:
         """Verify that _prefetch_tikv_hamt_blocking raises RuntimeError on missing child nodes."""
         from unittest.mock import patch
