@@ -285,7 +285,7 @@ fn collect_persisted_nodes(
     nodes.push((persisted.structural_hash, persisted.encode_v1()));
 }
 
-pub fn build_root_handle_and_nodes(
+pub(crate) fn build_root_handle_and_nodes(
     server_secret: &[u8; 32],
     room_id: &str,
     entries: Vec<(String, String, String)>,
@@ -301,7 +301,7 @@ pub fn build_root_handle_and_nodes(
 /// digest — so a caller can later apply incremental updates against this
 /// root via [`apply_flat_state_updates_impl`] without recomputing the
 /// lattice from scratch. See docs/development-gg/persistent-typed-hamt-architecture.md.
-pub fn build_root_handle_nodes_and_lattice(
+fn build_root_handle_nodes_and_lattice(
     server_secret: &[u8; 32],
     room_id: &str,
     entries: Vec<(String, String, String)>,

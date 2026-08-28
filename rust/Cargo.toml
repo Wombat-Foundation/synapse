@@ -74,3 +74,8 @@ rezzy = { git = "https://github.com/gamesguru/rezzy.git", rev = "3916d64b0c67cb4
 blake2 = "0.10.4"
 hex = "0.4.3"
 rustc_version = "0.4.1"
+
+[[bench]]
+name = "state_hamt"
+path = "benches/state_hamt.rs"
+harness = false
