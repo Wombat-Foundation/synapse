@@ -110,7 +110,16 @@ with open('/sytest/lib/SyTest/Homeserver/Synapse.pm', 'r') as f:
 
 anchor = '        databases => \\%db_configs,'
 injection = '''        databases => \\%db_configs,
-        ( defined $ENV{SYNAPSE_KEY_FETCH_BACKOFF_FLOOR} ? ( key_fetch_backoff_floor => $ENV{SYNAPSE_KEY_FETCH_BACKOFF_FLOOR} ) : () ),
+        # SyTest deliberately fires rapid-succession failure/retry scenarios
+        # (e.g. tests/50federation/01keys.pl) against the same reused fake
+        # federation server within a single test file. MSC4499's negative-cache
+        # backoff for key fetches (see KeyFetchBackoffCache in
+        # synapse/crypto/keyring.py) would otherwise make a later, unrelated
+        # test in the same file see a stale backoff window and fail fast
+        # instead of attempting its fetch. Force the floor to 0s so this
+        # doesn't leak between tests; override via SYNAPSE_KEY_FETCH_BACKOFF_FLOOR
+        # if a test specifically wants to exercise backoff behaviour.
+        key_fetch_backoff_floor => ( $ENV{SYNAPSE_KEY_FETCH_BACKOFF_FLOOR} // "0s" ),
         ( do {
             my @ep = grep { length } map { s/^\\s+|\\s+$//gr } split /,/, ( $ENV{SYNAPSE_TIKV_PD_ENDPOINTS} // '' );
             @ep ? ( tikv => { pd_endpoints => \\@ep } ) : ();
