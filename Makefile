@@ -13,18 +13,17 @@ STYLE_RESET := $(shell tput sgr0 2>/dev/null || echo -e "\033[0m")
 format: ##H Format with ruff
 	uv run ruff format .
 	uv run ruff check --fix .
-	cargo fmt
+	cargo +nightly fmt
 
 .PHONY: lint
 lint: ##H Lint the code with mypy
 	uv run mypy
 	cargo clippy --all-targets --all-features
-
 p ?=
 
 .PHONY: test
 test: ##H Run tests, e.g., on tests/storage/
-	cargo test
+	cargo +nightly test
 	uv run trial $(p)
 
 .PHONY: build

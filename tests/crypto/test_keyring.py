@@ -579,7 +579,8 @@ class ServerKeyFetcherTestCase(unittest.HomeserverTestCase):
         # Backoff state should now be cleared: an immediate subsequent
         # attempt is allowed through (not fast-failed) even though we're
         # nowhere near a full interval since the successful fetch.
-        self.assertTrue(fetcher._backoff.should_attempt(SERVER_NAME))
+        # The successful fetch must remove the server's backoff entry.
+        self.assertNotIn(SERVER_NAME, fetcher._backoff._backoff)
 
     def test_first_seen_wins_rejects_colliding_key_body(self) -> None:
         """MSC4499 First Seen Wins: a second, self-signed-valid response that

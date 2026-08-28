@@ -618,7 +618,7 @@ class DatabasePool:
             server_name=self.server_name,
         )
 
-        self._tikv_namespace: str | None = (
+        self._tikv_namespace: str | None = hs.config.database.tikv_namespace
             hs.config.database.tikv_namespace
             if hasattr(hs.config, "database")
             else None
