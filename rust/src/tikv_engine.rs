@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use lru::LruCache;
 use once_cell::sync::OnceCell;
 use pyo3::prelude::*;
 use rezzy::hamt::{HamtNode, StructuralHash};
@@ -15,6 +17,24 @@ use crate::state_hamt::{decode_persisted_node, materialize_from_node_map};
 static RUNTIME: OnceCell<Runtime> = OnceCell::new();
 static CLIENT: OnceCell<RawClient> = OnceCell::new();
 static TX_CLIENT: OnceCell<TransactionClient> = OnceCell::new();
+
+/// Process-wide in-memory cache of decoded HAMT nodes, keyed by their full
+/// (namespaced, room-prefixed) TiKV key. HAMT nodes are immutable and
+/// content-addressed, so a cache hit is always correct -- there is no
+/// invalidation to get wrong, only a possible network round-trip saved.
+/// Sized generously (each node is small) since it's shared across every
+/// room and state group this process serves.
+const NODE_CACHE_CAPACITY: usize = 100_000;
+type NodeCache = Mutex<LruCache<Vec<u8>, Arc<HamtNode<String, String>>>>;
+static NODE_CACHE: OnceCell<NodeCache> = OnceCell::new();
+
+fn node_cache() -> &'static NodeCache {
+    NODE_CACHE.get_or_init(|| {
+        Mutex::new(LruCache::new(
+            NonZeroUsize::new(NODE_CACHE_CAPACITY).expect("cache capacity is nonzero"),
+        ))
+    })
+}
 const READINESS_PROBE_VALUE: &[u8] = b"ok";
 static READINESS_PROBE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const OPEN_CLIENT_ATTEMPTS: u32 = 5;
@@ -451,7 +471,33 @@ async fn materialize_state_hamt_async(
     while !to_fetch.is_empty() {
         let current_batch: Vec<StructuralHash> = to_fetch.drain().collect();
 
-        for chunk in current_batch.chunks(NODE_FETCH_BATCH_SIZE) {
+        // Serve whatever we can from the in-memory node cache first. A hit
+        // here is always correct (see `NODE_CACHE`) and saves a TiKV
+        // round-trip entirely; children of a cached node are queued for the
+        // next round, where they'll again be checked against the cache
+        // before any network access.
+        let mut still_missing = Vec::with_capacity(current_batch.len());
+        {
+            let mut cache = node_cache().lock().unwrap();
+            for hash in current_batch {
+                let key = node_tikv_key(namespace, room_prefix, &hash);
+                match cache.get(&key) {
+                    Some(node) => {
+                        let node = node.clone();
+                        for child in &node.children {
+                            let child_hash = child.structural_hash();
+                            if seen.insert(child_hash) {
+                                to_fetch.insert(child_hash);
+                            }
+                        }
+                        node_map.insert(hash, node);
+                    }
+                    None => still_missing.push(hash),
+                }
+            }
+        }
+
+        for chunk in still_missing.chunks(NODE_FETCH_BATCH_SIZE) {
             let keys: Vec<Vec<u8>> = chunk
                 .iter()
                 .map(|hash| node_tikv_key(namespace, room_prefix, hash))
@@ -467,7 +513,8 @@ async fn materialize_state_hamt_async(
             }
 
             for pair in rows {
-                let (_, node_bytes): (tikv_client::Key, tikv_client::Value) = pair.into();
+                let (key, node_bytes): (tikv_client::Key, tikv_client::Value) = pair.into();
+                let key: Vec<u8> = key.into();
                 // We fetched by exact key per hash, so re-derive which hash this
                 // row belongs to by decoding the node itself rather than trusting
                 // key-order (TiKV batch_get does not guarantee response order).
@@ -481,6 +528,7 @@ async fn materialize_state_hamt_async(
                     }
                 }
 
+                node_cache().lock().unwrap().put(key, node.clone());
                 node_map.insert(hash, node);
             }
         }
@@ -509,7 +557,30 @@ async fn materialize_state_hamts_async(
     while !to_fetch.is_empty() {
         let current_batch: Vec<NodeLocation> = to_fetch.drain().collect();
 
-        for chunk in current_batch.chunks(NODE_FETCH_BATCH_SIZE) {
+        // See the comment in `materialize_state_hamt_async`: serve cached
+        // nodes first, only hitting TiKV for what's genuinely missing.
+        let mut still_missing = Vec::with_capacity(current_batch.len());
+        {
+            let mut cache = node_cache().lock().unwrap();
+            for (room_prefix, hash) in current_batch {
+                let key = node_tikv_key(namespace, &room_prefix, &hash);
+                match cache.get(&key) {
+                    Some(node) => {
+                        let node = node.clone();
+                        for child in &node.children {
+                            let child_location = (room_prefix, child.structural_hash());
+                            if seen.insert(child_location) {
+                                to_fetch.insert(child_location);
+                            }
+                        }
+                        node_map.insert((room_prefix, hash), node);
+                    }
+                    None => still_missing.push((room_prefix, hash)),
+                }
+            }
+        }
+
+        for chunk in still_missing.chunks(NODE_FETCH_BATCH_SIZE) {
             let key_to_location: HashMap<Vec<u8>, NodeLocation> = chunk
                 .iter()
                 .map(|(room_prefix, hash)| {
@@ -549,21 +620,33 @@ async fn materialize_state_hamts_async(
                     }
                 }
 
+                node_cache().lock().unwrap().put(key, node.clone());
                 node_map.insert((room_prefix, expected_hash), node);
             }
         }
     }
 
+    let mut nodes_by_prefix: HashMap<
+        [u8; ROOM_PREFIX_LEN],
+        HashMap<StructuralHash, Arc<HamtNode<String, String>>>,
+    > = HashMap::new();
+    for ((room_prefix, hash), node) in node_map {
+        nodes_by_prefix
+            .entry(room_prefix)
+            .or_default()
+            .insert(hash, node);
+    }
+
     roots
         .into_iter()
         .map(|(room_prefix, root_hash)| {
-            let nodes = node_map
-                .iter()
-                .filter_map(|((node_prefix, hash), node)| {
-                    (*node_prefix == room_prefix).then_some((*hash, node.clone()))
-                })
-                .collect();
-            materialize_from_node_map(&root_hash, &nodes)
+            let nodes = nodes_by_prefix.get(&room_prefix).ok_or_else(|| {
+                format!(
+                    "Missing nodes for room prefix: {}",
+                    hex::encode(room_prefix)
+                )
+            })?;
+            materialize_from_node_map(&root_hash, nodes)
         })
         .collect()
 }
@@ -680,6 +763,31 @@ mod tests {
     fn prefix_scan_upper_bound_has_no_successor_for_all_ff_or_empty() {
         assert_eq!(prefix_scan_upper_bound(&[0xFF, 0xFF]), Vec::<u8>::new());
         assert_eq!(prefix_scan_upper_bound(&[]), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn node_cache_roundtrips_by_key() {
+        // Doesn't touch the process-wide static cache (that would race with
+        // other tests running in parallel); exercises the same LruCache type
+        // and key shape directly.
+        let mut cache: LruCache<Vec<u8>, Arc<HamtNode<String, String>>> =
+            LruCache::new(NonZeroUsize::new(4).unwrap());
+        // (matches the `NodeCache` value type used by the process-wide `node_cache()`)
+
+        let key = node_tikv_key("test-namespace", &[0u8; ROOM_PREFIX_LEN], &[0u8; 16]);
+        assert!(cache.get(&key).is_none());
+
+        let node = Arc::new(HamtNode {
+            datamap: 0,
+            nodemap: 0,
+            leaves: Vec::new(),
+            children: Vec::new(),
+            structural_hash: [0u8; 16],
+        });
+        cache.put(key.clone(), node.clone());
+
+        let cached = cache.get(&key).expect("node should be cached after put");
+        assert_eq!(cached.structural_hash, node.structural_hash);
     }
 
     #[test]
