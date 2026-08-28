@@ -21,8 +21,10 @@ static TX_CLIENT: OnceCell<TransactionClient> = OnceCell::new();
 
 /// Process-wide in-memory cache of decoded HAMT nodes, keyed by their full
 /// (namespaced, room-prefixed) TiKV key. HAMT nodes are immutable and
-/// content-addressed, so a cache hit is always correct -- there is no
-/// invalidation to get wrong, only a possible network round-trip saved.
+/// content-addressed. On a cache hit the caller verifies
+/// `node.structural_hash` matches the requested hash; a mismatch causes
+/// the entry to be evicted and re-fetched from TiKV as a defense-in-depth
+/// measure against corrupted or stale cache contents.
 /// Sized generously (each node is small) since it's shared across every
 /// room and state group this process serves.
 const NODE_CACHE_CAPACITY: usize = 100_000;
@@ -538,14 +540,19 @@ async fn materialize_state_hamt_async(
                 let key = node_tikv_key(namespace, room_prefix, &hash);
                 match cache.get(&key) {
                     Some(node) => {
-                        let node = node.clone();
-                        for child in &node.children {
-                            let child_hash = child.structural_hash();
-                            if seen.insert(child_hash) {
-                                to_fetch.insert(child_hash);
+                        if node.structural_hash != hash {
+                            cache.pop(&key);
+                            still_missing.push(hash);
+                        } else {
+                            let node = node.clone();
+                            for child in &node.children {
+                                let child_hash = child.structural_hash();
+                                if seen.insert(child_hash) {
+                                    to_fetch.insert(child_hash);
+                                }
                             }
+                            node_map.insert(hash, node);
                         }
-                        node_map.insert(hash, node);
                     }
                     None => still_missing.push(hash),
                 }
@@ -621,14 +628,19 @@ async fn materialize_state_hamts_async(
                 let key = node_tikv_key(namespace, &room_prefix, &hash);
                 match cache.get(&key) {
                     Some(node) => {
-                        let node = node.clone();
-                        for child in &node.children {
-                            let child_location = (room_prefix, child.structural_hash());
-                            if seen.insert(child_location) {
-                                to_fetch.insert(child_location);
+                        if node.structural_hash != hash {
+                            cache.pop(&key);
+                            still_missing.push((room_prefix, hash));
+                        } else {
+                            let node = node.clone();
+                            for child in &node.children {
+                                let child_location = (room_prefix, child.structural_hash());
+                                if seen.insert(child_location) {
+                                    to_fetch.insert(child_location);
+                                }
                             }
+                            node_map.insert((room_prefix, hash), node);
                         }
-                        node_map.insert((room_prefix, hash), node);
                     }
                     None => still_missing.push((room_prefix, hash)),
                 }
@@ -823,8 +835,13 @@ where
                 let key = node_tikv_key(namespace, &room_prefix, &hash);
                 match cache.get(&key) {
                     Some(node) => {
-                        let node = node.clone();
-                        node_map.insert((room_prefix, hash), node);
+                        if node.structural_hash != hash {
+                            cache.pop(&key);
+                            still_missing.push((room_prefix, hash));
+                        } else {
+                            let node = node.clone();
+                            node_map.insert((room_prefix, hash), node);
+                        }
                     }
                     None => still_missing.push((room_prefix, hash)),
                 }

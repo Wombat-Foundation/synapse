@@ -100,15 +100,16 @@ fn main() {
     {
         let mut backing_store: std::collections::HashMap<Vec<u8>, Vec<u8>> =
             std::collections::HashMap::new();
+        let start = Instant::now();
         let (root_hash, _sg, lattice_bytes, nodes) =
             build_root_handle_with_lattice(SERVER_SECRET.to_vec(), ROOM_ID, vec![entry(0)])
                 .expect("initial build should succeed");
+        let mut cumulative = start.elapsed().as_secs_f64();
         backing_store.extend(nodes);
         let mut root_hash = root_hash;
         let mut lattice_bytes = lattice_bytes;
 
         let mut checkpoint_idx = 0;
-        let mut cumulative = 0.0f64;
         let mut cumulative_node_reads = 0usize;
         for i in 1..S_MAX {
             let (event_type, state_key, event_id) = entry(i);

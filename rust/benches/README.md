@@ -29,10 +29,11 @@ call — an earlier draft that took the shortcut produced a *shrinking*
 speedup curve, the wrong signature for the claim it was supposed to verify).
 
 Uses `harness = false` with a hand-rolled `main()` (`std::time::Instant`,
-printed table) rather than the `criterion` crate. This matches `../rezzy`'s
-own bench style (`../../rezzy/benches/`) — despite having Criterion-shaped
-benchmark files, `rezzy` doesn't actually depend on the `criterion` crate
-either, so this avoids adding a new dependency for one bench file. If more
+printed table) rather than the `criterion` crate. This matches rezzy's
+own bench style ([`benches/db/cumulative_rebuild.rs`][rezzy-bench]) —
+despite having Criterion-shaped benchmark files, `rezzy` doesn't actually
+depend on the `criterion` crate either, so this avoids adding a new
+dependency for one bench file. If more
 benches accumulate here later and start wanting Criterion's statistical
 rigor (confidence intervals, regression detection against a saved baseline,
 HTML reports), reconsider then — don't add it speculatively now.
@@ -46,3 +47,5 @@ cargo bench --bench state_hamt
 Takes noticeably longer than the other two benches (tens of seconds): it
 does real cumulative work up to a state size of 4096 entries, not a single
 warmed-up hot loop.
+
+[rezzy-bench]: https://github.com/gamesguru/rezzy/blob/3916d64b0c67cb4cc9aa273939db9e76afbc40f1/benches/db/cumulative_rebuild.rs
