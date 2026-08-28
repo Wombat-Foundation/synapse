@@ -614,33 +614,36 @@ class StateStoreTestCase(HomeserverTestCase):
         assert sg1 is not None and sg2 is not None
 
         # Enable pure TiKV mode
-        self.state_datastore.tikv_pd_endpoints = ["127.0.0.1:2379"]
-        state_filter = StateFilter.from_types([(EventTypes.Name, "")])
+        self._enable_mock_tikv()
+        try:
+            state_filter = StateFilter.from_types([(EventTypes.Name, "")])
 
-        with patch.object(
-            self.state_datastore,
-            "_lookup_state_hamts_from_tikv_direct",
-            return_value=(
-                {
-                    sg1: [],
-                    sg2: [(EventTypes.Name, "", event2.event_id)],
-                },
-                [],
-            ),
-        ) as mock_batch_lookup:
-            res = self.get_success(
-                self.storage.state.stores.state._get_state_groups_from_groups(
-                    [sg1, sg2], state_filter
+            with patch.object(
+                self.state_datastore,
+                "_lookup_state_hamts_from_tikv_direct",
+                return_value=(
+                    {
+                        sg1: [],
+                        sg2: [(EventTypes.Name, "", event2.event_id)],
+                    },
+                    [],
+                ),
+            ) as mock_batch_lookup:
+                res = self.get_success(
+                    self.storage.state.stores.state._get_state_groups_from_groups(
+                        [sg1, sg2], state_filter
+                    )
                 )
-            )
-            mock_batch_lookup.assert_called_once()
-            self.assertEqual(
-                res,
-                {
-                    sg1: {},
-                    sg2: {(EventTypes.Name, ""): event2.event_id},
-                },
-            )
+                mock_batch_lookup.assert_called_once()
+                self.assertEqual(
+                    res,
+                    {
+                        sg1: {},
+                        sg2: {(EventTypes.Name, ""): event2.event_id},
+                    },
+                )
+        finally:
+            self.state_datastore.tikv_pd_endpoints = []
 
     def test_multi_group_exact_filter_under_pure_sql_shares_node_fetches(self) -> None:
         """SQL-mode mirror of test_multi_group_exact_filter_under_tikv_uses_batch_lookup:
@@ -649,6 +652,12 @@ class StateStoreTestCase(HomeserverTestCase):
         not the singular per-group SQL loop, and must return correct per-group
         results without mocking anything -- this exercises the real SQL HAMT
         node-sharing path end to end."""
+        if self.state_datastore.tikv_pd_endpoints:
+            # This test specifically exercises the pure-SQL HAMT path, which
+            # only applies when TiKV is not configured -- see the identical
+            # guard on test_state_group_hamt_corruption_does_not_fallback_to_sql.
+            self.skipTest("Not applicable when TiKV is configured")
+
         event1 = self.inject_state_event(
             self.room, self.u_alice, EventTypes.Create, "", {}
         )
