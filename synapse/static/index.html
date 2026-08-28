@@ -488,9 +488,7 @@
   <body>
     <div class="container">
       <header>
-        <div class="node-title" id="server-title">
-          Sithnapse (Synapse Dark)
-        </div>
+        <div class="node-title" id="server-title">Sithnapse (Synapse Dark)</div>
         <div class="node-status">
           <span class="status-dot"></span>
           <span id="node-status-text">NODE ACTIVE</span>
@@ -561,7 +559,6 @@
 
       <!-- Admin Token Synchronization Bar -->
       <div class="sync-bar" id="sync-container" style="display: none">
-      <div class="sync-bar" id="sync-container" style="display: none">
         <label for="admin-token-input">⚡ ADMIN DB PROBE:</label>
         <input
           type="password"
@@ -572,7 +569,11 @@
         <button type="button" class="sync-btn" onclick="saveAdminToken()">
           SYNC STATS
         </button>
-        <button type="button" class="sync-toggle-btn" onclick="clearAdminToken()">
+        <button
+          type="button"
+          class="sync-toggle-btn"
+          onclick="clearAdminToken()"
+        >
           CLEAR
         </button>
       </div>
@@ -945,8 +946,6 @@
         }
       }
 
-      measureTelemetry();
-      document.addEventListener("visibilitychange", () => {
       measureTelemetry();
       // Refresh only while the tab is visible, and at a low frequency.
       setInterval(() => {
