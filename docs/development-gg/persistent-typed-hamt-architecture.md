@@ -45,6 +45,38 @@ A brand-new state imported from a flat map necessarily costs O(S) — that's an
 information lower bound (every entry must be read at least once), not a
 storage-engine failure to fix.
 
+**Empirical validation:** the "one state-key update" row above is no longer
+just a target — `rust/src/state_hamt.rs`'s `apply_flat_state_updates` is the
+persistent update API described in [Update and write
+workflow](#update-and-write-workflow) below, and `rust/benches/state_hamt.rs`
+measures it directly against full-map rebuild (`build_root_handle_with_lattice`)
+over a cumulative build from an empty room to 4096 entries (see that file's
+module doc for methodology, and `rust/benches/README.md` for how to run it).
+Results (single run, debug workstation, not a controlled benchmark
+environment — treat the *shape*, not the absolute numbers, as the claim):
+
+| state size (S) | full rebuild (cumulative) | incremental apply (cumulative) | speedup | cumulative node reads |
+|-----------------|---------------------------:|---------------------------------:|--------:|------------------------:|
+| 16              | 1.2 ms                     | 0.3 ms                           | 4.0×    | 16                       |
+| 64              | 17.3 ms                    | 1.5 ms                           | 11.4×   | 90                       |
+| 256             | 270.0 ms                   | 5.6 ms                           | 48.4×   | 454                      |
+| 1024            | 4353.9 ms                  | 25.5 ms                          | 171.0×  | 2098                     |
+| 2048            | 17685.7 ms                 | 54.9 ms                          | 321.9×  | 4587                     |
+| 4096            | 70661.1 ms                 | 113.0 ms                         | 625.4×  | 10299                    |
+
+The speedup *grows* with S rather than converging to a constant, which is the
+actual signature of O(K log S) beating O(S) rather than just "a faster
+constant factor." Cumulative node reads track the prediction closely: 4096
+single-key updates against a HAMT with branching factor 32 predicts
+`4096 * log₃₂(4096) ≈ 9830` total node reads if each update only ever touches
+its own root-to-leaf path; the measured 10299 is within ~5% of that, with the
+gap attributable to typed-directory/root overhead and updates that happen to
+land near trie boundaries. This node-read count matters as much as the
+wall-clock number: it's what the bench's fetch-on-demand loop actually forces
+`apply_flat_state_updates` to request from a backing store standing in for
+SQL/TiKV, so it's a direct measurement of "how many storage round-trips does
+one state update really cost," not just a CPU-bound proxy for it.
+
 ## Core representation
 
 The typed persistent root is the preferred physical representation:
