@@ -1168,8 +1168,6 @@ mod tests {
 
     #[tokio::test]
     async fn lookup_state_hamts_core_coalesces_multi_room_bfs() {
-        use std::sync::atomic::AtomicUsize;
-
         use crate::state_hamt::{build_root_handle_and_nodes, room_structural_key_raw};
 
         let namespace = "test_coalescing_ns";
@@ -1222,7 +1220,7 @@ mod tests {
             node_storage.insert(node_tikv_key(namespace, &prefix_2, &h), bytes);
         }
 
-        let batch_count = Arc::new(AtomicUsize::new(0));
+        let recorded_batches: Arc<Mutex<Vec<Vec<Vec<u8>>>>> = Arc::new(Mutex::new(Vec::new()));
         let storage = Arc::new(node_storage);
 
         let queries = vec![
@@ -1243,11 +1241,11 @@ mod tests {
             ),
         ];
 
-        let batch_count_clone = Arc::clone(&batch_count);
+        let recorded_clone = Arc::clone(&recorded_batches);
         let storage_clone = Arc::clone(&storage);
 
         let results = lookup_state_hamts_core(namespace, queries, move |keys| {
-            batch_count_clone.fetch_add(1, Ordering::SeqCst);
+            recorded_clone.lock().unwrap().push(keys.clone());
             let s = Arc::clone(&storage_clone);
             async move {
                 let mut found = Vec::new();
@@ -1281,11 +1279,35 @@ mod tests {
             )]
         );
 
-        // 2. Assert that child node fetches across BOTH rooms were coalesced per BFS level
-        let total_batches = batch_count.load(Ordering::SeqCst);
-        assert!(
-            total_batches <= 2,
-            "Expected <= 2 coalesced batch RPCs (roots + child level), got {total_batches}"
+        // 2. Assert exact BFS round structure:
+        let batches = recorded_batches.lock().unwrap().clone();
+        assert_eq!(batches.len(), 2, "Expected exactly 2 BFS batch rounds");
+
+        // Round 0: Both roots requested together in 1 unified batch
+        let root_key_1 = node_tikv_key(namespace, &prefix_1, &root_hash_1);
+        let root_key_2 = node_tikv_key(namespace, &prefix_2, &root_hash_2);
+        assert_eq!(batches[0].len(), 2);
+        assert!(batches[0].contains(&root_key_1));
+        assert!(batches[0].contains(&root_key_2));
+
+        // Round 1: Missing child nodes across both rooms fetched in 1 unified batch
+        assert!(!batches[1].is_empty());
+        let prefix_stem_1 = format!(
+            "hamt:node:{}:{}:",
+            hex::encode(&Sha256::digest(namespace.as_bytes())[..16]),
+            hex::encode(prefix_1)
         );
+        let prefix_stem_2 = format!(
+            "hamt:node:{}:{}:",
+            hex::encode(&Sha256::digest(namespace.as_bytes())[..16]),
+            hex::encode(prefix_2)
+        );
+
+        for key in &batches[1] {
+            assert!(
+                key.starts_with(prefix_stem_1.as_bytes())
+                    || key.starts_with(prefix_stem_2.as_bytes())
+            );
+        }
     }
 }
