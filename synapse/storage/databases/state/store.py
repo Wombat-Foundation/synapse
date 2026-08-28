@@ -240,9 +240,26 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 )
                 existing_in_sql = {group for (group,) in existing_rows}
                 if existing_in_sql:
-                    raise RuntimeError(
-                        f"State group(s) {existing_in_sql} exist in SQL but have no TiKV HAMT root"
+                    state_rows = await self.db_pool.simple_select_many_batch(
+                        table="state_groups_state",
+                        column="state_group",
+                        iterable=existing_in_sql,
+                        retcols=("state_group",),
+                        desc="_get_state_groups_from_groups.check_missing_state",
                     )
+                    edge_rows = await self.db_pool.simple_select_many_batch(
+                        table="state_group_edges",
+                        column="state_group",
+                        iterable=existing_in_sql,
+                        retcols=("state_group",),
+                        desc="_get_state_groups_from_groups.check_missing_edges",
+                    )
+                    nonempty_groups = {group for (group,) in state_rows}
+                    nonempty_groups.update(group for (group,) in edge_rows)
+                    if nonempty_groups:
+                        raise RuntimeError(
+                            f"State group(s) {nonempty_groups} exist in SQL but have no TiKV HAMT root"
+                        )
                 for group in missing_groups:
                     tikv_results[group] = {}
 
