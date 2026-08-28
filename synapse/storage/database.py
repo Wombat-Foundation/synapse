@@ -618,6 +618,11 @@ class DatabasePool:
             server_name=self.server_name,
         )
 
+        self._tikv_namespace: str | None = (
+            hs.config.database.tikv_namespace
+            if hasattr(hs.config, "database")
+            else None
+        )
         self.updates = BackgroundUpdater(hs, self)
 
         self._previous_txn_total_time = 0.0

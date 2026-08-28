@@ -166,7 +166,24 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         hs: "HomeServer",
     ):
         super().__init__(database, db_conn, hs)
-        self.tikv_namespace = hs.config.database.tikv_namespace or hs.hostname
+        self._tikv_namespace_override: str | None = None
+
+    @property
+    def tikv_namespace(self) -> str:
+        if self._tikv_namespace_override is not None:
+            return self._tikv_namespace_override
+        db_pool_ns = getattr(self.db_pool, "_tikv_namespace", None)
+        if db_pool_ns:
+            return str(db_pool_ns)
+        return self.hs.config.database.tikv_namespace or self.hs.hostname
+
+    @tikv_namespace.setter
+    def tikv_namespace(self, value: str) -> None:
+        self._tikv_namespace_override = value
+        if hasattr(self, "db_pool") and self.db_pool is not None:
+            self.db_pool._tikv_namespace = value
+        if hasattr(self.hs.config, "database"):
+            self.hs.config.database.tikv_namespace = value
 
     def _state_hamt_secret(self) -> bytes:
         return hashlib.sha256(self.hs.config.key.macaroon_secret_key).digest()
