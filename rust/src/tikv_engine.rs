@@ -784,6 +784,29 @@ async fn lookup_state_hamts_async(
     queries: Vec<SelectiveQuery>,
 ) -> Result<Vec<Vec<(String, String, String)>>, String> {
     let client = get_client().await?;
+    lookup_state_hamts_core(namespace, queries, |keys| async move {
+        let rows = client.batch_get(keys).await.map_err(|e| e.to_string())?;
+        Ok(rows
+            .into_iter()
+            .map(|pair| {
+                let (k, v): (tikv_client::Key, tikv_client::Value) = pair.into();
+                (k.into(), v)
+            })
+            .collect())
+    })
+    .await
+}
+
+/// Core loader-agnostic implementation of multi-room selective HAMT traversal.
+async fn lookup_state_hamts_core<F, Fut>(
+    namespace: &str,
+    queries: Vec<SelectiveQuery>,
+    fetch_nodes: F,
+) -> Result<Vec<Vec<(String, String, String)>>, String>
+where
+    F: Fn(Vec<Vec<u8>>) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<(Vec<u8>, Vec<u8>)>, String>>,
+{
     type NodeLocation = ([u8; ROOM_PREFIX_LEN], StructuralHash);
 
     let mut node_map: HashMap<NodeLocation, Arc<HamtNode<String, String>>> = HashMap::new();
@@ -819,7 +842,7 @@ async fn lookup_state_hamts_async(
                 })
                 .collect();
             let keys: Vec<Vec<u8>> = key_to_location.keys().cloned().collect();
-            let rows = client.batch_get(keys).await.map_err(|e| e.to_string())?;
+            let rows = fetch_nodes(keys).await?;
 
             if rows.len() != chunk.len() {
                 return Err(format!(
@@ -829,9 +852,7 @@ async fn lookup_state_hamts_async(
                 ));
             }
 
-            for pair in rows {
-                let (key, node_bytes): (tikv_client::Key, tikv_client::Value) = pair.into();
-                let key: Vec<u8> = key.into();
+            for (key, node_bytes) in rows {
                 let (room_prefix, expected_hash) = key_to_location
                     .get(&key)
                     .copied()
@@ -1143,5 +1164,128 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].0, "m.room.name");
         assert_eq!(found[0].2, "$event1");
+    }
+
+    #[tokio::test]
+    async fn lookup_state_hamts_core_coalesces_multi_room_bfs() {
+        use std::sync::atomic::AtomicUsize;
+
+        use crate::state_hamt::{build_root_handle_and_nodes, room_structural_key_raw};
+
+        let namespace = "test_coalescing_ns";
+        let secret = [55u8; 32];
+        let room_id_1 = "!room1:test.example";
+        let room_id_2 = "!room2:test.example";
+        let prefix_1 = [1u8; ROOM_PREFIX_LEN];
+        let prefix_2 = [2u8; ROOM_PREFIX_LEN];
+        let key_1 = room_structural_key_raw(&secret, room_id_1);
+        let key_2 = room_structural_key_raw(&secret, room_id_2);
+
+        // Room 1: 50 members + name
+        let mut entries_1 = vec![(
+            "m.room.name".to_string(),
+            "".to_string(),
+            "$name1".to_string(),
+        )];
+        for i in 0..50 {
+            entries_1.push((
+                "m.room.member".to_string(),
+                format!("@user{i}:test.example"),
+                format!("$event_1_{i}"),
+            ));
+        }
+
+        // Room 2: topic + power levels
+        let entries_2 = vec![
+            (
+                "m.room.topic".to_string(),
+                "".to_string(),
+                "$topic2".to_string(),
+            ),
+            (
+                "m.room.power_levels".to_string(),
+                "".to_string(),
+                "$power2".to_string(),
+            ),
+        ];
+
+        let ((root_hash_1, _), nodes_1) =
+            build_root_handle_and_nodes(&secret, room_id_1, entries_1).unwrap();
+        let ((root_hash_2, _), nodes_2) =
+            build_root_handle_and_nodes(&secret, room_id_2, entries_2).unwrap();
+
+        let mut node_storage: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
+        for (h, bytes) in nodes_1 {
+            node_storage.insert(node_tikv_key(namespace, &prefix_1, &h), bytes);
+        }
+        for (h, bytes) in nodes_2 {
+            node_storage.insert(node_tikv_key(namespace, &prefix_2, &h), bytes);
+        }
+
+        let batch_count = Arc::new(AtomicUsize::new(0));
+        let storage = Arc::new(node_storage);
+
+        let queries = vec![
+            (
+                prefix_1,
+                root_hash_1,
+                key_1,
+                vec![(
+                    "m.room.member".to_string(),
+                    "@user30:test.example".to_string(),
+                )],
+            ),
+            (
+                prefix_2,
+                root_hash_2,
+                key_2,
+                vec![("m.room.power_levels".to_string(), "".to_string())],
+            ),
+        ];
+
+        let batch_count_clone = Arc::clone(&batch_count);
+        let storage_clone = Arc::clone(&storage);
+
+        let results = lookup_state_hamts_core(namespace, queries, move |keys| {
+            batch_count_clone.fetch_add(1, Ordering::SeqCst);
+            let s = Arc::clone(&storage_clone);
+            async move {
+                let mut found = Vec::new();
+                for k in keys {
+                    if let Some(v) = s.get(&k) {
+                        found.push((k, v.clone()));
+                    }
+                }
+                Ok(found)
+            }
+        })
+        .await
+        .unwrap();
+
+        // 1. Verify results match expectations for both rooms
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results[0],
+            vec![(
+                "m.room.member".to_string(),
+                "@user30:test.example".to_string(),
+                "$event_1_30".to_string()
+            )]
+        );
+        assert_eq!(
+            results[1],
+            vec![(
+                "m.room.power_levels".to_string(),
+                "".to_string(),
+                "$power2".to_string()
+            )]
+        );
+
+        // 2. Assert that child node fetches across BOTH rooms were coalesced per BFS level
+        let total_batches = batch_count.load(Ordering::SeqCst);
+        assert!(
+            total_batches <= 2,
+            "Expected <= 2 coalesced batch RPCs (roots + child level), got {total_batches}"
+        );
     }
 }
