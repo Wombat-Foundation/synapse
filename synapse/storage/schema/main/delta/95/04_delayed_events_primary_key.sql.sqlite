@@ -1,8 +1,16 @@
 -- SQLite cannot alter a primary key in place. This migration runs after the
 -- content column and sticky_duration_ms column migrations, so preserve their
 -- current shape while rebuilding the table with delay_id as the primary key.
-DELETE FROM delayed_events WHERE rowid NOT IN (
-    SELECT max(rowid) FROM delayed_events GROUP BY delay_id
+DELETE FROM delayed_events WHERE rowid IN (
+    SELECT rowid FROM (
+        SELECT rowid,
+               ROW_NUMBER() OVER (
+                   PARTITION BY delay_id
+                   ORDER BY is_processed ASC, send_ts DESC, rowid DESC
+               ) AS rn
+        FROM delayed_events
+    ) duplicates
+    WHERE rn > 1
 );
 
 CREATE TABLE delayed_events_new (

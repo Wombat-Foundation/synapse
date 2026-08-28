@@ -5,6 +5,7 @@ from typing import Any, Callable
 from .metrics import MetricsFactory
 
 class PrometheusMetricsFactory(MetricsFactory):
+    namespace: str
     def __init__(self, namespace: str = ...) -> None: ...
     def create_counter(
         self, name: str, tags: dict[str, Any] | None = ...

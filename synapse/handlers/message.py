@@ -1495,7 +1495,7 @@ class EventCreationHandler:
             )
         elif new_content is not None:
             event, context = await self._rebuild_event_after_third_party_rules(
-                new_content, event
+                new_content, event, context
             )
 
         self.validator.validate_new(event, self.config)
@@ -2455,7 +2455,10 @@ class EventCreationHandler:
             del self._rooms_to_exclude_from_dummy_event_insertion[room_id]
 
     async def _rebuild_event_after_third_party_rules(
-        self, third_party_result: dict, original_event: EventBase
+        self,
+        third_party_result: dict,
+        original_event: EventBase,
+        original_context: UnpersistedEventContextBase | None = None,
     ) -> tuple[EventBase, UnpersistedEventContext]:
         # the third_party_event_rules want to replace the event.
         # we do some basic checks, and then return the replacement event.
@@ -2501,6 +2504,31 @@ class EventCreationHandler:
         # copy over the original internal metadata
         for k, v in original_event.internal_metadata.get_dict().items():
             setattr(builder.internal_metadata, k, v)
+
+        if original_context is not None:
+            prev_event_ids = list(original_event.prev_event_ids())
+            prev_state_events = None
+            if original_event.room_version.msc4242_state_dags:
+                prev_state_events = original_event.get("prev_state_events")
+            state_map = await original_context.get_prev_state_ids()
+            auth_ids = self._event_auth_handler.compute_auth_events(builder, state_map)
+            event = await builder.build(
+                prev_event_ids=prev_event_ids,
+                auth_event_ids=auth_ids,
+                depth=original_event.depth,
+                prev_state_events=prev_state_events,
+            )
+            state_group_before = getattr(
+                original_context, "state_group_before_event", None
+            )
+            partial_state = getattr(original_context, "partial_state", False)
+            context = await self.state.calculate_context_info(
+                event,
+                state_ids_before_event=state_map,
+                partial_state=partial_state,
+                state_group_before_event=state_group_before,
+            )
+            return event, context
 
         # modules can send new state events, so we re-calculate the auth events just in
         # case.

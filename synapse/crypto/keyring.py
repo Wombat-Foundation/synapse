@@ -1124,6 +1124,11 @@ class ServerKeyFetcher(BaseV2KeyFetcher):
         except KeyLookupError:
             self._backoff.record_failure(server_name)
             raise
+        except Exception as e:
+            self._backoff.record_failure(server_name)
+            raise KeyLookupError(
+                f"Error processing key response from {server_name}: {e}"
+            ) from e
 
         # The fetch succeeded and the response authenticated (process_v2_response
         # raises KeyLookupError above otherwise), so clear any backoff state.

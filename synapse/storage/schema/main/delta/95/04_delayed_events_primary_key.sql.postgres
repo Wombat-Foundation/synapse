@@ -1,7 +1,15 @@
 -- Delay IDs are global opaque identifiers. The store addresses delayed events
 -- by delay_id alone, so make that invariant a primary-key constraint.
 ALTER TABLE delayed_events DROP CONSTRAINT delayed_events_pkey;
-DELETE FROM delayed_events WHERE ctid NOT IN (
-    SELECT max(ctid) FROM delayed_events GROUP BY delay_id
+DELETE FROM delayed_events WHERE ctid IN (
+    SELECT ctid FROM (
+        SELECT ctid,
+               ROW_NUMBER() OVER (
+                   PARTITION BY delay_id
+                   ORDER BY is_processed ASC, send_ts DESC, ctid DESC
+               ) AS rn
+        FROM delayed_events
+    ) duplicates
+    WHERE rn > 1
 );
 ALTER TABLE delayed_events ADD PRIMARY KEY (delay_id);
