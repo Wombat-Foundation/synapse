@@ -626,10 +626,8 @@ async fn materialize_state_hamts_async(
         }
     }
 
-    let mut nodes_by_prefix: HashMap<
-        [u8; ROOM_PREFIX_LEN],
-        HashMap<StructuralHash, Arc<HamtNode<String, String>>>,
-    > = HashMap::new();
+    type PrefixNodeMap = HashMap<StructuralHash, Arc<HamtNode<String, String>>>;
+    let mut nodes_by_prefix: HashMap<[u8; ROOM_PREFIX_LEN], PrefixNodeMap> = HashMap::new();
     for ((room_prefix, hash), node) in node_map {
         nodes_by_prefix
             .entry(room_prefix)
