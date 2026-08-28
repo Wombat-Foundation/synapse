@@ -110,6 +110,7 @@ with open('/sytest/lib/SyTest/Homeserver/Synapse.pm', 'r') as f:
 
 anchor = '        databases => \\%db_configs,'
 injection = '''        databases => \\%db_configs,
+        key_fetch_backoff_floor => "0s",
         ( do {
             my @ep = grep { length } map { s/^\\s+|\\s+$//gr } split /,/, ( $ENV{SYNAPSE_TIKV_PD_ENDPOINTS} // '' );
             @ep ? ( tikv => { pd_endpoints => \\@ep } ) : ();
