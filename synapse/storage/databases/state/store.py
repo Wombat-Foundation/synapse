@@ -275,6 +275,14 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 if not missing_groups:
                     return tikv_results
 
+                logger.info(
+                    "[gg-state-timing] tikv_root_retry_attempt "
+                    "instance=%s attempt=%d missing_count=%d sleep_ms=%d",
+                    self.hs.get_instance_name(),
+                    attempt,
+                    len(missing_groups),
+                    50 * attempt,
+                )
                 # Keep reads pure-TiKV during the normal publication window.
                 # The bounded linear backoff totals 2.25 seconds, matching the
                 # previous window without restoring SQL state fallback.
