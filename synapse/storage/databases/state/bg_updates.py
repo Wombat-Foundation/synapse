@@ -151,8 +151,27 @@ def put_state_hamt_objects(
         # keyspaces. Publish roots only after every immutable node has been
         # written; readers that observe the small remaining visibility window
         # use the bounded retry in `_get_state_groups_from_groups`.
+        nodes_bytes = sum(len(key) + len(value) for key, value in pairs)
+        nodes_start = time.monotonic()
         tikv_engine.batch_put(pairs)
+        logger.info(
+            "[gg-state-timing] state_hamt_nodes_batch_put "
+            "count=%d bytes=%d elapsed_ms=%.1f",
+            len(pairs),
+            nodes_bytes,
+            (time.monotonic() - nodes_start) * 1000,
+        )
+
+        roots_bytes = sum(len(key) + len(value) for key, value in roots)
+        roots_start = time.monotonic()
         tikv_engine.batch_put(roots)
+        logger.info(
+            "[gg-state-timing] state_hamt_roots_batch_put "
+            "count=%d bytes=%d elapsed_ms=%.1f",
+            len(roots),
+            roots_bytes,
+            (time.monotonic() - roots_start) * 1000,
+        )
 
 
 class StateGroupBackgroundUpdateStore(SQLBaseStore):
