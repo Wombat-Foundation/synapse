@@ -411,12 +411,13 @@ main() {
     return 0
   fi
 
+  local test_start_seconds=$SECONDS
+  local go_test_exit_code=0
+
   # Print out the executed commands so it's more obvious what's happening at the end here.
   # Things are slightly ambiguous with the in-repo vs Complement tests.
   set -x
 
-  local test_start_seconds=$SECONDS
-  local go_test_exit_code=0
   if [ -n "$use_in_repo_tests" ]; then
     # Run the suite of Complement tests in the `./complement` directory in this repo
     cd "./complement"
@@ -426,13 +427,14 @@ main() {
     cd "$COMPLEMENT_DIR"
     go test "${test_args[@]}" "$@" "${default_complement_test_packages[@]}" || go_test_exit_code=$?
   fi
-  local test_duration_seconds=$((SECONDS - test_start_seconds))
 
   # We don't need to print out executed commands anymore
   #
   # This is just `set +x` without printing `+ set +x` to the console (via
   # https://stackoverflow.com/questions/13195655/bash-set-x-without-it-being-printed/19226038#19226038)
   { set +x; } 2>/dev/null
+
+  local test_duration_seconds=$((SECONDS - test_start_seconds))
 
   # Benchmark every run: print a clearly greppable duration line for local
   # trend-watching, and add it to the GitHub Actions job summary when
