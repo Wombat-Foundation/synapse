@@ -29,6 +29,8 @@ from typing import (
     cast,
 )
 
+from prometheus_client import Histogram
+
 from synapse.api.constants import EventTypes
 from synapse.api.room_versions import RoomVersion
 from synapse.events import EventBase
@@ -37,6 +39,7 @@ from synapse.events.snapshot import (
 )
 from synapse.logging.context import defer_to_thread
 from synapse.logging.opentracing import tag_args, trace
+from synapse.metrics import SERVER_NAME_LABEL
 from synapse.storage._base import SQLBaseStore
 from synapse.storage.database import (
     DatabasePool,
@@ -66,6 +69,13 @@ if TYPE_CHECKING:
     from synapse.storage.databases.state.deletion import StateDeletionDataStore
 
 logger = logging.getLogger(__name__)
+
+state_hamt_precommit_publish_timer = Histogram(
+    "synapse_state_hamt_precommit_publish_time_seconds",
+    "Time spent publishing HAMT nodes and roots before SQL state-group visibility",
+    labelnames=[SERVER_NAME_LABEL],
+    buckets=(0.0005, 0.001, 0.002, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 1.0),
+)
 
 
 class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
@@ -1080,7 +1090,14 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         nodes: list[tuple[bytes, bytes]],
         roots: list[tuple[bytes, bytes]],
     ) -> None:
-        """Publish immutable nodes, then roots, before SQL visibility."""
+        """Publish immutable nodes, then roots, before SQL visibility.
+
+        This is called inside ``runInteraction``. If the database retries the
+        callback after an OperationalError or deadlock, the same TiKV writes
+        may run again. That is safe: nodes are content-addressed and roots are
+        overwritten at their immutable state-group key. A failed SQL commit
+        can leave unreachable TiKV objects, which are safe to retain.
+        """
 
         worker_started, worker_finished, nodes_elapsed_ms, roots_elapsed_ms = (
             put_state_hamt_objects(
@@ -1100,6 +1117,9 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             nodes_elapsed_ms,
             roots_elapsed_ms,
         )
+        state_hamt_precommit_publish_timer.labels(
+            **{SERVER_NAME_LABEL: self.hs.hostname}
+        ).observe(worker_finished - worker_started)
 
     @trace
     @tag_args
@@ -1378,9 +1398,9 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             # state_groups row until TiKV already has the root + nodes.
             # If TiKV write fails, the exception aborts this callback,
             # the SQL transaction rolls back, and no state_groups row is
-            # visible.  Orphaned immutable TiKV objects from a succeeded
-            # TiKV write / rolled-back SQL commit are harmless and
-            # GC-able.
+            # visible. Orphaned immutable TiKV objects from a succeeded
+            # TiKV write / rolled-back SQL commit are safe to retain; a
+            # future reachability GC may reclaim them.
             if self.tikv_pd_endpoints:
                 self._publish_state_hamt_objects_before_commit(
                     room_prefix,
