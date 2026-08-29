@@ -109,13 +109,7 @@ class KeyStore(CacheInvalidationWorkerStore):
         def store_server_keys_response_txn(
             txn: LoggingTransaction,
         ) -> dict[str, FetchKeyResult]:
-            # [gg-keys-timing] Temporary diagnostic: the MSC4499 insert-and-
-            # reload conflict resolution below does an extra SELECT per key
-            # ID compared to the old blind ON CONFLICT DO UPDATE SET. This is
-            # called on every server-key fetch, which happens constantly
-            # under federation-heavy tests (e.g. complement), so log how long
-            # this per-key loop actually takes to help confirm/deny it as a
-            # source of the recent complement wall-clock creep.
+            # [gg-keys-timing] Temporary diagnostic, see log line below.
             _gg_txn_start = time.monotonic()
 
             final_keys: dict[str, FetchKeyResult] = dict(verify_keys)
