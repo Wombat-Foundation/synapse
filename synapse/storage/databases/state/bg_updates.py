@@ -886,6 +886,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
     ) -> list[tuple[str, str, str]] | None:
         from synapse.synapse_rust import state_hamt
 
+        _gg_single_start = time.monotonic()
         root = self.db_pool.simple_select_one_onecol_txn(
             txn,
             table="state_hamt_roots",
@@ -930,6 +931,13 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
                 bytes(node_hash) for node_hash in missing if node_hash not in nodes
             ]
             if not missing:
+                logger.info(
+                    "[gg-state-timing] _lookup_state_hamt_from_postgres_txn "
+                    "group=%d keys=%d elapsed_ms=%.1f",
+                    state_group,
+                    len(keys),
+                    (time.monotonic() - _gg_single_start) * 1000,
+                )
                 return entries
             rows = self.db_pool.simple_select_many_txn(
                 txn,

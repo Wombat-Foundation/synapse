@@ -336,6 +336,13 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
 
             empty_groups = [group for group in groups if not results[group]]
             if not empty_groups:
+                logger.info(
+                    "[gg-state-timing] _get_state_groups_from_groups sql_dispatch "
+                    "groups=%d elapsed_ms=%.1f attempts=%d",
+                    len(groups),
+                    (time.monotonic() - _gg_sql_start) * 1000,
+                    attempt + 1,
+                )
                 return results
 
             # An empty result under a non-full filter is ambiguous on its
@@ -364,6 +371,13 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 get_groups_without_hamt_roots_txn,
             )
             if not missing_groups:
+                logger.info(
+                    "[gg-state-timing] _get_state_groups_from_groups sql_dispatch "
+                    "groups=%d elapsed_ms=%.1f attempts=%d",
+                    len(groups),
+                    (time.monotonic() - _gg_sql_start) * 1000,
+                    attempt + 1,
+                )
                 return results
 
             existing_rows = await self.db_pool.simple_select_many_batch(
@@ -378,6 +392,13 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 group for group in missing_groups if group in existing_groups
             ]
             if not retry_groups:
+                logger.info(
+                    "[gg-state-timing] _get_state_groups_from_groups sql_dispatch "
+                    "groups=%d elapsed_ms=%.1f attempts=%d",
+                    len(groups),
+                    (time.monotonic() - _gg_sql_start) * 1000,
+                    attempt + 1,
+                )
                 return results
 
             logger.debug(
@@ -387,6 +408,12 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             )
             await self.hs.get_clock().sleep(Duration(milliseconds=50 * (attempt + 1)))
 
+        logger.info(
+            "[gg-state-timing] _get_state_groups_from_groups sql_dispatch "
+            "groups=%d elapsed_ms=%.1f attempts=exhausted",
+            len(groups),
+            (time.monotonic() - _gg_sql_start) * 1000,
+        )
         return results
 
     @trace
@@ -779,6 +806,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         if incremental is not None:
             return incremental
 
+        _gg_reb_start = time.monotonic()
         if current_state_ids is None:
             if prev_state_group is None:
                 raise RuntimeError("A state map is required for an initial state group")
@@ -829,6 +857,13 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 },
             )
 
+        logger.info(
+            "[gg-state-timing] _persist_state_hamt_txn mode=rebuild "
+            "group=%d entries=%d elapsed_ms=%.1f",
+            state_group,
+            len(current_state_ids),
+            (time.monotonic() - _gg_reb_start) * 1000,
+        )
         return root_structural_hash, root_lattice, nodes
 
     def _persist_state_hamt_incremental_txn(
@@ -863,6 +898,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         """
         from synapse.synapse_rust import state_hamt
 
+        _gg_inc_start = time.monotonic()
         use_tikv = bool(self.tikv_pd_endpoints)
         local_roots = local_roots or {}
         if use_tikv and prev_state_group in local_roots:
@@ -997,6 +1033,15 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     "root_lattice": bytearray(new_lattice),
                 },
             )
+        logger.info(
+            "[gg-state-timing] _persist_state_hamt_incremental_txn "
+            "group=%d prev=%d updates=%d nodes=%d elapsed_ms=%.1f",
+            state_group,
+            prev_state_group,
+            len(updates),
+            len(new_nodes),
+            (time.monotonic() - _gg_inc_start) * 1000,
+        )
         return bytes(new_root_hash), new_lattice, new_nodes
 
     def _store_state_hamt_nodes_txn(
