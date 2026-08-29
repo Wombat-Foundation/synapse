@@ -725,6 +725,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
     def _materialize_state_hamt_from_postgres_txn(
         self, txn: LoggingTransaction, state_group: int
     ) -> list[tuple[str, str, str]] | None:
+        _gg_mat_start = time.monotonic()
         from synapse.synapse_rust import state_hamt
 
         root = self.db_pool.simple_select_one_onecol_txn(
@@ -808,9 +809,11 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
             node_bytes_by_hash[root_structural_hash],
             list(node_bytes_by_hash.items()),
         )
-        logger.debug(
-            "SQL HAMT materialization succeeded for state_group %s (%d entries)",
+        logger.info(
+            "[gg-state-timing] _materialize_state_hamt_from_postgres_txn "
+            "group=%d elapsed_ms=%.1f entries=%d",
             state_group,
+            (time.monotonic() - _gg_mat_start) * 1000,
             len(entries),
         )
         return entries

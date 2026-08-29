@@ -698,6 +698,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         room_id: str,
         updates: list[tuple[str, str, str]],
     ) -> tuple[dict[bytes, bytes], dict[int, tuple[bytes, bytes]]]:
+        _gg_prefetch_start = time.monotonic()
         prefetched = await defer_to_thread(
             self.hs.get_reactor(),
             self._prefetch_tikv_hamt_blocking,
@@ -707,6 +708,13 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             updates,
         )
         if prefetched is not None:
+            logger.info(
+                "[gg-state-timing] _prefetch_tikv_hamt group=%d elapsed_ms=%.1f "
+                "nodes=%d",
+                state_group,
+                (time.monotonic() - _gg_prefetch_start) * 1000,
+                len(prefetched[0]),
+            )
             return prefetched
 
         # This is an optimization for an incremental update, not the
@@ -1128,6 +1136,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         )
 
         try:
+            _gg_put_start = time.monotonic()
             await defer_to_thread(
                 self.hs.get_reactor(),
                 put_state_hamt_objects,
@@ -1136,6 +1145,13 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 nodes,
                 roots,
                 bool(self.tikv_pd_endpoints),
+            )
+            logger.info(
+                "[gg-state-timing] _put_state_hamt_objects_after_txn "
+                "nodes=%d roots=%d elapsed_ms=%.1f",
+                len(nodes),
+                len(roots),
+                (time.monotonic() - _gg_put_start) * 1000,
             )
         except Exception:
             logger.exception("Failed to persist HAMT state objects to TiKV")
@@ -1332,6 +1348,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         Returns:
             The state group ID
         """
+        _gg_store_start = time.monotonic()
 
         if prev_group is None and current_state_ids is None:
             raise Exception("current_state_ids and prev_group can't both be None")
@@ -1431,6 +1448,11 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             ],
         )
 
+        logger.info(
+            "[gg-state-timing] store_state_group group=%d elapsed_ms=%.1f",
+            state_group,
+            (time.monotonic() - _gg_store_start) * 1000,
+        )
         return state_group
 
     async def purge_unreferenced_state_groups(
