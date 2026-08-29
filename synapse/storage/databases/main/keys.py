@@ -171,10 +171,11 @@ class KeyStore(CacheInvalidationWorkerStore):
                 )
                 row = cast(tuple[bytes | memoryview, int, str], txn.fetchone())
                 assert row is not None
-                stored_key_bytes, stored_ts, stored_from_server = row
+                stored_key_raw, stored_ts, stored_from_server = row
+                stored_key_bytes = bytes(stored_key_raw)
 
                 # Step 3: Compare stored key body against candidate.
-                if bytes(stored_key_bytes) == fetch_result.verify_key.encode():
+                if stored_key_bytes == fetch_result.verify_key.encode():
                     # Same key body (refresh) -- preserve original from_server.
                     if stored_ts < fetch_result.valid_until_ts:
                         txn.execute(
