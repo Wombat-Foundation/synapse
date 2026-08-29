@@ -680,8 +680,8 @@ class SimpleParamStateTestCase(unittest.TestCase):
 
         self.assert_dict(self.expected_combined_state, state)
 
-    def test_unconflicted_events_are_not_prefetched(self) -> None:
-        """Unconflicted bindings do not need their event or auth records."""
+    def test_unconflicted_events_are_prefetched_for_auth_context(self) -> None:
+        """Keep unconflicted events available to state resolution as auth context."""
         topic_event = FakeEvent(
             id="TOPIC",
             sender=ALICE,
@@ -727,7 +727,7 @@ class SimpleParamStateTestCase(unittest.TestCase):
             },
             state,
         )
-        self.assertNotIn(
+        self.assertIn(
             topic_event.event_id,
             {event_id for call in store.get_events_calls for event_id in call},
         )

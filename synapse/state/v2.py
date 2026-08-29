@@ -167,11 +167,13 @@ async def resolve_events_with_store(
         )
     )
 
-    # Prefetch the conflicted set and its auth chain so the Rust resolver can
-    # resolve them from the in-memory event map. Unconflicted entries are only
-    # used as (type, state_key) -> event_id bindings, so fetching their full
-    # auth trees here is unnecessary.
+    # Prefetch the conflicted set, unconflicted state, and their auth chains so
+    # the resolver has a complete in-memory event graph. Although an
+    # unconflicted binding is copied directly into the final state map, its
+    # event can still be needed as auth context while resolving a conflicting
+    # branch.
     to_fetch = {eid for eid in full_conflicted_set if eid not in event_map}
+    to_fetch.update(eid for eid in unconflicted_state.values() if eid not in event_map)
     _gg_prefetch_start = time.monotonic()
     _gg_prefetch_rounds = 0
     _gg_prefetch_requested = 0
