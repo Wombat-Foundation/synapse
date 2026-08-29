@@ -153,16 +153,6 @@ jobs:
         # filter.
         run: |
           set -o pipefail
-          (
-            while true; do
-              date -u +"%Y-%m-%dT%H:%M:%SZ" >> /tmp/docker-stats.log
-              docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}" >> /tmp/docker-stats.log 2>/dev/null || true
-              sleep 2
-            done
-          ) &
-          STATS_PID=$!
-          trap 'kill $STATS_PID 2>/dev/null || true' EXIT
-
           COMPLEMENT_DIR=`pwd`/complement synapse/scripts-dev/complement.sh -p 1 -json 2>&1 \
             | tee /tmp/gotest-complement.log \
             | jq -rR --unbuffered '. as $raw | (try fromjson catch $raw) | if type == "object" then (select(.Action=="pass" or .Action=="fail" or .Action=="skip") | select(.Test) | "\(.Action|ascii_upcase) \(.Test) \(.Elapsed)s") else $raw end'
@@ -233,4 +223,3 @@ jobs:
             /tmp/gotest-sanity-check-complement.log
             /tmp/gotest-complement.log
             /tmp/gotest-in-repo-complement.log
-            /tmp/docker-stats.log
