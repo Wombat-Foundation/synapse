@@ -119,7 +119,7 @@ injection = '''        databases => \\%db_configs,
         # instead of attempting its fetch. Force the floor to 0s so this
         # doesn't leak between tests; override via SYNAPSE_KEY_FETCH_BACKOFF_FLOOR
         # if a test specifically wants to exercise backoff behaviour.
-        key_fetch_backoff_floor => ( $ENV{SYNAPSE_KEY_FETCH_BACKOFF_FLOOR} // "0s" ),
+        key_fetch_backoff_floor => ( length( $ENV{SYNAPSE_KEY_FETCH_BACKOFF_FLOOR} // '' ) ? $ENV{SYNAPSE_KEY_FETCH_BACKOFF_FLOOR} : "0s" ),
         ( do {
             my @ep = grep { length } map { s/^\\s+|\\s+$//gr } split /,/, ( $ENV{SYNAPSE_TIKV_PD_ENDPOINTS} // '' );
             @ep ? ( tikv => { pd_endpoints => \\@ep } ) : ();

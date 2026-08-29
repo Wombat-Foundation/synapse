@@ -1670,17 +1670,24 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             (room_id,),
         )
 
+        # Delete HAMT root pointers for this room's state groups before the
+        # state_groups rows themselves are removed below. This runs against
+        # the live room_id predicate inside the same transaction (rather than
+        # the `state_groups` list pre-fetched by the caller) so a state group
+        # created concurrently, after that pre-fetch but before this
+        # transaction started, still has its root cleaned up.
+        logger.info("[purge] removing %s from state_hamt_roots", room_id)
+        txn.execute(
+            """
+            DELETE FROM state_hamt_roots AS shr WHERE shr.state_group IN (
+                SELECT id FROM state_groups AS sg WHERE sg.room_id = ?
+            )""",
+            (room_id,),
+        )
+
         logger.info("[purge] removing %s from state_groups", room_id)
         self.db_pool.simple_delete_txn(
             txn,
             table="state_groups",
             keyvalues={"room_id": room_id},
         )
-        if state_groups:
-            self.db_pool.simple_delete_many_txn(
-                txn,
-                table="state_hamt_roots",
-                column="state_group",
-                values=state_groups,
-                keyvalues={},
-            )
