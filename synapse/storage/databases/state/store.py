@@ -68,6 +68,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# TiKV roots are published after the SQL transaction that allocates their
+# state-group IDs. Readers on another worker can therefore observe the SQL row
+# before the root is visible in TiKV.
+TIKV_ROOT_PUBLICATION_ATTEMPTS = 10
+
+
 class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
     """A data store for fetching/storing state groups."""
 
@@ -242,47 +248,83 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
 
             if missing_groups:
                 # A missing group is either (a) genuinely purged/never
-                # existed — resolve to {} immediately, or (b) mid-publication:
-                # its `state_groups` row is visible in SQL but the TiKV root
-                # write hasn't landed yet.  Instead of sleeping and retrying
-                # TiKV (which burned up to 2.25s per batch on Postgres where
-                # the cross-connection race window is wide), fall back to
-                # SQL for those groups immediately — the state_hamt_roots +
-                # state_hamt_nodes rows were committed in the same SQL tx as
-                # state_groups, so they're visible on this connection right
-                # now.  Once TiKV catches up, subsequent reads hit TiKV
-                # again (it's a warm cache, not an exclusive source of
-                # truth).
+                # existed, in which case no amount of retrying will ever
+                # produce a TiKV root and we should resolve to {} right
+                # away, or (b) mid-publication: its `state_groups` row is
+                # already visible but the TiKV write hasn't landed yet, in
+                # which case we retry. Filtering on `state_groups` existence
+                # here, before the retry loop, keeps case (a) from paying
+                # the retry backoff for a root that will never appear.
                 existing_rows = await self.db_pool.simple_select_many_batch(
                     table="state_groups",
                     column="id",
                     iterable=missing_groups,
                     retcols=("id",),
-                    desc="_get_state_groups_from_groups.check_missing_before_fallback",
+                    desc="_get_state_groups_from_groups.check_missing_before_retry",
                 )
                 existing_in_sql = {group for (group,) in existing_rows}
                 for group in missing_groups:
                     if group not in existing_in_sql:
                         tikv_results[group] = {}
-
-                sql_fallback_groups = [
+                missing_groups = [
                     group for group in missing_groups if group in existing_in_sql
                 ]
-                if sql_fallback_groups:
-                    logger.info(
-                        "[gg-state-timing] tikv_sql_fallback "
-                        "groups=%d (of %d missing)",
-                        len(sql_fallback_groups),
-                        len(missing_groups),
+
+            for attempt in range(1, TIKV_ROOT_PUBLICATION_ATTEMPTS):
+                if not missing_groups:
+                    return tikv_results
+
+                logger.debug(
+                    "[gg-state-timing] tikv_root_retry_attempt "
+                    "instance=%s attempt=%d missing_count=%d sleep_ms=%d",
+                    self.hs.get_instance_name(),
+                    attempt,
+                    len(missing_groups),
+                    50 * attempt,
+                )
+                # Keep reads pure-TiKV during the normal publication window.
+                # The bounded linear backoff totals 2.25 seconds, matching the
+                # previous window without restoring SQL state fallback.
+                await self.hs.get_clock().sleep(Duration(milliseconds=50 * attempt))
+                fetched_retry, missing_groups = await defer_to_thread(
+                    self.hs.get_reactor(),
+                    fetch_from_tikv_blocking,
+                    missing_groups,
+                )
+                tikv_results.update(fetched_retry)
+
+            if missing_groups:
+                existing_rows = await self.db_pool.simple_select_many_batch(
+                    table="state_groups",
+                    column="id",
+                    iterable=missing_groups,
+                    retcols=("id",),
+                    desc="_get_state_groups_from_groups.check_missing",
+                )
+                existing_in_sql = {group for (group,) in existing_rows}
+                if existing_in_sql:
+                    state_rows = await self.db_pool.simple_select_many_batch(
+                        table="state_groups_state",
+                        column="state_group",
+                        iterable=existing_in_sql,
+                        retcols=("state_group",),
+                        desc="_get_state_groups_from_groups.check_missing_state",
                     )
-                    sql_results = await self.db_pool.runInteraction(
-                        "_get_state_groups_from_groups.fallback_sql",
-                        self._get_state_groups_from_groups_txn,
-                        sql_fallback_groups,
-                        state_filter,
-                        use_tikv=False,
+                    edge_rows = await self.db_pool.simple_select_many_batch(
+                        table="state_group_edges",
+                        column="state_group",
+                        iterable=existing_in_sql,
+                        retcols=("state_group",),
+                        desc="_get_state_groups_from_groups.check_missing_edges",
                     )
-                    tikv_results.update(sql_results)
+                    nonempty_groups = {group for (group,) in state_rows}
+                    nonempty_groups.update(group for (group,) in edge_rows)
+                    if nonempty_groups:
+                        raise RuntimeError(
+                            f"State group(s) {nonempty_groups} exist in SQL but have no TiKV HAMT root"
+                        )
+                for group in missing_groups:
+                    tikv_results[group] = {}
 
             return tikv_results
 
