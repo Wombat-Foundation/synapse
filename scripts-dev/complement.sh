@@ -434,11 +434,24 @@ main() {
   # https://stackoverflow.com/questions/13195655/bash-set-x-without-it-being-printed/19226038#19226038)
   { set +x; } 2>/dev/null
 
-  # Benchmark every run: print a clearly greppable duration line (for local
-  # trend-watching without digging through CI job timestamps), and add it to
-  # the GitHub Actions job summary when running in CI so each run's duration
-  # is visible/browsable in the Actions UI without any extra CLI archaeology.
-  echo "COMPLEMENT_DURATION_SECONDS=${test_duration_seconds}"
+  # Benchmark every run: print a clearly greppable duration line for local
+  # trend-watching, and add it to the GitHub Actions job summary when
+  # running in CI so each run's duration is visible/browsable in the
+  # Actions UI without any extra CLI archaeology.
+  #
+  # In CI, do NOT print to stdout/stderr: this script's combined
+  # stdout+stderr is piped (via `2>&1 | tee ... | ...`) into a log file that
+  # a downstream step feeds straight to `gotestfmt` for strict
+  # `go test -json` parsing (see .github/workflows/complement_tests.yml's
+  # "Sanity check Complement image" / "Run Complement Tests" steps). A
+  # stray non-JSON line there breaks gotestfmt's parser (exit code 2) even
+  # though go test itself passed -- unlike that workflow's own `jq`
+  # progress filter, which explicitly tolerates non-JSON lines, gotestfmt
+  # does not. $GITHUB_STEP_SUMMARY is a separate file untouched by that
+  # pipe, so it's always safe.
+  if [ -z "${GITHUB_ACTIONS:-}" ]; then
+    echo "COMPLEMENT_DURATION_SECONDS=${test_duration_seconds}"
+  fi
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     {
       echo "### Complement duration"
