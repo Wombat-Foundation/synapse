@@ -127,7 +127,8 @@ def put_state_hamt_objects(
     nodes: list[tuple[bytes, bytes]],
     roots: list[tuple[bytes, bytes]],
     use_tikv: bool,
-) -> None:
+) -> tuple[float, float, float, float]:
+    worker_started = time.monotonic()
     # Nodes and root pointers live in the same TiKV namespace. State-group ids
     # are only unique within one Synapse database, so namespace both key types
     # to prevent independent deployments from overwriting each other's state.
@@ -143,6 +144,8 @@ def put_state_hamt_objects(
         }.items()
     )
 
+    nodes_elapsed_ms = 0.0
+    roots_elapsed_ms = 0.0
     if use_tikv:
         from synapse.synapse_rust import tikv_engine
 
@@ -154,24 +157,29 @@ def put_state_hamt_objects(
         nodes_bytes = sum(len(key) + len(value) for key, value in pairs)
         nodes_start = time.monotonic()
         tikv_engine.batch_put(pairs)
+        nodes_elapsed_ms = (time.monotonic() - nodes_start) * 1000
         logger.info(
             "[gg-state-timing] state_hamt_nodes_batch_put "
             "count=%d bytes=%d elapsed_ms=%.1f",
             len(pairs),
             nodes_bytes,
-            (time.monotonic() - nodes_start) * 1000,
+            nodes_elapsed_ms,
         )
 
         roots_bytes = sum(len(key) + len(value) for key, value in roots)
         roots_start = time.monotonic()
         tikv_engine.batch_put(roots)
+        roots_elapsed_ms = (time.monotonic() - roots_start) * 1000
         logger.info(
             "[gg-state-timing] state_hamt_roots_batch_put "
             "count=%d bytes=%d elapsed_ms=%.1f",
             len(roots),
             roots_bytes,
-            (time.monotonic() - roots_start) * 1000,
+            roots_elapsed_ms,
         )
+
+    worker_finished = time.monotonic()
+    return worker_started, worker_finished, nodes_elapsed_ms, roots_elapsed_ms
 
 
 class StateGroupBackgroundUpdateStore(SQLBaseStore):

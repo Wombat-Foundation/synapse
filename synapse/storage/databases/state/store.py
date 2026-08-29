@@ -1181,8 +1181,13 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         )
 
         try:
-            _gg_put_start = time.monotonic()
-            await defer_to_thread(
+            scheduled = time.monotonic()
+            (
+                worker_started,
+                worker_finished,
+                nodes_elapsed_ms,
+                roots_elapsed_ms,
+            ) = await defer_to_thread(
                 self.hs.get_reactor(),
                 put_state_hamt_objects,
                 self.tikv_namespace,
@@ -1191,12 +1196,24 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 roots,
                 bool(self.tikv_pd_endpoints),
             )
+            caller_resumed = time.monotonic()
+            queue_delay_ms = (worker_started - scheduled) * 1000
+            worker_exec_ms = (worker_finished - worker_started) * 1000
+            reactor_resume_ms = (caller_resumed - worker_finished) * 1000
+            total_ms = (caller_resumed - scheduled) * 1000
+
             logger.info(
                 "[gg-state-timing] _put_state_hamt_objects_after_txn "
-                "nodes=%d roots=%d elapsed_ms=%.1f",
+                "nodes=%d roots=%d total_ms=%.1f queue_ms=%.1f worker_ms=%.1f "
+                "nodes_put_ms=%.1f roots_put_ms=%.1f resume_ms=%.1f",
                 len(nodes),
                 len(roots),
-                (time.monotonic() - _gg_put_start) * 1000,
+                total_ms,
+                queue_delay_ms,
+                worker_exec_ms,
+                nodes_elapsed_ms,
+                roots_elapsed_ms,
+                reactor_resume_ms,
             )
         except Exception:
             logger.exception("Failed to persist HAMT state objects to TiKV")
