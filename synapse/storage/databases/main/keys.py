@@ -23,6 +23,7 @@ import hashlib
 import itertools
 import json
 import logging
+import time
 from typing import Iterable, Mapping, cast
 
 from canonicaljson import encode_canonical_json
@@ -108,6 +109,15 @@ class KeyStore(CacheInvalidationWorkerStore):
         def store_server_keys_response_txn(
             txn: LoggingTransaction,
         ) -> dict[str, FetchKeyResult]:
+            # [gg-keys-timing] Temporary diagnostic: the MSC4499 insert-and-
+            # reload conflict resolution below does an extra SELECT per key
+            # ID compared to the old blind ON CONFLICT DO UPDATE SET. This is
+            # called on every server-key fetch, which happens constantly
+            # under federation-heavy tests (e.g. complement), so log how long
+            # this per-key loop actually takes to help confirm/deny it as a
+            # source of the recent complement wall-clock creep.
+            _gg_txn_start = time.monotonic()
+
             final_keys: dict[str, FetchKeyResult] = dict(verify_keys)
             keys_to_persist: dict[str, FetchKeyResult] = dict(verify_keys)
 
@@ -274,6 +284,13 @@ class KeyStore(CacheInvalidationWorkerStore):
                     [(server_name, key_id) for key_id in keys_to_persist],
                 )
 
+            logger.info(
+                "[gg-keys-timing] store_server_keys_response_txn server=%s "
+                "key_ids=%d elapsed_ms=%.1f",
+                server_name,
+                len(verify_keys),
+                (time.monotonic() - _gg_txn_start) * 1000,
+            )
             return final_keys
 
         return await self.db_pool.runInteraction(
