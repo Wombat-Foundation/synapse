@@ -870,59 +870,9 @@ class StateStoreTestCase(HomeserverTestCase):
         finally:
             self.state_datastore.tikv_pd_endpoints = []
 
-    def test_transient_missing_tikv_root_retries_and_succeeds(self) -> None:
-        """Verify that when a TiKV root is temporarily absent (cross-worker race), it retries and succeeds on 10ms retry."""
-        from unittest.mock import patch
-
-        from twisted.internet import defer
-
-        event = self.inject_state_event(
-            self.room, self.u_alice, EventTypes.Create, "", {}
-        )
-        state_group = self.get_success(
-            self.store._get_state_group_for_event(event.event_id)
-        )
-        assert state_group is not None
-
-        # Return None on attempt 0, then return valid entries on attempt 1
-        responses = [None, [(EventTypes.Create, "", event.event_id)]]
-
-        def mock_mat(sg: int) -> list[tuple[str, str, str]] | None:
-            if responses:
-                return responses.pop(0)
-            return [(EventTypes.Create, "", event.event_id)]
-
-        self._enable_mock_tikv()
-        try:
-            with (
-                patch.object(
-                    self.state_datastore,
-                    "_materialize_state_hamt_from_tikv_direct",
-                    side_effect=mock_mat,
-                ),
-                patch.object(
-                    self.state_datastore.hs.get_clock(),
-                    "sleep",
-                    return_value=defer.succeed(None),
-                ) as mock_sleep,
-            ):
-                res = self.get_success(
-                    self.state_datastore._get_state_groups_from_groups(
-                        [state_group], StateFilter.all()
-                    )
-                )
-                self.assertEqual(
-                    res[state_group], {(EventTypes.Create, ""): event.event_id}
-                )
-                self.assertEqual(mock_sleep.call_count, 1)
-        finally:
-            self.state_datastore.tikv_pd_endpoints = []
-
     def test_existing_unresolved_group_raises(self) -> None:
         """Verify that an existing state group in SQL raises RuntimeError when TiKV root is unresolved."""
         from unittest.mock import patch
-
-        from twisted.internet import defer
 
         state_group = 999998
         self.get_success(
@@ -946,14 +896,7 @@ class StateStoreTestCase(HomeserverTestCase):
 
         self._enable_mock_tikv()
         try:
-            with (
-                patch("synapse.synapse_rust.tikv_engine.get", return_value=None),
-                patch.object(
-                    self.state_datastore.hs.get_clock(),
-                    "sleep",
-                    return_value=defer.succeed(None),
-                ),
-            ):
+            with patch("synapse.synapse_rust.tikv_engine.get", return_value=None):
                 self.get_failure(
                     self.state_datastore._get_state_groups_from_groups(
                         [state_group], StateFilter.all()
@@ -967,20 +910,11 @@ class StateStoreTestCase(HomeserverTestCase):
         """Verify that a nonexistent state group (not in SQL) returns {} without raising."""
         from unittest.mock import patch
 
-        from twisted.internet import defer
-
         nonexistent_group = 9999991
 
         self._enable_mock_tikv()
         try:
-            with (
-                patch("synapse.synapse_rust.tikv_engine.get", return_value=None),
-                patch.object(
-                    self.state_datastore.hs.get_clock(),
-                    "sleep",
-                    return_value=defer.succeed(None),
-                ),
-            ):
+            with patch("synapse.synapse_rust.tikv_engine.get", return_value=None):
                 res = self.get_success(
                     self.state_datastore._get_state_groups_from_groups(
                         [nonexistent_group], StateFilter.all()
@@ -991,8 +925,7 @@ class StateStoreTestCase(HomeserverTestCase):
             self.state_datastore.tikv_pd_endpoints = []
 
     def test_tikv_write_failure_aborts_sql_visibility(self) -> None:
-        """If TiKV write fails inside the transaction, the SQL state_groups
-        row must not be visible — the transaction must roll back."""
+        """A node-write failure aborts SQL visibility of the state group."""
         from unittest.mock import patch
 
         self._enable_mock_tikv()
@@ -1029,113 +962,98 @@ class StateStoreTestCase(HomeserverTestCase):
         finally:
             self.state_datastore.tikv_pd_endpoints = []
 
-    def test_tikv_write_precedes_sql_commit(self) -> None:
-        """After a successful persist, TiKV must already have the root
-        nodes and root pointer — the publication race is eliminated."""
+    def test_tikv_root_write_failure_aborts_sql_visibility(self) -> None:
+        """A root-write failure rolls back SQL after nodes were published."""
         from unittest.mock import patch
 
         self._enable_mock_tikv()
-
-        # Track whether TiKV write was called
-        tikv_write_called = [False]
-
-        def mock_put(ns, prefix, nodes, roots, use_tikv):
-            tikv_write_called[0] = True
-            return (0.0, 0.0, 0.0, 0.0)
-
-        # Mock the write side
         try:
-            with patch(
-                "synapse.storage.databases.state.store.put_state_hamt_objects",
-                side_effect=mock_put,
-            ):
-                event = self.inject_state_event(
-                    self.room, self.u_alice, EventTypes.Create, "", {}
-                )
-                state_group = self.get_success(
-                    self.store._get_state_group_for_event(event.event_id)
-                )
-                assert state_group is not None
-                self.assertTrue(tikv_write_called[0])
+            calls: list[list[tuple[bytes, bytes]]] = []
 
-                # Mock the read side to avoid hitting Rust tikv_engine
-                with patch.object(
-                    self.state_datastore,
-                    "_materialize_state_hamt_from_tikv_direct",
-                    return_value=[(EventTypes.Create, "", event.event_id)],
-                ):
-                    # With the pre-commit TiKV write, the group should be readable
-                    # from TiKV immediately (no retry needed).
-                    res = self.get_success(
-                        self.state_datastore._get_state_groups_from_groups(
-                            [state_group], StateFilter.all()
-                        )
-                    )
-                    self.assertEqual(
-                        res[state_group], {(EventTypes.Create, ""): event.event_id}
-                    )
+            def fail_roots(pairs: list[tuple[bytes, bytes]]) -> None:
+                calls.append(pairs)
+                if all(key.startswith(b"hamt:root:") for key, _value in pairs):
+                    raise RuntimeError("TiKV root write failed")
+
+            with patch(
+                "synapse.synapse_rust.tikv_engine.batch_put",
+                side_effect=fail_roots,
+            ):
+                self.get_failure(
+                    self.state_datastore.store_state_group(
+                        event_id="$root-failure:event",
+                        room_id=self.room.to_string(),
+                        room_version=RoomVersions.V1,
+                        prev_group=None,
+                        delta_ids=None,
+                        current_state_ids={
+                            (EventTypes.Create, ""): "$root-failure:event"
+                        },
+                    ),
+                    RuntimeError,
+                )
+
+            self.assertEqual(len(calls), 2)
+            self.assertTrue(all(key.startswith(b"hamt:node:") for key, _ in calls[0]))
+            self.assertTrue(all(key.startswith(b"hamt:root:") for key, _ in calls[1]))
+            row = self.get_success(
+                self.store.db_pool.simple_select_one_onecol(
+                    table="state_groups",
+                    keyvalues={"event_id": "$root-failure:event"},
+                    retcol="id",
+                    allow_none=True,
+                )
+            )
+            self.assertIsNone(row)
         finally:
             self.state_datastore.tikv_pd_endpoints = []
 
-    def test_tikv_retry_handles_transient_read_miss(self) -> None:
-        """A transient TiKV read miss (e.g. network blip on one read) retries
-        and succeeds. This is distinct from the publication race — it tests
-        the read-side retry for cases where TiKV has the data but one read
-        returns None."""
+    def test_tikv_publishes_nodes_before_roots(self) -> None:
+        """A successful TiKV-mode write publishes nodes before the root."""
         from unittest.mock import patch
 
-        from twisted.internet import defer
-
-        # We need to persist the event FIRST without TiKV, so it's in SQL.
-        event = self.inject_state_event(
-            self.room, self.u_alice, EventTypes.Create, "", {}
-        )
-        state_group = self.get_success(
-            self.store._get_state_group_for_event(event.event_id)
-        )
-        assert state_group is not None
-
-        # Now enable TiKV and mock the read failure
         self._enable_mock_tikv()
-
-        # Return None on attempt 0, then return valid entries on attempt 1
-        responses = [None, [(EventTypes.Create, "", event.event_id)]]
-
-        def mock_mat(sg: int) -> list[tuple[str, str, str]] | None:
-            if responses:
-                return responses.pop(0)
-            return [(EventTypes.Create, "", event.event_id)]
-
         try:
-            with (
-                patch.object(
-                    self.state_datastore,
-                    "_materialize_state_hamt_from_tikv_direct",
-                    side_effect=mock_mat,
-                ),
-                patch.object(
-                    self.state_datastore.hs.get_clock(),
-                    "sleep",
-                    return_value=defer.succeed(None),
-                ) as mock_sleep,
+            calls: list[list[tuple[bytes, bytes]]] = []
+
+            def record_put(pairs: list[tuple[bytes, bytes]]) -> None:
+                calls.append(pairs)
+
+            with patch(
+                "synapse.synapse_rust.tikv_engine.batch_put",
+                side_effect=record_put,
             ):
-                res = self.get_success(
-                    self.state_datastore._get_state_groups_from_groups(
-                        [state_group], StateFilter.all()
+                state_group = self.get_success(
+                    self.state_datastore.store_state_group(
+                        event_id="$ordered-write:event",
+                        room_id=self.room.to_string(),
+                        room_version=RoomVersions.V1,
+                        prev_group=None,
+                        delta_ids=None,
+                        current_state_ids={
+                            (EventTypes.Create, ""): "$ordered-write:event"
+                        },
                     )
                 )
-                self.assertEqual(
-                    res[state_group], {(EventTypes.Create, ""): event.event_id}
+
+            self.assertEqual(len(calls), 2)
+            self.assertTrue(all(key.startswith(b"hamt:node:") for key, _ in calls[0]))
+            self.assertTrue(all(key.startswith(b"hamt:root:") for key, _ in calls[1]))
+            row = self.get_success(
+                self.store.db_pool.simple_select_one_onecol(
+                    table="state_groups",
+                    keyvalues={"id": state_group},
+                    retcol="event_id",
+                    allow_none=False,
                 )
-                self.assertEqual(mock_sleep.call_count, 1)
+            )
+            self.assertEqual(row, "$ordered-write:event")
         finally:
             self.state_datastore.tikv_pd_endpoints = []
 
     def test_mixed_existing_and_nonexistent_groups_under_tikv(self) -> None:
-        """Verify that requests with both existing TiKV-retried groups and nonexistent groups return all keys."""
+        """Verify that present and genuinely absent groups resolve together."""
         from unittest.mock import patch
-
-        from twisted.internet import defer
 
         event = self.inject_state_event(
             self.room, self.u_alice, EventTypes.Create, "", {}
@@ -1146,51 +1064,24 @@ class StateStoreTestCase(HomeserverTestCase):
         assert state_group is not None
         nonexistent_group = 9999999
 
-        # Simulate state_group missing on attempt 0 then resolved on attempt 1,
-        # while nonexistent_group never exists in TiKV or SQL
-        responses = [None, [(EventTypes.Create, "", event.event_id)]]
-
         def mock_mat(
             groups: list[int],
         ) -> tuple[dict[int, list[tuple[str, str, str]]], list[int]]:
-            entries = (
-                responses.pop(0)
-                if responses
-                else [(EventTypes.Create, "", event.event_id)]
-            )
             return (
-                {state_group: entries} if state_group in groups and entries else {},
-                [group for group in groups if group != state_group or not entries],
+                (
+                    {state_group: [(EventTypes.Create, "", event.event_id)]}
+                    if state_group in groups
+                    else {}
+                ),
+                [group for group in groups if group != state_group],
             )
-
-        def mock_mat_single(sg: int) -> list[tuple[str, str, str]] | None:
-            # `state_group` genuinely exists in SQL, so once the nonexistent
-            # group is filtered out before the retry loop, the remaining
-            # single-group retry takes this singular code path rather than
-            # the batched one -- mirror mock_mat's resolution for it here.
-            if sg == state_group:
-                entries_by_group, _ = mock_mat([sg])
-                return entries_by_group.get(sg)
-            return None
 
         self._enable_mock_tikv()
         try:
-            with (
-                patch.object(
-                    self.state_datastore,
-                    "_materialize_state_hamts_from_tikv_direct",
-                    side_effect=mock_mat,
-                ),
-                patch.object(
-                    self.state_datastore,
-                    "_materialize_state_hamt_from_tikv_direct",
-                    side_effect=mock_mat_single,
-                ),
-                patch.object(
-                    self.state_datastore.hs.get_clock(),
-                    "sleep",
-                    return_value=defer.succeed(None),
-                ),
+            with patch.object(
+                self.state_datastore,
+                "_materialize_state_hamts_from_tikv_direct",
+                side_effect=mock_mat,
             ):
                 res = self.get_success(
                     self.state_datastore._get_state_groups_from_groups(

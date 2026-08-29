@@ -152,8 +152,8 @@ def put_state_hamt_objects(
         # State nodes are read through TiKV's Raw KV API, so they must also be
         # written through Raw KV: transactional and raw data use distinct
         # keyspaces. Publish roots only after every immutable node has been
-        # written; readers that observe the small remaining visibility window
-        # use the bounded retry in `_get_state_groups_from_groups`.
+        # written. The caller performs this before committing SQL state-group
+        # visibility, so no committed group can expose a missing root.
         nodes_bytes = sum(len(key) + len(value) for key, value in pairs)
         nodes_start = time.monotonic()
         tikv_engine.batch_put(pairs)
