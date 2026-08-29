@@ -20,6 +20,7 @@
 #
 
 import logging
+import time
 from typing import (
     TYPE_CHECKING,
     Iterable,
@@ -176,6 +177,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         Returns:
             Dict of state group to state map.
         """
+        _gg_state_start = time.monotonic()
         if self.tikv_pd_endpoints:
             exact_keys = (
                 state_filter.concrete_types()
@@ -231,10 +233,18 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     res[group] = dict(state_filter.filter_state(state_map))
                 return res, missing
 
+            _gg_tikv_start = time.monotonic()
             tikv_results, missing_groups = await defer_to_thread(
                 self.hs.get_reactor(),
                 fetch_from_tikv_blocking,
                 groups,
+            )
+            logger.info(
+                "[gg-state-timing] _get_state_groups_from_groups tikv_dispatch "
+                "groups=%d elapsed_ms=%.1f missing=%d",
+                len(groups),
+                (time.monotonic() - _gg_tikv_start) * 1000,
+                len(missing_groups),
             )
 
             if missing_groups:
@@ -312,6 +322,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             return tikv_results
 
         chunks = [groups[i : i + 100] for i in range(0, len(groups), 100)]
+        _gg_sql_start = time.monotonic()
         for attempt in range(10):
             results: dict[int, StateMap[str]] = {}
             for chunk in chunks:

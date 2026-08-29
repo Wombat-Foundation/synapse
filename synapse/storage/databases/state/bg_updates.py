@@ -22,6 +22,7 @@
 import hashlib
 import logging
 import struct
+import time
 from typing import (
     TYPE_CHECKING,
     Mapping,
@@ -476,6 +477,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         state_filter: StateFilter,
         use_tikv: bool | None = None,
     ) -> tuple[dict[int, MutableStateMap[str]], list[int]]:
+        _gg_hamt_txn_start = time.monotonic()
         results: dict[int, MutableStateMap[str]] = {}
         missing_groups: list[int] = []
         if use_tikv is None:
@@ -528,6 +530,14 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
 
             results[group] = dict(state_filter.filter_state(state_map))
 
+        logger.info(
+            "[gg-state-timing] _get_state_groups_from_hamt_txn groups=%d "
+            "use_tikv=%s elapsed_ms=%.1f missing=%d",
+            len(groups),
+            use_tikv,
+            (time.monotonic() - _gg_hamt_txn_start) * 1000,
+            len(missing_groups),
+        )
         return results, missing_groups
 
     def _materialize_state_hamts_from_tikv_direct(
@@ -607,6 +617,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         and Rust traverses the trees across all groups in lockstep with shared BFS node
         batching and L1 node caching.
         """
+        _gg_tikv_many_start = time.monotonic()
         from synapse.synapse_rust import state_hamt, tikv_engine
 
         if not state_groups:
@@ -639,6 +650,13 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
             (roots[sg][0], roots[sg][1], roots[sg][2], keys) for sg in present_groups
         ]
         entries_by_group = tikv_engine.lookup_state_hamts(self.tikv_namespace, queries)
+        logger.info(
+            "[gg-state-timing] _lookup_state_hamts_from_tikv_direct "
+            "groups=%d keys=%d elapsed_ms=%.1f",
+            len(state_groups),
+            len(keys),
+            (time.monotonic() - _gg_tikv_many_start) * 1000,
+        )
         return dict(zip(present_groups, entries_by_group)), missing_groups
 
     def _lookup_state_hamt_from_tikv_direct(
@@ -943,6 +961,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         *all* groups are merged into one shared batch fetch for the next
         round, so groups needing a node in common only ever fetch it once.
         """
+        _gg_many_start = time.monotonic()
         from synapse.synapse_rust import state_hamt
 
         root_rows = self.db_pool.simple_select_many_txn(
@@ -995,7 +1014,9 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
 
         node_bytes_by_hash: dict[bytes, bytes] = {}
         to_fetch = set(roots.values())
+        rounds = 0
         while to_fetch:
+            rounds += 1
             current_batch = list(to_fetch)
             for chunk in batch_iter(current_batch, 100):
                 rows = [
@@ -1019,6 +1040,14 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
 
             to_fetch = try_resolve_all()
 
+        logger.info(
+            "[gg-state-timing] _lookup_state_hamt_from_postgres_many_txn "
+            "groups=%d keys=%d elapsed_ms=%.1f rounds=%d",
+            len(groups),
+            len(keys),
+            (time.monotonic() - _gg_many_start) * 1000,
+            rounds,
+        )
         return results
 
 
