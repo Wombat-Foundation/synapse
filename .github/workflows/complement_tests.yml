@@ -161,7 +161,6 @@ jobs:
           POSTGRES: ${{ (startsWith(matrix.database, 'Postgres')) && 1 || '' }}
           WORKERS: ${{ (matrix.arrangement == 'workers') && 1 || '' }}
           SYNAPSE_TIKV_PD_ENDPOINTS: ${{ (contains(matrix.database, 'tikv')) && '172.17.0.1:2379' || '' }}
-          COMPLEMENT_ALWAYS_PRINT_SERVER_LOGS: ${{ (matrix.arrangement == 'workers' && contains(matrix.database, 'tikv')) && 1 || '' }}
           TEST_ONLY_IGNORE_POETRY_LOCKFILE: ${{ inputs.use_latest_deps && 1 || '' }}
           TEST_ONLY_SKIP_DEP_HASH_VERIFICATION: ${{ inputs.use_twisted_trunk  && 1 || '' }}
 
