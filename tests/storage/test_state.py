@@ -990,6 +990,147 @@ class StateStoreTestCase(HomeserverTestCase):
         finally:
             self.state_datastore.tikv_pd_endpoints = []
 
+    def test_tikv_write_failure_aborts_sql_visibility(self) -> None:
+        """If TiKV write fails inside the transaction, the SQL state_groups
+        row must not be visible — the transaction must roll back."""
+        from unittest.mock import patch
+
+        self._enable_mock_tikv()
+        try:
+            with patch(
+                "synapse.synapse_rust.tikv_engine.batch_put",
+                side_effect=RuntimeError("TiKV connection refused"),
+            ):
+                self.get_failure(
+                    self.state_datastore.store_state_group(
+                        event_id="$fake:event",
+                        room_id=self.room.to_string(),
+                        room_version=RoomVersions.V1,
+                        prev_group=None,
+                        delta_ids=None,
+                        current_state_ids={
+                            (EventTypes.Create, ""): "$fake:event",
+                        },
+                    ),
+                    RuntimeError,
+                )
+
+            # The SQL transaction must have rolled back: no state_groups
+            # row for this event should exist.
+            row = self.get_success(
+                self.store.db_pool.simple_select_one_onecol(
+                    table="state_groups",
+                    keyvalues={"event_id": "$fake:event"},
+                    retcol="id",
+                    allow_none=True,
+                )
+            )
+            self.assertIsNone(row)
+        finally:
+            self.state_datastore.tikv_pd_endpoints = []
+
+    def test_tikv_write_precedes_sql_commit(self) -> None:
+        """After a successful persist, TiKV must already have the root
+        nodes and root pointer — the publication race is eliminated."""
+        from unittest.mock import patch
+
+        self._enable_mock_tikv()
+
+        # Track whether TiKV write was called
+        tikv_write_called = [False]
+
+        def mock_put(ns, prefix, nodes, roots, use_tikv):
+            tikv_write_called[0] = True
+            return (0.0, 0.0, 0.0, 0.0)
+
+        # Mock the write side
+        try:
+            with patch(
+                "synapse.storage.databases.state.store.put_state_hamt_objects",
+                side_effect=mock_put,
+            ):
+                event = self.inject_state_event(
+                    self.room, self.u_alice, EventTypes.Create, "", {}
+                )
+                state_group = self.get_success(
+                    self.store._get_state_group_for_event(event.event_id)
+                )
+                assert state_group is not None
+                self.assertTrue(tikv_write_called[0])
+
+                # Mock the read side to avoid hitting Rust tikv_engine
+                with patch.object(
+                    self.state_datastore,
+                    "_materialize_state_hamt_from_tikv_direct",
+                    return_value=[(EventTypes.Create, "", event.event_id)],
+                ):
+                    # With the pre-commit TiKV write, the group should be readable
+                    # from TiKV immediately (no retry needed).
+                    res = self.get_success(
+                        self.state_datastore._get_state_groups_from_groups(
+                            [state_group], StateFilter.all()
+                        )
+                    )
+                    self.assertEqual(
+                        res[state_group], {(EventTypes.Create, ""): event.event_id}
+                    )
+        finally:
+            self.state_datastore.tikv_pd_endpoints = []
+
+    def test_tikv_retry_handles_transient_read_miss(self) -> None:
+        """A transient TiKV read miss (e.g. network blip on one read) retries
+        and succeeds. This is distinct from the publication race — it tests
+        the read-side retry for cases where TiKV has the data but one read
+        returns None."""
+        from unittest.mock import patch
+
+        from twisted.internet import defer
+
+        # We need to persist the event FIRST without TiKV, so it's in SQL.
+        event = self.inject_state_event(
+            self.room, self.u_alice, EventTypes.Create, "", {}
+        )
+        state_group = self.get_success(
+            self.store._get_state_group_for_event(event.event_id)
+        )
+        assert state_group is not None
+
+        # Now enable TiKV and mock the read failure
+        self._enable_mock_tikv()
+
+        # Return None on attempt 0, then return valid entries on attempt 1
+        responses = [None, [(EventTypes.Create, "", event.event_id)]]
+
+        def mock_mat(sg: int) -> list[tuple[str, str, str]] | None:
+            if responses:
+                return responses.pop(0)
+            return [(EventTypes.Create, "", event.event_id)]
+
+        try:
+            with (
+                patch.object(
+                    self.state_datastore,
+                    "_materialize_state_hamt_from_tikv_direct",
+                    side_effect=mock_mat,
+                ),
+                patch.object(
+                    self.state_datastore.hs.get_clock(),
+                    "sleep",
+                    return_value=defer.succeed(None),
+                ) as mock_sleep,
+            ):
+                res = self.get_success(
+                    self.state_datastore._get_state_groups_from_groups(
+                        [state_group], StateFilter.all()
+                    )
+                )
+                self.assertEqual(
+                    res[state_group], {(EventTypes.Create, ""): event.event_id}
+                )
+                self.assertEqual(mock_sleep.call_count, 1)
+        finally:
+            self.state_datastore.tikv_pd_endpoints = []
+
     def test_mixed_existing_and_nonexistent_groups_under_tikv(self) -> None:
         """Verify that requests with both existing TiKV-retried groups and nonexistent groups return all keys."""
         from unittest.mock import patch

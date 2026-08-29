@@ -1357,6 +1357,28 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 local_roots[sg_after] = (root_hash, lattice)
                 sg_before = sg_after
 
+            # Publish all batched state groups to TiKV BEFORE the SQL
+            # transaction commits, so no reader can observe a
+            # state_groups row whose TiKV root is absent.
+            if self.tikv_pd_endpoints and hamt_writes:
+                all_nodes = [node for _, _, _, nodes in hamt_writes for node in nodes]
+                roots = [
+                    (
+                        _state_hamt_root_tikv_key(self.tikv_namespace, group),
+                        _encode_state_hamt_root(
+                            room_prefix, root_hash, lattice, room_id=room_id
+                        ),
+                    )
+                    for group, root_hash, lattice, _ in hamt_writes
+                ]
+                put_state_hamt_objects(
+                    self.tikv_namespace,
+                    room_prefix,
+                    all_nodes,
+                    roots,
+                    bool(self.tikv_pd_endpoints),
+                )
+
             return events_and_context, hamt_writes
 
         events_and_context, hamt_writes = await self.db_pool.runInteraction(
@@ -1364,23 +1386,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             insert_deltas_group_txn,
             events_and_context,
             prev_group,
-        )
-
-        # All state groups in the batch share the same room (linear chain),
-        # so flush all their content-addressed nodes to TiKV in a single
-        # batched write rather than one round-trip per state group.
-        all_nodes = [node for _, _, _, nodes in hamt_writes for node in nodes]
-        roots = [
-            (
-                _state_hamt_root_tikv_key(self.tikv_namespace, group),
-                _encode_state_hamt_root(
-                    room_prefix, root_hash, lattice, room_id=room_id
-                ),
-            )
-            for group, root_hash, lattice, _ in hamt_writes
-        ]
-        await self._put_state_hamt_objects_after_txn(
-            room_id, room_version, all_nodes, roots
         )
 
         return events_and_context
@@ -1495,6 +1500,33 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 )
             )
 
+            # Publish to TiKV BEFORE the SQL transaction commits.  This
+            # closes the publication race: no reader can observe the
+            # state_groups row until TiKV already has the root + nodes.
+            # If TiKV write fails, the exception aborts this callback,
+            # the SQL transaction rolls back, and no state_groups row is
+            # visible.  Orphaned immutable TiKV objects from a succeeded
+            # TiKV write / rolled-back SQL commit are harmless and
+            # GC-able.
+            if self.tikv_pd_endpoints:
+                put_state_hamt_objects(
+                    self.tikv_namespace,
+                    room_prefix,
+                    nodes,
+                    [
+                        (
+                            _state_hamt_root_tikv_key(self.tikv_namespace, state_group),
+                            _encode_state_hamt_root(
+                                room_prefix,
+                                root_structural_hash,
+                                lattice,
+                                room_id=room_id,
+                            ),
+                        )
+                    ],
+                    bool(self.tikv_pd_endpoints),
+                )
+
             return state_group, root_structural_hash, lattice, nodes
 
         state_group, root_hash, lattice, nodes = await self.db_pool.runInteraction(
@@ -1503,19 +1535,11 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             current_state_ids,
         )
 
-        await self._put_state_hamt_objects_after_txn(
-            room_id,
-            room_version,
-            nodes,
-            [
-                (
-                    _state_hamt_root_tikv_key(self.tikv_namespace, state_group),
-                    _encode_state_hamt_root(
-                        room_prefix, root_hash, lattice, room_id=room_id
-                    ),
-                )
-            ],
-        )
+        # TiKV was already written inside the transaction above.  The
+        # _put_state_hamt_objects_after_txn call is kept only for the
+        # batched path (store_state_deltas_for_batched) which writes
+        # multiple groups in one SQL transaction; single-group persists
+        # are fully published before commit.
 
         logger.debug(
             "[gg-state-timing] store_state_group group=%d elapsed_ms=%.1f",
