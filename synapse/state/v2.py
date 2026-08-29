@@ -195,7 +195,7 @@ async def resolve_events_with_store(
                         new_to_fetch.add(aid)
         to_fetch = new_to_fetch
 
-    logger.info(
+    logger.debug(
         "[gg-state-timing] state_v2_auth_prefetch "
         "conflicted=%d auth_diff_ms=%.1f rounds=%d requested=%d loaded=%d "
         "prefetch_ms=%.1f",
@@ -234,7 +234,7 @@ async def resolve_events_with_store(
                 list(full_conflicted_set),
                 event_map,
             )
-            logger.info(
+            logger.debug(
                 "[gg-state-timing] state_v2_rust_resolve "
                 "conflicted=%d event_map=%d elapsed_ms=%.1f",
                 len(full_conflicted_set),
@@ -320,7 +320,7 @@ async def resolve_events_with_store(
     # We make sure that unconflicted state always still applies.
     resolved_state.update(unconflicted_state)
 
-    logger.info(
+    logger.debug(
         "[gg-state-timing] state_v2_python_resolve "
         "conflicted=%d event_map=%d elapsed_ms=%.1f",
         len(full_conflicted_set),

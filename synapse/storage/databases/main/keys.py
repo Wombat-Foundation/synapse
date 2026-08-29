@@ -279,7 +279,7 @@ class KeyStore(CacheInvalidationWorkerStore):
                     [(server_name, key_id) for key_id in keys_to_persist],
                 )
 
-            logger.info(
+            logger.debug(
                 "[gg-keys-timing] store_server_keys_response_txn server=%s "
                 "key_ids=%d elapsed_ms=%.1f",
                 server_name,

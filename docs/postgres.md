@@ -141,9 +141,9 @@ workload (many tables, write-heavy).
 ### Memory Settings
 
 -   `shared_buffers`: The amount of memory dedicated to caching data
-    pages. Set to approximately 25% of system RAM, up to about 8GB.
-    Higher values help, but diminishing returns apply above 8GB for most
-    workloads.
+    pages. Start at approximately 25% of system RAM. Values above 8GB can
+    still be appropriate for large, dedicated database servers, though
+    diminishing returns often apply above that point.
 
 -   `effective_cache_size`: An estimate of the total memory available
     for disk caching by the OS and PostgreSQL. Set to about 75% of system
@@ -153,12 +153,13 @@ workload (many tables, write-heavy).
 -   `work_mem`: Memory used for hash tables, sorts, and other query
     operations. Increase if you see lots of temporary disk files or slow
     complex queries. Be careful: this is per-sort-operation, so a single
-    query can use multiple times this amount. Start with 32MB for
-    moderate deployments.
+    query can use multiple times this amount. Start with 16MB–32MB for
+    small to moderate deployments, increasing it for larger systems when
+    measurements show that it helps.
 
 -   `maintenance_work_mem`: Memory for maintenance operations like
     `VACUUM`, `CREATE INDEX`, and `ALTER TABLE`. Higher values speed up
-    these operations. Set to 512MB–2GB depending on available RAM.
+    these operations. Set to 512MB–4GB depending on available RAM.
 
 -   `autovacuum_work_mem`: Memory allocated to each autovacuum worker
     process. Defaults to `maintenance_work_mem` if not set explicitly.

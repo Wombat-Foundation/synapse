@@ -158,7 +158,7 @@ def put_state_hamt_objects(
         nodes_start = time.monotonic()
         tikv_engine.batch_put(pairs)
         nodes_elapsed_ms = (time.monotonic() - nodes_start) * 1000
-        logger.info(
+        logger.debug(
             "[gg-state-timing] state_hamt_nodes_batch_put "
             "count=%d bytes=%d elapsed_ms=%.1f",
             len(pairs),
@@ -170,7 +170,7 @@ def put_state_hamt_objects(
         roots_start = time.monotonic()
         tikv_engine.batch_put(roots)
         roots_elapsed_ms = (time.monotonic() - roots_start) * 1000
-        logger.info(
+        logger.debug(
             "[gg-state-timing] state_hamt_roots_batch_put "
             "count=%d bytes=%d elapsed_ms=%.1f",
             len(roots),
@@ -557,7 +557,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
 
             results[group] = dict(state_filter.filter_state(state_map))
 
-        logger.info(
+        logger.debug(
             "[gg-state-timing] _get_state_groups_from_hamt_txn groups=%d "
             "use_tikv=%s elapsed_ms=%.1f missing=%d",
             len(groups),
@@ -677,7 +677,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
             (roots[sg][0], roots[sg][1], roots[sg][2], keys) for sg in present_groups
         ]
         entries_by_group = tikv_engine.lookup_state_hamts(self.tikv_namespace, queries)
-        logger.info(
+        logger.debug(
             "[gg-state-timing] _lookup_state_hamts_from_tikv_direct "
             "groups=%d keys=%d elapsed_ms=%.1f",
             len(state_groups),
@@ -836,7 +836,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
             node_bytes_by_hash[root_structural_hash],
             list(node_bytes_by_hash.items()),
         )
-        logger.info(
+        logger.debug(
             "[gg-state-timing] _materialize_state_hamt_from_postgres_txn "
             "group=%d elapsed_ms=%.1f entries=%d",
             state_group,
@@ -958,7 +958,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
                 bytes(node_hash) for node_hash in missing if node_hash not in nodes
             ]
             if not missing:
-                logger.info(
+                logger.debug(
                     "[gg-state-timing] _lookup_state_hamt_from_postgres_txn "
                     "group=%d keys=%d elapsed_ms=%.1f",
                     state_group,
@@ -1078,7 +1078,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
 
             to_fetch = try_resolve_all()
 
-        logger.info(
+        logger.debug(
             "[gg-state-timing] _lookup_state_hamt_from_postgres_many_txn "
             "groups=%d keys=%d elapsed_ms=%.1f rounds=%d",
             len(groups),

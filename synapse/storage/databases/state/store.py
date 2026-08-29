@@ -177,7 +177,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         Returns:
             Dict of state group to state map.
         """
-        _gg_state_start = time.monotonic()
         if self.tikv_pd_endpoints:
             exact_keys = (
                 state_filter.concrete_types()
@@ -239,7 +238,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 fetch_from_tikv_blocking,
                 groups,
             )
-            logger.info(
+            logger.debug(
                 "[gg-state-timing] _get_state_groups_from_groups tikv_dispatch "
                 "groups=%d elapsed_ms=%.1f missing=%d",
                 len(groups),
@@ -275,7 +274,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 if not missing_groups:
                     return tikv_results
 
-                logger.info(
+                logger.debug(
                     "[gg-state-timing] tikv_root_retry_attempt "
                     "instance=%s attempt=%d missing_count=%d sleep_ms=%d",
                     self.hs.get_instance_name(),
@@ -344,7 +343,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
 
             empty_groups = [group for group in groups if not results[group]]
             if not empty_groups:
-                logger.info(
+                logger.debug(
                     "[gg-state-timing] _get_state_groups_from_groups sql_dispatch "
                     "groups=%d elapsed_ms=%.1f attempts=%d",
                     len(groups),
@@ -379,7 +378,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 get_groups_without_hamt_roots_txn,
             )
             if not missing_groups:
-                logger.info(
+                logger.debug(
                     "[gg-state-timing] _get_state_groups_from_groups sql_dispatch "
                     "groups=%d elapsed_ms=%.1f attempts=%d",
                     len(groups),
@@ -400,7 +399,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 group for group in missing_groups if group in existing_groups
             ]
             if not retry_groups:
-                logger.info(
+                logger.debug(
                     "[gg-state-timing] _get_state_groups_from_groups sql_dispatch "
                     "groups=%d elapsed_ms=%.1f attempts=%d",
                     len(groups),
@@ -416,7 +415,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             )
             await self.hs.get_clock().sleep(Duration(milliseconds=50 * (attempt + 1)))
 
-        logger.info(
+        logger.debug(
             "[gg-state-timing] _get_state_groups_from_groups sql_dispatch "
             "groups=%d elapsed_ms=%.1f attempts=exhausted",
             len(groups),
@@ -743,7 +742,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             updates,
         )
         if prefetched is not None:
-            logger.info(
+            logger.debug(
                 "[gg-state-timing] _prefetch_tikv_hamt group=%d elapsed_ms=%.1f "
                 "nodes=%d",
                 state_group,
@@ -865,7 +864,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 },
             )
 
-        logger.info(
+        logger.debug(
             "[gg-state-timing] _persist_state_hamt_txn mode=rebuild "
             "group=%d entries=%d elapsed_ms=%.1f",
             state_group,
@@ -1041,7 +1040,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     "root_lattice": bytearray(new_lattice),
                 },
             )
-        logger.info(
+        logger.debug(
             "[gg-state-timing] _persist_state_hamt_incremental_txn "
             "group=%d prev=%d updates=%d nodes=%d elapsed_ms=%.1f",
             state_group,
@@ -1210,7 +1209,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             reactor_resume_ms = (caller_resumed - worker_finished) * 1000
             total_ms = (caller_resumed - scheduled) * 1000
 
-            logger.info(
+            logger.debug(
                 "[gg-state-timing] _put_state_hamt_objects_after_txn "
                 "nodes=%d roots=%d total_ms=%.1f queue_ms=%.1f worker_ms=%.1f "
                 "nodes_put_ms=%.1f roots_put_ms=%.1f resume_ms=%.1f",
@@ -1518,7 +1517,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             ],
         )
 
-        logger.info(
+        logger.debug(
             "[gg-state-timing] store_state_group group=%d elapsed_ms=%.1f",
             state_group,
             (time.monotonic() - _gg_store_start) * 1000,
