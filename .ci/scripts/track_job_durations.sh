@@ -8,6 +8,13 @@
 #
 # Defaults to the current branch and docs/development-gg/ci-job-durations.csv.
 # Safe to re-run: it skips (run_id, job_name) pairs already recorded.
+#
+# Rows are kept sorted ascending by run_started_at (column 3) on every run --
+# gh run list/view return newest-first, and appending in fetch order silently
+# leaves the file in newest-first order. Splitting or trending that as if it
+# were chronological order inverts the result (a real regression reads as an
+# improvement, and vice versa) without erroring -- do not skip the sort step
+# below, and don't assume row order without checking column 3 yourself.
 
 set -euo pipefail
 
@@ -15,10 +22,11 @@ branch=${1:-$(git rev-parse --abbrev-ref HEAD)}
 csv_path=${2:-docs/development-gg/ci-job-durations.csv}
 workflow=${WORKFLOW_NAME:-tests.yml}
 limit=${RUN_LIMIT:-20}
+header="branch,run_id,run_started_at,job_id,job_name,duration_seconds,conclusion"
 
 mkdir -p "$(dirname "$csv_path")"
 if [ ! -f "$csv_path" ]; then
-	echo "branch,run_id,run_started_at,job_id,job_name,duration_seconds,conclusion" >"$csv_path"
+	echo "$header" >"$csv_path"
 fi
 
 echo "Fetching last $limit '$workflow' runs on branch '$branch'..." >&2
@@ -56,4 +64,13 @@ for run_id in $run_ids; do
 	done
 done
 
-echo "Updated $csv_path" >&2
+# Re-sort ascending by run_started_at (column 3). Field 5 (job_name) is
+# quoted and may itself contain commas, but it sorts after our key column
+# so quoting doesn't confuse `sort -t,`.
+{
+	echo "$header"
+	tail -n +2 "$csv_path" | sort -t, -k3,3
+} >"${csv_path}.sorted"
+mv "${csv_path}.sorted" "$csv_path"
+
+echo "Updated $csv_path (sorted ascending by run_started_at)" >&2
