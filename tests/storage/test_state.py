@@ -906,6 +906,40 @@ class StateStoreTestCase(HomeserverTestCase):
         finally:
             self.state_datastore.tikv_pd_endpoints = []
 
+    def test_existing_unresolved_group_raises_in_sql_mode(self) -> None:
+        """Verify that an existing state group with no HAMT root raises
+        RuntimeError via the SQL/legacy-HAMT path (TiKV disabled), instead of
+        silently falling through to the legacy `state_groups_state` walk and
+        returning an empty state map."""
+        assert not self.state_datastore.tikv_pd_endpoints
+
+        state_group = 999997
+        self.get_success(
+            self.store.db_pool.simple_insert(
+                table="state_groups",
+                values={
+                    "id": state_group,
+                    "room_id": self.room.to_string(),
+                    "event_id": "$fake-sql:test",
+                },
+                desc="test_unresolved_sql.insert_sg",
+            )
+        )
+        self.get_success(
+            self.store.db_pool.simple_insert(
+                table="state_group_edges",
+                values={"state_group": state_group, "prev_state_group": 1},
+                desc="test_unresolved_sql.insert_edge",
+            )
+        )
+
+        self.get_failure(
+            self.state_datastore._get_state_groups_from_groups(
+                [state_group], StateFilter.all()
+            ),
+            RuntimeError,
+        )
+
     def test_nonexistent_group_returns_empty_dict(self) -> None:
         """Verify that a nonexistent state group (not in SQL) returns {} without raising."""
         from unittest.mock import patch

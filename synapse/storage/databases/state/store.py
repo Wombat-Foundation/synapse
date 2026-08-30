@@ -363,6 +363,22 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             )
             await self.hs.get_clock().sleep(Duration(milliseconds=50 * (attempt + 1)))
 
+        exhausted_groups = [group for group in groups if not results[group]]
+        if exhausted_groups:
+            existing_rows = await self.db_pool.simple_select_many_batch(
+                table="state_groups",
+                column="id",
+                iterable=exhausted_groups,
+                retcols=("id",),
+                desc="_get_state_groups_from_groups.exhausted_check",
+            )
+            existing_in_sql = {group for (group,) in existing_rows}
+            if existing_in_sql:
+                raise RuntimeError(
+                    "State group(s) exist in SQL but have no HAMT root after "
+                    f"10 retries: {existing_in_sql}"
+                )
+
         logger.debug(
             "[gg-state-timing] _get_state_groups_from_groups sql_dispatch "
             "groups=%d elapsed_ms=%.1f attempts=exhausted",
