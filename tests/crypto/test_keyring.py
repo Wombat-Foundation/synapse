@@ -548,7 +548,7 @@ class ServerKeyFetcherTestCase(unittest.HomeserverTestCase):
 
         # First attempt fails and should record a backoff.
         self.get_failure(
-            fetcher.get_server_verify_keys_v2_direct(SERVER_NAME), Exception
+            fetcher.get_server_verify_keys_v2_direct(SERVER_NAME), KeyLookupError
         )
         self.assertEqual(call_count, 1)
 

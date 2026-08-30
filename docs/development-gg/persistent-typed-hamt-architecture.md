@@ -1,8 +1,10 @@
 # Persistent augmented HAMT state storage
 
-Status: adopted design, not yet implemented beyond the typed-root identity
-primitives in `rust/src/state_hamt.rs` (commit `549725d1d1`, "state: fix
-state_group_id and give typed root a real cross-server identity"). This
+Status: adopted design. Persistent incremental updates are implemented via
+`apply_flat_state_updates` and `_persist_state_hamt_incremental_txn` in
+`rust/src/state_hamt.rs` (see the empirical validation table in
+[Empirical validation](#empirical-validation) below). The typed-root
+identity primitives and flat-to-typed migration remain in progress. This
 document is the reference to build against; PRs implementing pieces of it
 should link back here rather than re-deriving the design.
 

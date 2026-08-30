@@ -23,7 +23,6 @@ import hashlib
 import itertools
 import json
 import logging
-import time
 from typing import Iterable, Mapping, cast
 
 from canonicaljson import encode_canonical_json
@@ -109,9 +108,6 @@ class KeyStore(CacheInvalidationWorkerStore):
         def store_server_keys_response_txn(
             txn: LoggingTransaction,
         ) -> dict[str, FetchKeyResult]:
-            # [gg-keys-timing] Temporary diagnostic, see log line below.
-            _gg_txn_start = time.monotonic()
-
             final_keys: dict[str, FetchKeyResult] = dict(verify_keys)
             keys_to_persist: dict[str, FetchKeyResult] = dict(verify_keys)
 
@@ -279,13 +275,6 @@ class KeyStore(CacheInvalidationWorkerStore):
                     [(server_name, key_id) for key_id in keys_to_persist],
                 )
 
-            logger.debug(
-                "[gg-keys-timing] store_server_keys_response_txn server=%s "
-                "key_ids=%d elapsed_ms=%.1f",
-                server_name,
-                len(verify_keys),
-                (time.monotonic() - _gg_txn_start) * 1000,
-            )
             return final_keys
 
         return await self.db_pool.runInteraction(

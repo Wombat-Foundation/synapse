@@ -136,7 +136,11 @@ workload (many tables, write-heavy).
 | autovacuum_work_mem          | 256MB     | 512MB     | 1GB       | 1GB       |
 | max_wal_size                 | 2GB       | 4GB       | 5GB       | 10GB      |
 | wal_buffers                  | 16MB      | 32MB      | 64MB      | 64MB      |
-| max_connections              | 20        | 30        | 50        | 100       |
+
+!!! note
+    `max_connections` should be sized to accommodate the sum of all Synapse
+    process `cp_max` pool limits plus headroom for administrative and
+    unexpected connections. Do not rely on fixed RAM-based values.
 
 ### Memory Settings
 
@@ -172,22 +176,27 @@ Synapse performs many small writes (events, state changes, membership
 updates). Tuning WAL settings helps balance write throughput with
 checkpoint performance.
 
--   `max_wal_size`: Limits how much WAL can be generated between
+-   `max_wal_size`: A soft target for how much WAL can be generated between
     checkpoints. Increasing this (e.g., to 2–10GB) allows checkpoints to
     be spread out more, reducing I/O spikes. Set this higher if you see
-    frequent checkpoints or WAL-related I/O bottlenecks.
+    frequent checkpoints or WAL-related I/O bottlenecks. Note that WAL
+    may exceed this size under heavy write load, failed WAL archiving,
+    or retention settings, so leave sufficient disk headroom.
 
 -   `wal_buffers`: Memory for WAL data before it is flushed to disk.
-    Set to at least 64MB for large deployments. Defaults to
-    `shared_buffers / 32` if not set.
+    Defaults to approximately `shared_buffers / 32`, bounded below by 64kB
+    and above by one WAL segment. Set to at least 64MB for large
+    deployments.
 
 -   `checkpoint_completion_target`: Fraction of the checkpoint interval
     over which the checkpoint is spread. Set to `0.9` to spread I/O more
     evenly and avoid write spikes.
 
 -   `checkpoint_timeout`: Maximum time between automatic checkpoints.
-    Set to `10min` or `15min` for write-heavy workloads. This trades off
-    slightly more WAL storage for less frequent checkpoint I/O.
+    Set to `10min` or `15min` for write-heavy workloads. Longer intervals
+    trade off slightly more WAL storage for less frequent checkpoint I/O,
+    but may lengthen crash recovery because PostgreSQL needs to replay more
+    WAL.
 
 ### Autovacuum Settings
 
@@ -215,16 +224,18 @@ query performance.
 
 -   `effective_io_concurrency`: Number of concurrent disk I/O
     operations the system can handle. Set to `200` for SSDs, `2` for
-    traditional disks. This helps PostgreSQL issue parallel reads when
-    performing sequential scans.
+    traditional disks. This helps PostgreSQL prefetch pages for bitmap
+    heap scans on supported versions.
 
 ### Statistics and Monitoring
 
 -   `shared_preload_libraries`: Set to `'pg_stat_statements'` to
     enable the `pg_stat_statements` extension. This tracks execution
     statistics for all SQL queries and is invaluable for identifying slow
-    queries. After enabling, run `CREATE EXTENSION pg_stat_statements;`
-    in the Synapse database.
+    queries. The `pg_stat_statements` extension may require installing the
+    `postgresql-contrib` (or equivalent) package. After enabling and
+    restarting the PostgreSQL server, run
+    `CREATE EXTENSION pg_stat_statements;` in the Synapse database.
 
 -   `log_min_duration_statement`: Log queries taking longer than this
     many milliseconds. Set to `1000` (1 second) to identify slow queries
@@ -239,8 +250,8 @@ query performance.
 
 Additionally, admins of large deployments might want to consider using
 huge pages to help manage memory, especially when using large values of
-`shared_buffers`. You can read more about that
-[here](https://www.postgresql.org/docs/10/kernel-resources.html#LINUX-HUGE-PAGES).
+`shared_buffers`. You can read more about that in the
+[PostgreSQL huge pages documentation](https://www.postgresql.org/docs/current/kernel-resources.html#LINUX-HUGE-PAGES).
 
 ## Porting from SQLite
 

@@ -2459,7 +2459,7 @@ class EventCreationHandler:
         third_party_result: dict,
         original_event: EventBase,
         original_context: UnpersistedEventContextBase | None = None,
-    ) -> tuple[EventBase, UnpersistedEventContext]:
+    ) -> tuple[EventBase, UnpersistedEventContextBase]:
         # the third_party_event_rules want to replace the event.
         # we do some basic checks, and then return the replacement event.
 
@@ -2564,6 +2564,10 @@ class EventCreationHandler:
             auth_event_ids=None,
             prev_state_events=prev_state_events,
         )
+
+        if original_event.internal_metadata.is_outlier():
+            event.internal_metadata.outlier = True
+            return event, EventContext.for_outlier(self._storage_controllers)
 
         # we rebuild the event context, to be on the safe side. If nothing else,
         # delta_ids might need an update.

@@ -18,7 +18,7 @@ format: ##H Format with ruff
 .PHONY: lint
 lint: ##H Lint the code with mypy
 	uv run mypy
-	cargo clippy --all-targets --all-features
+	cargo +nightly clippy --all-targets --all-features
 p ?=
 
 .PHONY: test

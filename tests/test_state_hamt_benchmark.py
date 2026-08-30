@@ -1,6 +1,5 @@
 from typing import Any
-
-from twisted.trial.unittest import SkipTest
+from unittest import SkipTest
 
 from synapse.api.constants import EventTypes
 from synapse.synapse_rust import state_hamt

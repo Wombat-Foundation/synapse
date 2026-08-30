@@ -180,7 +180,13 @@ class KeyFetchBackoffCache:
         if entry is None:
             return True
         retry_at_ms, _ = entry
-        return self._clock.time_msec() >= retry_at_ms
+        now = self._clock.time_msec()
+        if now >= retry_at_ms:
+            # Backoff window has elapsed; prune the stale entry so the map
+            # cannot grow without bound across many distinct server names.
+            del self._backoff[server_name]
+            return True
+        return False
 
     def record_failure(self, server_name: str) -> None:
         """Record a failed fetch attempt, advancing the backoff interval."""

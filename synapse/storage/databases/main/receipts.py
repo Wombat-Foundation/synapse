@@ -598,10 +598,12 @@ class ReceiptsWorkerStore(SQLBaseStore):
             A dictionary of roomids to a list of receipts.
         """
 
-        def f(txn: LoggingTransaction) -> list[tuple[str, str, str, str, str]]:
+        def f(
+            txn: LoggingTransaction,
+        ) -> list[tuple[str, str, str, str, str | None, str]]:
             if from_key:
                 sql = """
-                    SELECT stream_id, instance_name, room_id, receipt_type, user_id, event_id, data
+                    SELECT stream_id, instance_name, room_id, receipt_type, user_id, event_id, thread_id, data
                     FROM receipts_linearized WHERE
                     stream_id > ? AND stream_id <= ?
                     ORDER BY stream_id DESC
@@ -610,7 +612,7 @@ class ReceiptsWorkerStore(SQLBaseStore):
                 txn.execute(sql, [from_key.stream, to_key.get_max_stream_pos()])
             else:
                 sql = """
-                    SELECT stream_id, instance_name, room_id, receipt_type, user_id, event_id, data
+                    SELECT stream_id, instance_name, room_id, receipt_type, user_id, event_id, thread_id, data
                     FROM receipts_linearized WHERE
                     stream_id <= ?
                     ORDER BY stream_id DESC
@@ -620,8 +622,8 @@ class ReceiptsWorkerStore(SQLBaseStore):
                 txn.execute(sql, [to_key.get_max_stream_pos()])
 
             return [
-                (room_id, receipt_type, user_id, event_id, data)
-                for stream_id, instance_name, room_id, receipt_type, user_id, event_id, data in txn
+                (room_id, receipt_type, user_id, event_id, thread_id, data)
+                for stream_id, instance_name, room_id, receipt_type, user_id, event_id, thread_id, data in txn
                 if MultiWriterStreamToken.is_stream_position_in_range(
                     from_key, to_key, instance_name, stream_id
                 )
@@ -631,21 +633,26 @@ class ReceiptsWorkerStore(SQLBaseStore):
             "get_linearized_receipts_for_all_rooms", f
         )
 
-        results: JsonDict = {}
-        for room_id, receipt_type, user_id, event_id, data in txn_results:
-            # We want a single event per room, since we want to batch the
-            # receipts by room, event and type.
-            room_event = results.setdefault(
-                room_id,
-                {"type": EduTypes.RECEIPT, "room_id": room_id, "content": {}},
+        room_to_receipts: dict[str, list[ReceiptInRoom]] = {}
+        for room_id, receipt_type, user_id, event_id, thread_id, data in txn_results:
+            room_to_receipts.setdefault(room_id, []).append(
+                ReceiptInRoom(
+                    receipt_type=receipt_type,
+                    user_id=user_id,
+                    event_id=event_id,
+                    thread_id=thread_id,
+                    data=db_to_json(data),
+                )
             )
 
-            # The content is of the form:
-            # {"$foo:bar": { "read": { "@user:host": <receipt> }, .. }, .. }
-            event_entry = room_event["content"].setdefault(event_id, {})
-            receipt_type_dict = event_entry.setdefault(receipt_type, {})
-
-            receipt_type_dict[user_id] = db_to_json(data)
+        results: JsonDict = {
+            room_id: {
+                "room_id": room_id,
+                "type": EduTypes.RECEIPT,
+                "content": ReceiptInRoom.merge_to_content(receipts),
+            }
+            for room_id, receipts in room_to_receipts.items()
+        }
 
         return results
 
