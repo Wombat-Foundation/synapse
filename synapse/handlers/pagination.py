@@ -624,6 +624,13 @@ class PaginationHandler:
             # Backfill in the foreground if we found a big gap, have too many holes,
             # or we don't have enough events to fill the limit that the client asked
             # for.
+            #
+            # A page of one event is not enough to establish that the timeline is
+            # continuous: there is no second event whose depth we can compare. In
+            # particular, after a partial-state join, returning such a page and
+            # backfilling asynchronously can give the client a token on the far side
+            # of a gap. Events fetched by the background backfill then fall after the
+            # token and are permanently skipped by that pagination run.
             missing_too_many_events = (
                 number_of_gaps > BACKFILL_BECAUSE_TOO_MANY_GAPS_THRESHOLD
             )
@@ -632,6 +639,7 @@ class PaginationHandler:
                 found_big_gap
                 or missing_too_many_events
                 or not_enough_events_to_fill_response
+                or pagin_config.limit == 1
             ):
                 did_backfill = await self.hs.get_federation_handler().maybe_backfill(
                     room_id,
