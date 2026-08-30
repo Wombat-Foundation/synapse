@@ -1950,6 +1950,7 @@ class StateStoreTestCase(HomeserverTestCase):
             _state_hamt_root_tikv_key,
         )
 
+        # The stale result the removed prefetch would have returned.
         stale_ids = [1]
         deleted_ids = [1, 2]
         tikv_namespace = self.state_datastore.tikv_namespace
@@ -1999,6 +2000,271 @@ class StateStoreTestCase(HomeserverTestCase):
             set(deleted_keys[0]),
             {_state_hamt_root_tikv_key(tikv_namespace, sg) for sg in deleted_ids},
         )
+
+    def test_purge_room_state_concurrent_insertion_no_orphans(self) -> None:
+        """Verify PostgreSQL READ COMMITTED concurrent insertion race during purge."""
+        import threading
+        from typing import Any
+        from unittest.mock import patch
+
+        from synapse.storage.database import LoggingTransaction
+
+        from tests.utils import USE_POSTGRES_FOR_TESTS
+
+        if not USE_POSTGRES_FOR_TESTS:
+            self.skipTest("Requires PostgreSQL")
+
+        room_id_str = "!purge_race:test"
+        room_id = RoomID.from_string(room_id_str)
+        self.get_success(
+            self.store.store_room(
+                room_id_str,
+                room_creator_user_id=self.u_alice.to_string(),
+                is_public=True,
+                room_version=RoomVersions.V1,
+            )
+        )
+
+        event1 = self.inject_state_event(
+            room_id, self.u_alice, EventTypes.Create, "", {}
+        )
+        sg1 = self.get_success(self.store._get_state_group_for_event(event1.event_id))
+        assert sg1 is not None
+
+        self.get_success(
+            self.store.db_pool.simple_insert(
+                table="state_groups_pending_deletion",
+                values={"state_group": sg1, "insertion_ts": 123456789},
+            )
+        )
+
+        from synapse.storage.engines._base import IsolationLevel
+
+        original_runInteraction = self.store.db_pool.runInteraction
+
+        async def mock_runInteraction(
+            desc: str, func: Any, *args: Any, **kwargs: Any
+        ) -> Any:
+            if desc == "purge_room_state":
+                kwargs["isolation_level"] = IsolationLevel.READ_COMMITTED
+            return await original_runInteraction(desc, func, *args, **kwargs)
+
+        with patch.object(
+            self.store.db_pool, "runInteraction", side_effect=mock_runInteraction
+        ):
+            resume_before_event = threading.Event()
+            resume_after_event = threading.Event()
+            bg_ready_to_insert_sg2 = threading.Event()
+            bg_ready_to_insert_sg3 = threading.Event()
+
+            original_execute = LoggingTransaction.execute
+
+            db_config = self.hs.config.database.get_single_database()
+            conn_args = dict(db_config.config.get("args", {}))
+            conn_args.pop("cp_min", None)
+            conn_args.pop("cp_max", None)
+
+            # Use lists to pass out values from the background thread
+            generated_ids = []
+            bg_thread_error = []
+
+            def background_worker() -> None:
+                import psycopg2
+
+                try:
+                    conn = psycopg2.connect(**conn_args)
+                    conn.autocommit = True
+                    cursor = conn.cursor()
+
+                    # --- BRANCH 1: Commit BEFORE parent DELETE ---
+                    if bg_ready_to_insert_sg2.wait(timeout=10.0):
+                        try:
+                            # Allocate sg2 via PostgreSQL sequence
+                            cursor.execute("SELECT nextval('state_group_id_seq')")
+                            row = cursor.fetchone()
+                            assert row is not None
+                            sg2 = row[0]
+                            generated_ids.append(sg2)
+
+                            cursor.execute(
+                                "INSERT INTO state_groups (id, room_id, event_id) VALUES (%s, %s, %s)",
+                                (sg2, room_id_str, "$fake_event2:test"),
+                            )
+                            # Actual outgoing edge for sg2
+                            cursor.execute(
+                                "INSERT INTO state_group_edges (state_group, prev_state_group) VALUES (%s, %s)",
+                                (sg2, sg1),
+                            )
+                            cursor.execute(
+                                "INSERT INTO state_groups_state (state_group, room_id, type, state_key, event_id) VALUES (%s, %s, %s, %s, %s)",
+                                (sg2, room_id_str, "m.room.name", "", "$name2:test"),
+                            )
+                            cursor.execute(
+                                "INSERT INTO state_groups_pending_deletion (state_group, insertion_ts) VALUES (%s, %s)",
+                                (sg2, 123456789),
+                            )
+                            # Dummy HAMT root fixture
+                            cursor.execute(
+                                "INSERT INTO state_hamt_roots (state_group, room_prefix, root_structural_hash) VALUES (%s, %s, %s)",
+                                (
+                                    sg2,
+                                    psycopg2.Binary(b"prefix12"),
+                                    psycopg2.Binary(b"0123456789abcdef"),
+                                ),
+                            )
+                        finally:
+                            resume_before_event.set()
+
+                    # --- BRANCH 2: Commit AFTER parent DELETE ---
+                    if bg_ready_to_insert_sg3.wait(timeout=10.0):
+                        try:
+                            cursor.execute("SELECT nextval('state_group_id_seq')")
+                            row = cursor.fetchone()
+                            assert row is not None
+                            sg3 = row[0]
+                            generated_ids.append(sg3)
+
+                            cursor.execute(
+                                "INSERT INTO state_groups (id, room_id, event_id) VALUES (%s, %s, %s)",
+                                (sg3, room_id_str, "$fake_event3:test"),
+                            )
+                            cursor.execute(
+                                "INSERT INTO state_groups_state (state_group, room_id, type, state_key, event_id) VALUES (%s, %s, %s, %s, %s)",
+                                (sg3, room_id_str, "m.room.name", "", "$name3:test"),
+                            )
+                        finally:
+                            resume_after_event.set()
+
+                    cursor.close()
+                    conn.close()
+                except Exception as e:
+                    bg_thread_error.append(e)
+                    resume_before_event.set()
+                    resume_after_event.set()
+
+            bg_thread = threading.Thread(target=background_worker)
+            bg_thread.start()
+
+            try:
+
+                def mock_execute(
+                    txn: LoggingTransaction, sql: str, parameters: Any = None
+                ) -> object:
+                    if "DELETE FROM state_groups WHERE room_id =" in sql:
+                        bg_ready_to_insert_sg2.set()
+                        if not resume_before_event.wait(timeout=10.0):
+                            raise Exception("Timeout waiting for resume_before_event")
+
+                        if bg_thread_error:
+                            raise Exception(
+                                f"Background thread error: {bg_thread_error[0]}"
+                            )
+
+                        res = original_execute(txn, sql, parameters)
+
+                        bg_ready_to_insert_sg3.set()
+                        if not resume_after_event.wait(timeout=10.0):
+                            raise Exception("Timeout waiting for resume_after_event")
+                        return res
+                    return original_execute(txn, sql, parameters)
+
+                with patch(
+                    "synapse.storage.database.LoggingTransaction.execute",
+                    side_effect=mock_execute,
+                    autospec=True,
+                ):
+                    self.get_success(self.state_datastore.purge_room_state(room_id_str))
+
+            finally:
+                # Ensure the background thread never leaks if an assertion fails
+                bg_ready_to_insert_sg2.set()
+                bg_ready_to_insert_sg3.set()
+                bg_thread.join(timeout=5.0)
+
+            self.assertFalse(bg_thread.is_alive(), "Background thread failed to exit")
+            if bg_thread_error:
+                raise bg_thread_error[0]
+
+            self.assertEqual(
+                len(generated_ids), 2, "Background worker did not generate sg2 and sg3"
+            )
+            sg2, sg3 = generated_ids
+
+            # 1. Assert sg1 and sg2 parents are deleted. sg3 is not.
+            def get_parents(txn: LoggingTransaction) -> list[int]:
+                txn.execute(
+                    f"SELECT id FROM state_groups WHERE id IN ({sg1}, {sg2}, {sg3})"
+                )
+                return [row[0] for row in txn.fetchall()]
+
+            parents = self.get_success(
+                self.store.db_pool.runInteraction("get_parents", get_parents)
+            )
+            self.assertNotIn(sg1, parents, "sg1 parent survived")
+            self.assertNotIn(sg2, parents, "sg2 parent survived")
+            self.assertIn(sg3, parents, "sg3 parent did not survive")
+
+            # 2. Assert NO orphans exist for sg1 or sg2 in any child table
+            def check_orphans(txn: LoggingTransaction) -> dict[str, int]:
+                res = {}
+                child_tables = [
+                    "state_groups_state",
+                    "state_group_edges",
+                    "state_hamt_roots",
+                    "state_groups_pending_deletion",
+                ]
+                for table in child_tables:
+                    txn.execute(
+                        f"""
+                        SELECT count(*) FROM {table}
+                        WHERE state_group IN ({sg1}, {sg2})
+                          AND NOT EXISTS (
+                              SELECT 1 FROM state_groups
+                              WHERE state_groups.id = {table}.state_group
+                          )
+                        """
+                    )
+                    fetch_res = txn.fetchone()
+                    assert fetch_res is not None
+                    res[table] = fetch_res[0]
+                return res
+
+            orphans = self.get_success(
+                self.store.db_pool.runInteraction("check_orphans", check_orphans)
+            )
+            for table, count in orphans.items():
+                self.assertEqual(
+                    count, 0, f"Found {count} orphans for sg1/sg2 in {table}"
+                )
+
+            # 3. Explicitly verify sg3's single expected child row
+            def check_sg3_children(txn: LoggingTransaction) -> dict[str, list[int]]:
+                res = {}
+                for table in [
+                    "state_groups_state",
+                    "state_group_edges",
+                    "state_hamt_roots",
+                    "state_groups_pending_deletion",
+                ]:
+                    txn.execute(
+                        f"SELECT state_group FROM {table} WHERE state_group = {sg3}"
+                    )
+                    res[table] = [row[0] for row in txn.fetchall()]
+                return res
+
+            sg3_children = self.get_success(
+                self.store.db_pool.runInteraction(
+                    "check_sg3_children", check_sg3_children
+                )
+            )
+            self.assertIn(
+                sg3,
+                sg3_children["state_groups_state"],
+                "sg3 child missing from state_groups_state",
+            )
+            self.assertNotIn(
+                sg3, sg3_children["state_group_edges"], "sg3 has unexpected edge"
+            )
 
 
 class CurrentStateDeltaStreamTestCase(HomeserverTestCase):
