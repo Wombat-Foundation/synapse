@@ -493,34 +493,6 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
             )
         return results
 
-    def _state_hamt_root_exists_txn(
-        self,
-        txn: LoggingTransaction,
-        state_group: int,
-        use_tikv: bool | None = None,
-    ) -> bool:
-        """Check whether a state group HAMT root exists."""
-        if use_tikv is None:
-            use_tikv = bool(getattr(self, "tikv_pd_endpoints", None))
-        if use_tikv:
-            from synapse.synapse_rust import tikv_engine
-
-            return (
-                tikv_engine.get(
-                    _state_hamt_root_tikv_key(self.tikv_namespace, state_group)
-                )
-                is not None
-            )
-
-        root = self.db_pool.simple_select_one_onecol_txn(
-            txn,
-            table="state_hamt_roots",
-            keyvalues={"state_group": state_group},
-            retcol="root_structural_hash",
-            allow_none=True,
-        )
-        return root is not None
-
     def _get_state_groups_from_hamt_txn(
         self,
         txn: LoggingTransaction,

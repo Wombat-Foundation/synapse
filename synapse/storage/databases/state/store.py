@@ -62,7 +62,6 @@ from synapse.types.state import StateFilter
 from synapse.util.caches import intern_string
 from synapse.util.caches.dictionary_cache import DictionaryCache
 from synapse.util.cancellation import cancellable
-from synapse.util.duration import Duration
 
 if TYPE_CHECKING:
     from synapse.server import HomeServer
@@ -276,112 +275,31 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
 
             return tikv_results
 
+        # _get_state_groups_from_groups_txn (bg_updates.py) already
+        # disambiguates a missing HAMT root from a legitimately empty/purged
+        # state group *inside* the transaction, and raises RuntimeError
+        # immediately on corruption (an existing `state_groups` row with no
+        # HAMT root). HAMT roots are published atomically with the
+        # `state_groups` row that references them, so there is no
+        # cross-connection visibility race to poll for here: a caller-side
+        # retry loop could never observe a corrupt group without the inner
+        # txn having already raised on the very first attempt. See the
+        # equivalent one-shot check on the TiKV-direct path above.
         chunks = [groups[i : i + 100] for i in range(0, len(groups), 100)]
         _gg_sql_start = time.monotonic()
-        for attempt in range(10):
-            results: dict[int, StateMap[str]] = {}
-            for chunk in chunks:
-                res = await self.db_pool.runInteraction(
-                    "_get_state_groups_from_groups",
-                    self._get_state_groups_from_groups_txn,
-                    chunk,
-                    state_filter,
-                )
-                results.update(res)
-
-            empty_groups = [group for group in groups if not results[group]]
-            if not empty_groups:
-                logger.debug(
-                    "[gg-state-timing] _get_state_groups_from_groups sql_dispatch "
-                    "groups=%d elapsed_ms=%.1f attempts=%d",
-                    len(groups),
-                    (time.monotonic() - _gg_sql_start) * 1000,
-                    attempt + 1,
-                )
-                return results
-
-            # An empty result under a non-full filter is ambiguous on its
-            # own: it might genuinely mean "this group has no state matching
-            # the filter" (nothing to retry), or it might mean the group's
-            # HAMT root simply isn't visible yet on this connection (the
-            # same cross-worker/cross-connection race the full-filter path
-            # below already retries for). get_groups_without_hamt_roots_txn
-            # disambiguates by checking root existence directly, so both
-            # cases share one retry mechanism instead of the non-full-filter
-            # case skipping it and silently returning wrong (empty) state
-            # for a group that's actually still racing into visibility.
-
-            def get_groups_without_hamt_roots_txn(
-                txn: LoggingTransaction,
-            ) -> list[int]:
-                use_tikv = bool(self.tikv_pd_endpoints)
-                return [
-                    group
-                    for group in empty_groups
-                    if not self._state_hamt_root_exists_txn(txn, group, use_tikv)
-                ]
-
-            missing_groups = await self.db_pool.runInteraction(
-                "_get_state_groups_from_groups.check_hamt_roots",
-                get_groups_without_hamt_roots_txn,
+        results: dict[int, StateMap[str]] = {}
+        for chunk in chunks:
+            res = await self.db_pool.runInteraction(
+                "_get_state_groups_from_groups",
+                self._get_state_groups_from_groups_txn,
+                chunk,
+                state_filter,
             )
-            if not missing_groups:
-                logger.debug(
-                    "[gg-state-timing] _get_state_groups_from_groups sql_dispatch "
-                    "groups=%d elapsed_ms=%.1f attempts=%d",
-                    len(groups),
-                    (time.monotonic() - _gg_sql_start) * 1000,
-                    attempt + 1,
-                )
-                return results
-
-            existing_rows = await self.db_pool.simple_select_many_batch(
-                table="state_groups",
-                column="id",
-                iterable=missing_groups,
-                retcols=("id",),
-                desc="_get_state_groups_from_groups.check_state_groups",
-            )
-            existing_groups = {group for (group,) in existing_rows}
-            retry_groups = [
-                group for group in missing_groups if group in existing_groups
-            ]
-            if not retry_groups:
-                logger.debug(
-                    "[gg-state-timing] _get_state_groups_from_groups sql_dispatch "
-                    "groups=%d elapsed_ms=%.1f attempts=%d",
-                    len(groups),
-                    (time.monotonic() - _gg_sql_start) * 1000,
-                    attempt + 1,
-                )
-                return results
-
-            logger.debug(
-                "State group HAMT not ready yet for %s; retrying (%d/10)",
-                retry_groups,
-                attempt + 1,
-            )
-            await self.hs.get_clock().sleep(Duration(milliseconds=50 * (attempt + 1)))
-
-        exhausted_groups = [group for group in groups if not results[group]]
-        if exhausted_groups:
-            existing_rows = await self.db_pool.simple_select_many_batch(
-                table="state_groups",
-                column="id",
-                iterable=exhausted_groups,
-                retcols=("id",),
-                desc="_get_state_groups_from_groups.exhausted_check",
-            )
-            existing_in_sql = {group for (group,) in existing_rows}
-            if existing_in_sql:
-                raise RuntimeError(
-                    "State group(s) exist in SQL but have no HAMT root after "
-                    f"10 retries: {existing_in_sql}"
-                )
+            results.update(res)
 
         logger.debug(
             "[gg-state-timing] _get_state_groups_from_groups sql_dispatch "
-            "groups=%d elapsed_ms=%.1f attempts=exhausted",
+            "groups=%d elapsed_ms=%.1f",
             len(groups),
             (time.monotonic() - _gg_sql_start) * 1000,
         )
