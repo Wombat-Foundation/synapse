@@ -3,10 +3,10 @@
 Status: adopted design. Persistent incremental updates are implemented via
 `apply_flat_state_updates` and `_persist_state_hamt_incremental_txn` in
 `rust/src/state_hamt.rs` (see the empirical validation table in
-[Empirical validation](#empirical-validation) below). The typed-root
-identity primitives and flat-to-typed migration remain in progress. This
-document is the reference to build against; PRs implementing pieces of it
-should link back here rather than re-deriving the design.
+[Empirical validation](#empirical-validation) below). The typed-root identity
+primitives and flat-to-typed migration remain in progress. This document is the
+reference to build against; PRs implementing pieces of it should link back here
+rather than re-deriving the design.
 
 ## Summary
 
@@ -23,12 +23,12 @@ content-addressed immutable nodes
 SQL or TiKV node backend
 ```
 
-The HAMT is the live snapshot/update structure. The typed directory reduces
-bulk reads by event type. LtHash supplies the cross-server state identity.
-SQL remains the default backend; TiKV is an alternative backend, not the
-design center — **and it is not a secret dependency of the SQL default**: see
-Storage ownership below, which was corrected from an earlier draft that
-split roots (SQL) from nodes (TiKV) unconditionally.
+The HAMT is the live snapshot/update structure. The typed directory reduces bulk
+reads by event type. LtHash supplies the cross-server state identity. SQL
+remains the default backend; TiKV is an alternative backend, not the design
+center — **and it is not a secret dependency of the SQL default**: see Storage
+ownership below, which was corrected from an earlier draft that split roots
+(SQL) from nodes (TiKV) unconditionally.
 
 Target costs (`S` = total state size, `S_T` = one type's state size, `D` =
 differing leaves between two roots, `K` = changed keys in an update):
@@ -47,15 +47,16 @@ A brand-new state imported from a flat map necessarily costs O(S) — that's an
 information lower bound (every entry must be read at least once), not a
 storage-engine failure to fix.
 
-**Empirical validation:** the "one state-key update" row above is no longer
-just a target — `rust/src/state_hamt.rs`'s `apply_flat_state_updates` is the
-persistent update API described in [Update and write
-workflow](#update-and-write-workflow) below, and `rust/benches/state_hamt.rs`
-measures it directly against full-map rebuild (`build_root_handle_with_lattice`)
-over a cumulative build from an empty room to 4096 entries (see that file's
-module doc for methodology, and `rust/benches/README.md` for how to run it).
-Results (single run, debug workstation, not a controlled benchmark
-environment — treat the _shape_, not the absolute numbers, as the claim):
+**Empirical validation:** the "one state-key update" row above is no longer just
+a target — `rust/src/state_hamt.rs`'s `apply_flat_state_updates` is the
+persistent update API described in
+[Update and write workflow](#update-and-write-workflow) below, and
+`rust/benches/state_hamt.rs` measures it directly against full-map rebuild
+(`build_root_handle_with_lattice`) over a cumulative build from an empty room to
+4096 entries (see that file's module doc for methodology, and
+`rust/benches/README.md` for how to run it). Results (single run, debug
+workstation, not a controlled benchmark environment — treat the _shape_, not the
+absolute numbers, as the claim):
 
 | state size (S) | full rebuild (cumulative) | incremental apply (cumulative) | speedup | cumulative node reads |
 | -------------- | ------------------------: | -----------------------------: | ------: | --------------------: |
@@ -67,17 +68,17 @@ environment — treat the _shape_, not the absolute numbers, as the claim):
 | 4096           |                70661.1 ms |                       113.0 ms |  625.4× |                 10299 |
 
 The speedup _grows_ with S rather than converging to a constant, which is the
-actual signature of O(K log S) beating O(S) rather than just "a faster
-constant factor." Cumulative node reads track the prediction closely: 4096
-single-key updates against a HAMT with branching factor 32 predicts
+actual signature of O(K log S) beating O(S) rather than just "a faster constant
+factor." Cumulative node reads track the prediction closely: 4096 single-key
+updates against a HAMT with branching factor 32 predicts
 `4096 * log₃₂(4096) ≈ 9830` total node reads if each update only ever touches
 its own root-to-leaf path; the measured 10299 is within ~5% of that, with the
 gap attributable to typed-directory/root overhead and updates that happen to
 land near trie boundaries. This node-read count matters as much as the
 wall-clock number: it's what the bench's fetch-on-demand loop actually forces
 `apply_flat_state_updates` to request from a backing store standing in for
-SQL/TiKV, so it's a direct measurement of "how many storage round-trips does
-one state update really cost," not just a CPU-bound proxy for it.
+SQL/TiKV, so it's a direct measurement of "how many storage round-trips does one
+state update really cost," not just a CPU-bound proxy for it.
 
 ## Core representation
 
@@ -92,23 +93,21 @@ TypedRoot
        event_type_id → subtree_hash
 ```
 
-Each event-type subtree is a persistent CHAMP/HAMT: `state_key_id ->
-short_event_id`. A subtree update path-copies only the affected nodes;
-unchanged nodes remain shared by structural hash.
+Each event-type subtree is a persistent CHAMP/HAMT:
+`state_key_id -> short_event_id`. A subtree update path-copies only the affected
+nodes; unchanged nodes remain shared by structural hash.
 
 The existing flat HAMT (format `0x01`, `build_root_handle`) remains a
 read-compatible format during migration — it is not a second semantic state
 model. Both formats MUST produce the same canonical `state_group_id` for the
-same logical state (this is what
-`typed_root_state_group_id_matches_flat_root` in `state_hamt.rs` already
-asserts for one fixture; see Test and acceptance criteria for the full
-matrix still needed).
+same logical state (this is what `typed_root_state_group_id_matches_flat_root`
+in `state_hamt.rs` already asserts for one fixture; see Test and acceptance
+criteria for the full matrix still needed).
 
-**Never combine collapsed 32-byte `state_group_id` values.** The 32-byte ID
-is `BLAKE2b-256(lattice)` — a digest, not itself homomorphic. Homomorphic
-composition (incremental updates, per-subtree combination) must operate on
-the retained `LtHash` lattice, then collapse to `state_group_id` once, at the
-end.
+**Never combine collapsed 32-byte `state_group_id` values.** The 32-byte ID is
+`BLAKE2b-256(lattice)` — a digest, not itself homomorphic. Homomorphic
+composition (incremental updates, per-subtree combination) must operate on the
+retained `LtHash` lattice, then collapse to `state_group_id` once, at the end.
 
 ## Interning and canonical identity
 
@@ -122,16 +121,16 @@ short_event_id <-> event ID
 
 IDs MUST be permanent and never remapped — a historical root must decode
 identically forever. Prefer interning the complete `(event_type, state_key)`
-pair over a separate global user-ID dictionary; user IDs are common state
-keys but not the whole state-key domain, and splitting them out adds
-classification complexity for no clear win.
+pair over a separate global user-ID dictionary; user IDs are common state keys
+but not the whole state-key domain, and splitting them out adds classification
+complexity for no clear win.
 
-**Identity constraint:** local integer IDs are a storage/cache
-representation only. The canonical tuple `(event_type, state_key, event_id)`
-— the real strings — is what `LtHash`/`state_group_id` is computed over,
-unless the protocol itself defines the IDs as globally stable (it doesn't
-today). Two servers assigning different local IDs must still compute
-identical `state_group_id` for identical logical state.
+**Identity constraint:** local integer IDs are a storage/cache representation
+only. The canonical tuple `(event_type, state_key, event_id)` — the real strings
+— is what `LtHash`/`state_group_id` is computed over, unless the protocol itself
+defines the IDs as globally stable (it doesn't today). Two servers assigning
+different local IDs must still compute identical `state_group_id` for identical
+logical state.
 
 ## Update and write workflow
 
@@ -153,39 +152,39 @@ Per change:
 6. Persist only new nodes plus the root pointer.
 
 **This is the actual fix for the O(S)-per-PDU tax**, not the typed root by
-itself. A normal state PDU changes one logical entry; the current Synapse
-code path (`store_state_group_for_events` et al.) materializes the full
-previous state map and calls `build_root_handle`/`build_typed_root` over all
-S entries again — the builder has no "old root + one mutation" entry point,
-so it re-processes everything every time regardless of how few entries
-actually changed. Fixing this means adding and wiring a persistent
-insert/replace/remove API against an existing root, not just improving the
-full-rebuild path's constant factor.
+itself. A normal state PDU changes one logical entry; the current Synapse code
+path (`store_state_group_for_events` et al.) materializes the full previous
+state map and calls `build_root_handle`/`build_typed_root` over all S entries
+again — the builder has no "old root + one mutation" entry point, so it
+re-processes everything every time regardless of how few entries actually
+changed. Fixing this means adding and wiring a persistent insert/replace/remove
+API against an existing root, not just improving the full-rebuild path's
+constant factor.
 
 Use full-map construction only for: initial import, legacy migration, state
 resolution results with no usable persistent base root, and repair/rebuild
-operations. For K changed entries with a known prior root, always update
-from that root.
+operations. For K changed entries with a known prior root, always update from
+that root.
 
 ## Storage ownership (backend-neutral — corrected)
 
 Earlier draft considered "SQL owns roots, TiKV owns nodes" as the default.
-Rejected: it makes the SQL-default backend secretly depend on TiKV and
-recreates exactly the cross-store publication hazard ("a visible root must
-imply every node reachable from it is readable") that motivated this
-document. The adopted split is backend-local:
+Rejected: it makes the SQL-default backend secretly depend on TiKV and recreates
+exactly the cross-store publication hazard ("a visible root must imply every
+node reachable from it is readable") that motivated this document. The adopted
+split is backend-local:
 
-- **SQL backend:** typed root records AND content-addressed subtree nodes
-  both live in SQL, committed in the same transaction.
+- **SQL backend:** typed root records AND content-addressed subtree nodes both
+  live in SQL, committed in the same transaction.
 - **TiKV backend:** typed root records AND subtree nodes both live in TiKV,
   written in the same TiKV transaction/batch.
 - **SQL-root/TiKV-node mode** (the shape the current short-term fix already
   uses, per `docs/development-gg/tikv-state-root-longterm.txt`) is a
-  _compatibility_ mode for the existing deployment, not the target
-  architecture for making SQL independently efficient.
+  _compatibility_ mode for the existing deployment, not the target architecture
+  for making SQL independently efficient.
 
-SQL shape (roots as indexed metadata, not opaque blobs, so common columns
-are queryable without a decode step):
+SQL shape (roots as indexed metadata, not opaque blobs, so common columns are
+queryable without a decode step):
 
 ```sql
 typed_roots(
@@ -203,10 +202,9 @@ typed_hamt_nodes(
 ```
 
 Invariant, either backend: **a visible/committed root must never reference a
-node that isn't durable yet.** SQL gets this for free from the transaction;
-TiKV needs the batch to land before the pointer becomes visible to any
-reader (or a retryable pending-publication protocol if it can't be one
-atomic operation).
+node that isn't durable yet.** SQL gets this for free from the transaction; TiKV
+needs the batch to land before the pointer becomes visible to any reader (or a
+retryable pending-publication protocol if it can't be one atomic operation).
 
 TiKV key layout, if/when the TiKV backend is built out to this design:
 
@@ -218,39 +216,39 @@ dict:state_key:<id>
 dict:event_id:<id>
 ```
 
-Do not assume TiKV's sorted keyspace gives logical state ranges — HAMT
-hashes are not ordered state keys (this was a real correction made earlier
-in the design discussion; see git history on this branch). Type-scoped bulk
-reads still traverse the selected subtree; they don't become range scans.
+Do not assume TiKV's sorted keyspace gives logical state ranges — HAMT hashes
+are not ordered state keys (this was a real correction made earlier in the
+design discussion; see git history on this branch). Type-scoped bulk reads still
+traverse the selected subtree; they don't become range scans.
 
-Don't move event IDs into TiKV merely to avoid SQL lookups. Only do it when:
-the mapping is permanent/immutable, all readers can resolve it from the same
-TiKV namespace, measured SQL round trips actually dominate the workload, and
+Don't move event IDs into TiKV merely to avoid SQL lookups. Only do it when: the
+mapping is permanent/immutable, all readers can resolve it from the same TiKV
+namespace, measured SQL round trips actually dominate the workload, and
 ownership/repair semantics are specified.
 
 ## Read workflows
 
-**Point lookup:** root handle -> typed directory lookup by `event_type_id`
--> HAMT path lookup by `state_key_id` -> `short_event_id` -> `event_id`. Flat
+**Point lookup:** root handle -> typed directory lookup by `event_type_id` ->
+HAMT path lookup by `state_key_id` -> `short_event_id` -> `event_id`. Flat
 legacy roots use the existing flat-HAMT path.
 
 **Type-scoped bulk read:** root handle -> typed directory lookup -> traverse
 only the selected type's subtree -> decode compact IDs. Cost proportional to
 that event type, not total room state.
 
-**Full read:** traverse all reachable typed subtrees, batch-fetch nodes by
-BFS level (not one round trip per node — this is the SQL/TiKV resolver
-contract both backends must implement; see `tikv-state-root-longterm.txt`'s
-access-pattern note for the existing TiKV BFS shape to match). Remains O(S)
-— unavoidable when the caller actually requests all state.
+**Full read:** traverse all reachable typed subtrees, batch-fetch nodes by BFS
+level (not one round trip per node — this is the SQL/TiKV resolver contract both
+backends must implement; see `tikv-state-root-longterm.txt`'s access-pattern
+note for the existing TiKV BFS shape to match). Remains O(S) — unavoidable when
+the caller actually requests all state.
 
-**Comparison:** compare `state_group_id` (or the root lattice digest) first
-— equal means equal logical state, no tree walk needed. Different identity
-falls through to a structural typed-HAMT diff: pointer-identity skip when
-available, then descend only differing directory entries/subtree paths.
+**Comparison:** compare `state_group_id` (or the root lattice digest) first —
+equal means equal logical state, no tree walk needed. Different identity falls
+through to a structural typed-HAMT diff: pointer-identity skip when available,
+then descend only differing directory entries/subtree paths.
 
-**State resolution / arbitrary merged roots:** apply K persistent updates
-if resolution supplies a changed set relative to a known root. Full O(S)
+**State resolution / arbitrary merged roots:** apply K persistent updates if
+resolution supplies a changed set relative to a known root. Full O(S)
 construction only when resolution supplies just a materialized map with no
 usable base root — again, an input lower bound, not an engine defect.
 
@@ -259,19 +257,18 @@ usable base root — again, an input lower bound, not an engine defect.
 - Keep flat-root (`0x01`) decoding indefinitely during rollout.
 - Write typed roots (`0x02`) only behind an explicit capability/config gate
   initially.
-- Dual-write mode: persist both representations, assert equal
-  `state_group_id` (this is exactly what
-  `typed_root_state_group_id_matches_flat_root` checks at the unit level;
-  needs an integration-level version of the same assertion once wired to
-  real storage).
+- Dual-write mode: persist both representations, assert equal `state_group_id`
+  (this is exactly what `typed_root_state_group_id_matches_flat_root` checks at
+  the unit level; needs an integration-level version of the same assertion once
+  wired to real storage).
 - Prefer typed roots for type-scoped reads once verified; fall back to flat
   roots for unsupported readers or a missing typed object.
 - Don't eagerly migrate existing roots — migrate on read/write, or via a
   background rebuild (see Synapse's existing background-update machinery,
   `synapse/storage/schema/`).
 - Version typed-root serialization (the `TYPED_ROOT_FORMAT` byte) separately
-  from the semantic state identity (`state_group_id`'s meaning doesn't
-  change across format versions).
+  from the semantic state identity (`state_group_id`'s meaning doesn't change
+  across format versions).
 
 ## Test and acceptance criteria
 
@@ -282,9 +279,9 @@ Beyond the single-fixture cross-check already landed
 - empty state, single-entry, replacement, deletion, duplicate-key rejection
   (confirmed: `rezzy::hamt::build_node` hard-errors on duplicate keys via
   `HashCollision` rather than silently resolving "last wins" — both
-  `build_root_handle_and_nodes` and `build_typed_root_and_nodes` propagate
-  that error via `?` before any lattice/tree mismatch could surface, so this
-  is verified safe, not merely assumed)
+  `build_root_handle_and_nodes` and `build_typed_root_and_nodes` propagate that
+  error via `?` before any lattice/tree mismatch could surface, so this is
+  verified safe, not merely assumed)
 - different server secrets producing equal `state_group_id` but different
   `structural_hash`
 - encode/decode preserving structural hash, lattice, identity, and directory
@@ -294,16 +291,16 @@ Beyond the single-fixture cross-check already landed
 - typed bulk reads provably excluding unrelated event types (e.g. assert on
   which node hashes were fetched, not just the returned entries)
 - SQL BFS reads batching node fetches (one query per level, not per node)
-- TiKV reads handling missing/corrupt nodes without silently returning
-  partial state
+- TiKV reads handling missing/corrupt nodes without silently returning partial
+  state
 - root publication never exposing unavailable child nodes
 - structural diff returning exactly the changed tuples
 - legacy flat-root fallback and typed-root migration
 
 Performance acceptance should measure: state-progression cost vs. room size,
-point-lookup latency, type-bulk-read latency, full-read throughput, SQL
-query count per lookup/materialization, TiKV round trips per
-lookup/materialization, and new-node bytes / compaction write amplification.
+point-lookup latency, type-bulk-read latency, full-read throughput, SQL query
+count per lookup/materialization, TiKV round trips per lookup/materialization,
+and new-node bytes / compaction write amplification.
 
 ## Why earlier passes on this kept circling
 
@@ -312,10 +309,9 @@ back-and-forth in the design discussion that preceded this document:
 
 - `LtHash` -> cross-server identity and O(1) root equality only.
 - persistent HAMT -> incremental updates, point lookup, structural diff.
-- typed root -> prune unrelated event types from bulk reads; nothing more
-  (it does not create ordering, and does not make arbitrary state-key range
-  scans efficient — that would need a genuinely ordered index, out of scope
-  here).
-- SQL/TiKV -> durable node storage and batched resolution, symmetric
-  ownership of roots+nodes per backend.
+- typed root -> prune unrelated event types from bulk reads; nothing more (it
+  does not create ordering, and does not make arbitrary state-key range scans
+  efficient — that would need a genuinely ordered index, out of scope here).
+- SQL/TiKV -> durable node storage and batched resolution, symmetric ownership
+  of roots+nodes per backend.
 - interning -> compact local representation, never the identity basis.
