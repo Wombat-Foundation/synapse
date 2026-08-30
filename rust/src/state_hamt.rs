@@ -242,7 +242,15 @@ pub fn room_tikv_prefix_raw(
     let mut prefix = [0u8; PREFIX_LEN];
 
     if msc4291_room_ids_as_hashes {
-        let body = room_id.strip_prefix('!').unwrap_or(room_id);
+        // MSC4291 room IDs are `!` + base64url(hash) with no `:server_name`
+        // suffix, but guard against one anyway (e.g. a future format change)
+        // by decoding only the part before any colon.
+        let body = room_id
+            .strip_prefix('!')
+            .unwrap_or(room_id)
+            .split(':')
+            .next()
+            .unwrap_or("");
         let decoded = URL_SAFE_NO_PAD
             .decode(body)
             .map_err(|e| format!("Failed to decode MSC4291 room id as base64url: {e}"))?;
