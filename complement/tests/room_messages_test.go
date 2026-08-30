@@ -20,10 +20,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/matrix-org/complement"
-	"github.com/matrix-org/complement/b"
-	"github.com/matrix-org/complement/client"
-	"github.com/matrix-org/complement/helpers"
+	"github.com/gamesguru/complement"
+	"github.com/gamesguru/complement/b"
+	"github.com/gamesguru/complement/client"
+	"github.com/gamesguru/complement/helpers"
 	"github.com/matrix-org/gomatrixserverlib/spec"
 	"github.com/tidwall/gjson"
 )
@@ -184,7 +184,7 @@ func TestMessagesOverFederation(t *testing.T) {
 }
 
 // These utilities match what we're using in the Complement repo (see
-// `matrix-org/complement` -> `tests/csapi/room_messages_test.go`)
+// `gamesguru/complement` -> `tests/csapi/room_messages_test.go`)
 
 type MessageDraft struct {
 	Sender  *client.CSAPI

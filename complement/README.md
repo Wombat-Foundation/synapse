@@ -8,12 +8,12 @@ ensure everything works at a holistic level.
 ## Setup
 
 Nothing beyond a [normal Complement
-setup](https://github.com/matrix-org/complement#running) (just Go and Docker).
+setup](https://github.com/gamesguru/complement#running) (just Go and Docker).
 
 
 ## Running tests
 
-Run tests from the [Complement](https://github.com/matrix-org/complement) repo:
+Run tests from the [Complement](https://github.com/gamesguru/complement) repo:
 
 ```shell
 # Run the tests
@@ -44,7 +44,7 @@ For other configurations, try:
   - If setting `WORKERS=1`, optionally set `WORKER_TYPES=` to declare which worker types
     you wish to test. A simple comma-delimited string containing the worker types
     defined from the `WORKERS_CONFIG` template in
-    [here](https://github.com/element-hq/synapse/blob/develop/docker/configure_workers_and_start.py#L54).
+    [here](https://github.com/gamesguru/sithnapse/blob/develop/docker/configure_workers_and_start.py#L54).
     A safe example would be `WORKER_TYPES="federation_inbound, federation_sender,
     synchrotron"`. See the [worker documentation](../workers.md) for additional
     information on workers.

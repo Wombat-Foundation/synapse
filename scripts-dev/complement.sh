@@ -314,9 +314,18 @@ main() {
     ./tests/msc4499
   )
 
+  available_complement_test_packages=()
+  for test_package in "${default_complement_test_packages[@]}"; do
+    if [[ -d "$COMPLEMENT_DIR/$test_package" ]]; then
+      available_complement_test_packages+=("$test_package")
+    else
+      echo "Skipping unavailable Complement test package: $test_package" >&2
+    fi
+  done
+
   # Export the list of test packages as a space-separated environment variable, so other
   # scripts can use it.
-  export SYNAPSE_SUPPORTED_COMPLEMENT_TEST_PACKAGES="${default_complement_test_packages[@]}"
+  export SYNAPSE_SUPPORTED_COMPLEMENT_TEST_PACKAGES="${available_complement_test_packages[@]}"
 
   # Default set of Complement tests to run when using the in-repo test suite. Most
   # likely, this should be all tests.
@@ -426,7 +435,7 @@ main() {
   else
     # Run the tests (from the Complement repo)!
     cd "$COMPLEMENT_DIR"
-    go test "${test_args[@]}" "$@" "${default_complement_test_packages[@]}" || go_test_exit_code=$?
+    go test "${test_args[@]}" "$@" "${available_complement_test_packages[@]}" || go_test_exit_code=$?
   fi
 
   # We don't need to print out executed commands anymore

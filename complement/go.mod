@@ -1,9 +1,9 @@
-module github.com/element-hq/synapse
+module github.com/gamesguru/sithnapse
 
 go 1.25.0
 
 require (
-	github.com/matrix-org/complement v0.0.0-20251120181401-44111a2a8a9d
+	github.com/gamesguru/complement v0.0.0-20251120181401-44111a2a8a9d
 	github.com/matrix-org/gomatrixserverlib v0.0.0-20250813150445-9f5070a65744
 	github.com/tidwall/gjson v1.18.0
 )

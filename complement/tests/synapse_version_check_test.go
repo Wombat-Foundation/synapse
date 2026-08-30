@@ -19,9 +19,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/matrix-org/complement"
-	"github.com/matrix-org/complement/match"
-	"github.com/matrix-org/complement/must"
+	"github.com/gamesguru/complement"
+	"github.com/gamesguru/complement/match"
+	"github.com/gamesguru/complement/must"
 	"github.com/tidwall/gjson"
 )
 

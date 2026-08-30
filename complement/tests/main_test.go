@@ -15,7 +15,7 @@ package synapse_tests
 import (
 	"testing"
 
-	"github.com/matrix-org/complement"
+	"github.com/gamesguru/complement"
 )
 
 func TestMain(m *testing.M) {

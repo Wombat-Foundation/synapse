@@ -8,16 +8,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/matrix-org/complement"
+	"github.com/gamesguru/complement"
 
 	"github.com/matrix-org/gomatrixserverlib"
 
 	"github.com/tidwall/gjson"
 
-	"github.com/matrix-org/complement/b"
-	"github.com/matrix-org/complement/federation"
-	"github.com/matrix-org/complement/helpers"
-	"github.com/matrix-org/complement/must"
+	"github.com/gamesguru/complement/b"
+	"github.com/gamesguru/complement/federation"
+	"github.com/gamesguru/complement/helpers"
+	"github.com/gamesguru/complement/must"
 )
 
 // This test verifies that events sent into a room between a /make_join and
@@ -28,7 +28,7 @@ import (
 // event, for example by sending a follow-up event that references both
 // extremities, prompting the joining server to backfill.
 //
-// See https://github.com/element-hq/synapse/pull/19390
+// See https://github.com/gamesguru/sithnapse/pull/19390
 //
 // This test lives as a in-repo Synapse Complement test because the spec doesn't mandate
 // which events should be resolvable after the `/make_join`/`/send_join` dance (or that

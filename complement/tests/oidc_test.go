@@ -19,11 +19,11 @@ import (
 	"testing"
 
 	dockerClient "github.com/docker/docker/client"
-	"github.com/element-hq/synapse/tests/internal/dockerutil"
-	"github.com/matrix-org/complement"
-	"github.com/matrix-org/complement/client"
-	"github.com/matrix-org/complement/match"
-	"github.com/matrix-org/complement/must"
+	"github.com/gamesguru/sithnapse/tests/internal/dockerutil"
+	"github.com/gamesguru/complement"
+	"github.com/gamesguru/complement/client"
+	"github.com/gamesguru/complement/match"
+	"github.com/gamesguru/complement/must"
 )
 
 const OIDC_HOMESERVER_CONFIG string = `
@@ -46,7 +46,7 @@ oidc_providers:
 //
 // This is a regression test: Synapse previously would fail to start up
 // at all if the OIDC provider was down on startup.
-// https://github.com/element-hq/synapse/issues/8088
+// https://github.com/gamesguru/sithnapse/issues/8088
 //
 // Now instead of failing to start, Synapse will produce a 503 response on the
 // `/_matrix/client/v3/login/sso/redirect/oidc-test_provider` endpoint.
@@ -55,7 +55,7 @@ func TestOIDCProviderUnavailable(t *testing.T) {
 	//
 	// FIXME: Since we're modifying the homeserver config, this should be using a clean
 	// deploy that won't affect subsequent tests because Complement will re-use the
-	// deployment, see https://github.com/element-hq/synapse/issues/19937
+	// deployment, see https://github.com/gamesguru/sithnapse/issues/19937
 	deployment := complement.Deploy(t, 1)
 	defer deployment.Destroy(t)
 
