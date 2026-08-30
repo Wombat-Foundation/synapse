@@ -579,6 +579,7 @@ class MultiWriterIdGenerator(AbstractStreamIdGenerator):
                 self._db.runInteraction,
                 "MultiWriterIdGenerator._update_table",
                 self._update_stream_positions_table_txn,
+                db_autocommit=True,
             )
 
         return self._return_factor * next_id
@@ -626,6 +627,7 @@ class MultiWriterIdGenerator(AbstractStreamIdGenerator):
                 self._db.runInteraction,
                 "MultiWriterIdGenerator._update_table",
                 self._update_stream_positions_table_txn,
+                db_autocommit=True,
             )
 
         return [self._return_factor * next_id for next_id in next_ids]
