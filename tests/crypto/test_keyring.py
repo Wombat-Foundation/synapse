@@ -663,6 +663,66 @@ class ServerKeyFetcherTestCase(unittest.HomeserverTestCase):
             stored[KEY_ID].verify_key.encode(), original_verify_key.encode()
         )
 
+    def test_old_verify_key_readable_from_db_cache(self) -> None:
+        """MSC4499 historical event verification: an expired key that is only
+        ever present in `old_verify_keys` of a fetched response must still be
+        readable back out via the DB-cache fast path (`StoreKeyFetcher` ->
+        `get_server_keys_json`), not just at the moment it was first parsed
+        by `process_v2_response`."""
+        self.reactor.advance(100)
+
+        SERVER_NAME = "server2"
+        OLD_KEY_ID = "ed25519:old"
+        old_key = signedjson.key.generate_signing_key("old")
+        old_verify_key = signedjson.key.get_verify_key(old_key)
+        EXPIRED_TS = self.clock.time_msec() - 1000 * 1000
+
+        current_key = signedjson.key.generate_signing_key("cur")
+        current_verify_key = signedjson.key.get_verify_key(current_key)
+        CURRENT_KEY_ID = "ed25519:cur"
+        VALID_UNTIL_TS = self.clock.time_msec() + 1000 * 1000
+
+        response = {
+            "server_name": SERVER_NAME,
+            "old_verify_keys": {
+                OLD_KEY_ID: {
+                    "key": signedjson.key.encode_verify_key_base64(old_verify_key),
+                    "expired_ts": EXPIRED_TS,
+                }
+            },
+            "valid_until_ts": VALID_UNTIL_TS,
+            "verify_keys": {
+                CURRENT_KEY_ID: {
+                    "key": signedjson.key.encode_verify_key_base64(current_verify_key)
+                }
+            },
+        }
+        signedjson.sign.sign_json(response, SERVER_NAME, current_key)
+
+        async def get_json(destination: str, path: str, **kwargs: Any) -> JsonDict:
+            return response
+
+        self.http_client.get_json.side_effect = get_json
+
+        fetcher = ServerKeyFetcher(self.hs)
+        keys = self.get_success(
+            fetcher.get_keys(SERVER_NAME, [CURRENT_KEY_ID, OLD_KEY_ID], 0)
+        )
+        self.assertIn(OLD_KEY_ID, keys)
+        self.assertEqual(keys[OLD_KEY_ID].valid_until_ts, EXPIRED_TS)
+
+        # Now fetch the same expired key purely through the DB-cache fast
+        # path, as a backdated-event verification would.
+        store_fetcher = StoreKeyFetcher(self.hs)
+        cached_keys = self.get_success(
+            store_fetcher.get_keys(SERVER_NAME, [OLD_KEY_ID], EXPIRED_TS)
+        )
+        self.assertIn(OLD_KEY_ID, cached_keys)
+        self.assertEqual(
+            cached_keys[OLD_KEY_ID].verify_key.encode(), old_verify_key.encode()
+        )
+        self.assertEqual(cached_keys[OLD_KEY_ID].valid_until_ts, EXPIRED_TS)
+
 
 class PerspectivesKeyFetcherTestCase(unittest.HomeserverTestCase):
     def make_homeserver(self, reactor: MemoryReactor, clock: Clock) -> HomeServer:

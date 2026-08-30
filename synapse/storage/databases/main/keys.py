@@ -331,9 +331,19 @@ class KeyStore(CacheInvalidationWorkerStore):
                     ts_valid_until_ms = 0
 
                 # The entire signed JSON response is stored in server_keys_json,
-                # fetch out the bits needed.
+                # fetch out the bits needed. The key may live under either
+                # `verify_keys` (current) or `old_verify_keys` (expired, per
+                # MSC4499 historical event verification) -- check both.
                 key_json = json.loads(bytes(key_json_bytes))
-                key_base64 = key_json["verify_keys"][key_id]["key"]
+                key_entry = key_json["verify_keys"].get(key_id)
+                if key_entry is None:
+                    key_entry = key_json.get("old_verify_keys", {}).get(key_id)
+                if key_entry is None:
+                    # Not present in either section of the stored response
+                    # (e.g. server_signature_keys and server_keys_json
+                    # disagree). Skip rather than raise.
+                    continue
+                key_base64 = key_entry["key"]
 
                 keys[(server_name, key_id)] = FetchKeyResult(
                     verify_key=decode_verify_key_bytes(
