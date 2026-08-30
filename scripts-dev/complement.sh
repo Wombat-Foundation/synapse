@@ -310,6 +310,7 @@ main() {
     ./tests/msc4155
     ./tests/msc4306
     ./tests/msc4222
+    ./tests/msc4429
     ./tests/msc4499
   )
 
