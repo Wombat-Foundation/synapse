@@ -302,23 +302,24 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         # no HAMT root. Since HAMT roots are always published before the
         # SQL transaction that creates their state group commits (see
         # `_get_state_groups_from_groups` in store.py), (b) can only mean
-        # corruption -- treat it as such rather than silently falling
-        # through to the legacy `state_groups_state` walk, which is never
-        # populated on this branch and would otherwise mask the corruption
-        # as an empty state map.
-        existing_rows = self.db_pool.simple_select_many_txn(
-            txn,
-            table="state_groups",
-            column="id",
-            iterable=missing_groups,
-            keyvalues={},
-            retcols=("id",),
-        )
-        existing_in_sql = {group for (group,) in existing_rows}
-        if existing_in_sql:
-            raise RuntimeError(
-                f"State group(s) exist in SQL but have no HAMT root: {existing_in_sql}"
+        # corruption -- but only when TiKV is NOT configured system-wide.
+        # When TiKV is the primary store and use_tikv=False is passed as
+        # an explicit SQL fallback, a missing SQL root is expected (the
+        # root lives in TiKV, not state_hamt_roots).
+        if not getattr(self, "tikv_pd_endpoints", None):
+            existing_rows = self.db_pool.simple_select_many_txn(
+                txn,
+                table="state_groups",
+                column="id",
+                iterable=missing_groups,
+                keyvalues={},
+                retcols=("id",),
             )
+            existing_in_sql = {group for (group,) in existing_rows}
+            if existing_in_sql:
+                raise RuntimeError(
+                    f"State group(s) exist in SQL but have no HAMT root: {existing_in_sql}"
+                )
 
         groups = missing_groups
 

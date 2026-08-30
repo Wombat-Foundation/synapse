@@ -2525,6 +2525,11 @@ class EventCreationHandler:
                 depth=original_event.depth,
                 prev_state_events=prev_state_events,
             )
+
+            if original_event.internal_metadata.is_outlier():
+                event.internal_metadata.outlier = True
+                return event, EventContext.for_outlier(self._storage_controllers)
+
             state_group_before = getattr(
                 original_context, "state_group_before_event", None
             )

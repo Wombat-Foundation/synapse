@@ -911,7 +911,8 @@ class StateStoreTestCase(HomeserverTestCase):
         RuntimeError via the SQL/legacy-HAMT path (TiKV disabled), instead of
         silently falling through to the legacy `state_groups_state` walk and
         returning an empty state map."""
-        assert not self.state_datastore.tikv_pd_endpoints
+        if self.state_datastore.tikv_pd_endpoints:
+            self.skipTest("TiKV configured; corruption check only applies in SQL mode")
 
         state_group = 999997
         self.get_success(

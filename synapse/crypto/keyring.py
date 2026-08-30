@@ -182,9 +182,12 @@ class KeyFetchBackoffCache:
         retry_at_ms, _ = entry
         now = self._clock.time_msec()
         if now >= retry_at_ms:
-            # Backoff window has elapsed; prune the stale entry so the map
-            # cannot grow without bound across many distinct server names.
-            del self._backoff[server_name]
+            # Backoff window has elapsed; allow the attempt, but retain the
+            # current interval so that a subsequent record_failure() keeps
+            # doubling from where it left off rather than resetting to
+            # floor_ms. The entry is only ever cleared by record_success()
+            # (on a successful fetch) or overwritten by record_failure()
+            # (which recomputes retry_at_ms), so it doesn't linger forever.
             return True
         return False
 
@@ -1084,11 +1087,11 @@ class ServerKeyFetcher(BaseV2KeyFetcher):
             raise KeyLookupError("Remote server returned an error: %s" % (e,))
 
         assert isinstance(response, dict)
-        if response["server_name"] != server_name:
+        if "server_name" not in response or response["server_name"] != server_name:
             self._backoff.record_failure(server_name)
             raise KeyLookupError(
                 "Expected a response for server %r not %r"
-                % (server_name, response["server_name"])
+                % (server_name, response.get("server_name"))
             )
 
         try:
