@@ -25,7 +25,6 @@ from typing import (
     TYPE_CHECKING,
     Iterable,
     Mapping,
-    Sequence,
     cast,
 )
 
@@ -1659,27 +1658,20 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         return dict(rows)
 
     async def purge_room_state(self, room_id: str) -> None:
-        state_groups = await self.db_pool.simple_select_onecol(
-            table="state_groups",
-            keyvalues={"room_id": room_id},
-            retcol="id",
-            desc="get_state_groups_for_room_purge",
-        )
-        await self.db_pool.runInteraction(
+        deleted_state_groups: list[int] = await self.db_pool.runInteraction(
             "purge_room_state",
             self._purge_room_state_txn,
             room_id,
-            state_groups,
         )
-        if self.tikv_pd_endpoints and state_groups:
+        if self.tikv_pd_endpoints and deleted_state_groups:
             from synapse.synapse_rust import tikv_engine
 
             await defer_to_thread(
                 self.hs.get_reactor(),
                 tikv_engine.batch_delete,
                 [
-                    _state_hamt_root_tikv_key(self.tikv_namespace, int(state_group))
-                    for state_group in state_groups
+                    _state_hamt_root_tikv_key(self.tikv_namespace, sg)
+                    for sg in deleted_state_groups
                 ],
             )
 
@@ -1687,8 +1679,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         self,
         txn: LoggingTransaction,
         room_id: str,
-        state_groups: Sequence[int] = (),
-    ) -> None:
+    ) -> list[int]:
         # Delete all edges that reference a state group linked to room_id
         logger.info("[purge] removing %s from state_group_edges", room_id)
 
@@ -1716,24 +1707,36 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             (room_id,),
         )
 
-        # Delete HAMT root pointers for this room's state groups before the
-        # state_groups rows themselves are removed below. This runs against
-        # the live room_id predicate inside the same transaction (rather than
-        # the `state_groups` list pre-fetched by the caller) so a state group
-        # created concurrently, after that pre-fetch but before this
-        # transaction started, still has its root cleaned up.
-        logger.info("[purge] removing %s from state_hamt_roots", room_id)
+        # Delete the state_groups rows and capture the exact set of IDs that
+        # were removed. Using RETURNING here (rather than a prior SELECT or
+        # a separate room_id predicate later) means the two operations are
+        # atomic within this statement: under PostgreSQL READ COMMITTED a
+        # concurrent insertion that commits before this statement runs will
+        # be included in the returned set, while one that commits after will
+        # not be touched by this purge at all. There is therefore no race
+        # between the set returned here and the set passed to TiKV cleanup.
+        logger.info("[purge] removing %s from state_groups", room_id)
         txn.execute(
-            """
-            DELETE FROM state_hamt_roots AS shr WHERE shr.state_group IN (
-                SELECT id FROM state_groups AS sg WHERE sg.room_id = ?
-            )""",
+            "DELETE FROM state_groups WHERE room_id = ? RETURNING id",
             (room_id,),
         )
+        deleted_state_groups: list[int] = [row[0] for row in txn.fetchall()]
 
-        logger.info("[purge] removing %s from state_groups", room_id)
-        self.db_pool.simple_delete_txn(
-            txn,
-            table="state_groups",
-            keyvalues={"room_id": room_id},
-        )
+        # Delete SQL HAMT root pointers for exactly the state groups removed
+        # above.  In SQL-HAMT mode, state_hamt_roots holds the authoritative
+        # root structural hash for each group and must be cleaned up.  In TiKV
+        # mode the table is empty (roots are stored in TiKV, not SQL), so this
+        # is a no-op but is kept for correctness on mode transitions.  Driving
+        # the delete from the RETURNING set (not an independent room_id subquery)
+        # ensures it covers the same groups as the TiKV batch_delete below.
+        if deleted_state_groups:
+            logger.info("[purge] removing %s from state_hamt_roots", room_id)
+            self.db_pool.simple_delete_many_txn(
+                txn,
+                table="state_hamt_roots",
+                column="state_group",
+                values=deleted_state_groups,
+                keyvalues={},
+            )
+
+        return deleted_state_groups

@@ -1934,6 +1934,72 @@ class StateStoreTestCase(HomeserverTestCase):
             final_state[final_sg][(EventTypes.JoinRules, "")], event4.event_id
         )
 
+    def test_purge_room_state_tikv_uses_returned_delete_ids(self) -> None:
+        """TiKV cleanup must use IDs returned by the purge transaction.
+
+        A PostgreSQL READ COMMITTED purge can delete a state group which was
+        committed after the old pre-fetch but before the DELETE statement. In
+        that case the transaction returns both IDs, while the old pre-fetch
+        contains only the first. The caller must pass the former to TiKV.
+        """
+        from unittest.mock import patch
+
+        from twisted.internet import defer as _defer
+
+        from synapse.storage.databases.state.bg_updates import (
+            _state_hamt_root_tikv_key,
+        )
+
+        stale_ids = [1]
+        deleted_ids = [1, 2]
+        tikv_namespace = self.state_datastore.tikv_namespace
+        deleted_keys: list[list[bytes]] = []
+
+        def capture_batch_delete(keys: list[bytes]) -> None:
+            deleted_keys.append(keys)
+
+        self._enable_mock_tikv()
+        try:
+            with patch.object(
+                self.state_datastore.db_pool,
+                "simple_select_onecol",
+                return_value=_defer.succeed(stale_ids),
+            ) as prefetch:
+                with patch.object(
+                    self.state_datastore,
+                    "_purge_room_state_txn",
+                    return_value=deleted_ids,
+                ) as purge_transaction:
+                    with patch(
+                        "synapse.storage.databases.state.store.defer_to_thread",
+                        side_effect=lambda _reactor, fn, *args, **kwargs: (
+                            fn(*args, **kwargs),
+                            _defer.succeed(None),
+                        )[1],
+                    ):
+                        with patch(
+                            "synapse.synapse_rust.tikv_engine.batch_delete",
+                            side_effect=capture_batch_delete,
+                        ):
+                            self.get_success(
+                                self.state_datastore.purge_room_state(
+                                    self.room.to_string()
+                                )
+                            )
+
+                purge_transaction.assert_called_once()
+                prefetch.assert_not_called()
+        finally:
+            self.state_datastore.tikv_pd_endpoints = []
+
+        self.assertEqual(
+            len(deleted_keys), 1, "batch_delete must be called exactly once"
+        )
+        self.assertEqual(
+            set(deleted_keys[0]),
+            {_state_hamt_root_tikv_key(tikv_namespace, sg) for sg in deleted_ids},
+        )
+
 
 class CurrentStateDeltaStreamTestCase(HomeserverTestCase):
     def prepare(self, reactor: MemoryReactor, clock: Clock, hs: HomeServer) -> None:

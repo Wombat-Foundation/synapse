@@ -337,3 +337,84 @@ class ChannelsTestCase(BaseMultiWorkerStreamTestCase):
             worker1_store._receipts_id_gen.get_current_token_for_writer("master"),
             new_token,
         )
+
+    def test_all_equal_position_does_not_call_get_updates_since(self) -> None:
+        """A POSITION where prev_token == new_token == current_token is a zero-width
+        interval. _process_position must short-circuit and never call
+        stream.get_updates_since.
+        """
+        from unittest.mock import AsyncMock, patch
+
+        worker1 = self.make_worker_hs(
+            "synapse.app.generic_worker",
+            extra_config={
+                "worker_name": "worker1",
+                "run_background_tasks_on": "worker1",
+                "redis": {"enabled": True},
+            },
+        )
+        self.replicate()
+
+        worker1_cmd_handler = worker1.get_replication_command_handler()
+        fake_conn = cast(IReplicationConnection, object())
+
+        # The receipts stream token on worker1 as seen from the master writer.
+        receipts_stream = worker1_cmd_handler._streams["receipts"]
+        token = receipts_stream.current_token("master")
+
+        # Construct an all-equal POSITION: prev == new == current.
+        position_cmd = PositionCommand("receipts", "master", token, token)
+
+        spy = AsyncMock(return_value=([], token, False))
+        with patch.object(receipts_stream, "get_updates_since", spy):
+            self.get_success(
+                worker1_cmd_handler._process_position(
+                    "receipts", fake_conn, position_cmd
+                )
+            )
+
+        spy.assert_not_called()
+
+    def test_dropped_rdata_position_still_calls_get_updates_since(self) -> None:
+        """A POSITION where current_token == prev_token but prev_token < new_token
+        (the dropped-RDATA scenario) must still call stream.get_updates_since to
+        recover the gap.
+        """
+        from unittest.mock import AsyncMock, patch
+
+        worker1 = self.make_worker_hs(
+            "synapse.app.generic_worker",
+            extra_config={
+                "worker_name": "worker1",
+                "run_background_tasks_on": "worker1",
+                "redis": {"enabled": True},
+            },
+        )
+        self.replicate()
+
+        worker1_store = worker1.get_datastores().main
+        worker1_cmd_handler = worker1.get_replication_command_handler()
+        fake_conn = cast(IReplicationConnection, object())
+
+        receipts_stream = worker1_cmd_handler._streams["receipts"]
+        prev_token = receipts_stream.current_token("master")
+        new_token = prev_token + 1
+
+        # Simulate the dropped-RDATA scenario: roll worker1's position back so
+        # that current_token == prev_token while the writer has advanced to new_token.
+        worker1_store._receipts_id_gen._current_positions["master"] = prev_token
+        worker1_store._receipts_id_gen._persisted_upto_position = prev_token
+
+        position_cmd = PositionCommand("receipts", "master", prev_token, new_token)
+
+        # get_updates_since will return an empty list (no real rows were written
+        # for this synthetic token gap), but it must still be called.
+        spy = AsyncMock(return_value=([], new_token, False))
+        with patch.object(receipts_stream, "get_updates_since", spy):
+            self.get_success(
+                worker1_cmd_handler._process_position(
+                    "receipts", fake_conn, position_cmd
+                )
+            )
+
+        spy.assert_called_once_with("master", prev_token, new_token)

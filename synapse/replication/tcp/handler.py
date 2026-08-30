@@ -705,9 +705,13 @@ class ReplicationCommandHandler:
         # new position, to handle the case where the stream gets "reset"
         # (e.g. for `caches` and `typing` after the writer's restart).
         #
-        # The lower bound is deliberately strict (`<`, not `<=`): if
-        # `current_token == cmd.prev_token`, we have *not* seen the delta this
-        # POSITION describes (`prev_token` -> `new_token`) -- most likely
+        # Special case: if prev_token == new_token == current_token the
+        # POSITION describes a zero-width interval -- there are no rows and
+        # no caches that could be stale. Skip the catch-up fetch entirely.
+        #
+        # Otherwise the lower bound is deliberately strict (`<`, not `<=`):
+        # if `current_token == cmd.prev_token` (but `prev_token < new_token`),
+        # we have *not* seen the delta this POSITION describes -- most likely
         # because the RDATA for it was dropped (e.g. a Redis pub/sub message
         # missed during a brief reconnect). `on_position` below always calls
         # `on_rdata(..., rows=[])` for the position itself, which still
@@ -718,7 +722,10 @@ class ReplicationCommandHandler:
         # `current_token == cmd.prev_token` as "nothing missing" would skip
         # the catch-up fetch below and leave those caches silently stale,
         # even though the id gen (and hence `now_token`) has moved on.
-        missing_updates = not (cmd.prev_token < current_token <= cmd.new_token)
+        missing_updates = not (
+            cmd.prev_token == cmd.new_token == current_token
+            or cmd.prev_token < current_token <= cmd.new_token
+        )
         while missing_updates:
             # Note: There may very well not be any new updates, but we check to
             # make sure. This can particularly happen for the event stream where
