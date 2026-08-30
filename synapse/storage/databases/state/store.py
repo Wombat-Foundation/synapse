@@ -949,6 +949,103 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             ],
         )
 
+    async def _background_backfill_state_hamt_roots(
+        self, progress: dict, batch_size: int
+    ) -> int:
+        """Give every state group that predates schema v95 (the HAMT
+        tables) a `state_hamt_roots` row, by reconstructing its state via
+        the legacy `state_group_edges`/`state_groups_state` walk
+        (`_get_legacy_state_for_groups_txn`) and building+persisting a root
+        for it exactly as `_persist_state_hamt_txn` does for a
+        newly-created group.
+
+        Only applies in SQL mode: when TiKV is configured, a missing SQL
+        root isn't treated as corruption (see the gate in
+        `_get_state_groups_from_groups_txn`), so there's nothing to close
+        here.
+
+        State groups are immutable once created -- nothing else ever
+        writes to an *existing* group's root -- so backfilling one here
+        can't race with a concurrent write to the same group.
+        """
+        if self.tikv_pd_endpoints:
+            await self.db_pool.updates._end_background_update(
+                self.STATE_HAMT_BACKFILL_ROOTS_UPDATE_NAME
+            )
+            return 1
+
+        last_state_group = progress.get("last_state_group", 0)
+
+        def get_batch_txn(txn: LoggingTransaction) -> list[tuple[int, str]]:
+            txn.execute(
+                """
+                SELECT sg.id, sg.room_id
+                FROM state_groups sg
+                LEFT JOIN state_hamt_roots hr ON hr.state_group = sg.id
+                WHERE sg.id > ? AND hr.state_group IS NULL
+                ORDER BY sg.id
+                LIMIT ?
+                """,
+                (last_state_group, batch_size),
+            )
+            return cast(list[tuple[int, str]], txn.fetchall())
+
+        rows = await self.db_pool.runInteraction(
+            f"{self.STATE_HAMT_BACKFILL_ROOTS_UPDATE_NAME}_select", get_batch_txn
+        )
+
+        if not rows:
+            await self.db_pool.updates._end_background_update(
+                self.STATE_HAMT_BACKFILL_ROOTS_UPDATE_NAME
+            )
+            return 0
+
+        from synapse.api.errors import NotFoundError
+        from synapse.synapse_rust import state_hamt
+
+        main_store = self.hs.get_datastores().main
+        secret = self._state_hamt_secret()
+        room_prefixes: dict[str, bytes | None] = {}
+        for _state_group, room_id in rows:
+            if room_id in room_prefixes:
+                continue
+            try:
+                room_version = await main_store.get_room_version(room_id)
+            except NotFoundError:
+                # No `rooms` row for this room -- can't compute the HAMT
+                # room prefix without knowing msc4291_room_ids_as_hashes.
+                # Leave it unbackfilled; `None` still lets the batch make
+                # progress (below) rather than looping forever on it.
+                room_prefixes[room_id] = None
+                continue
+            room_prefixes[room_id] = state_hamt.room_tikv_prefix(
+                secret, room_id, room_version.msc4291_room_ids_as_hashes
+            )
+
+        def backfill_txn(txn: LoggingTransaction) -> None:
+            for state_group, room_id in rows:
+                room_prefix = room_prefixes[room_id]
+                if room_prefix is None:
+                    continue
+                current_state_ids = self._get_legacy_state_for_groups_txn(
+                    txn, [state_group], StateFilter.all()
+                )[state_group]
+                self._persist_state_hamt_txn(
+                    txn, state_group, room_id, room_prefix, current_state_ids
+                )
+
+            self.db_pool.updates._background_update_progress_txn(
+                txn,
+                self.STATE_HAMT_BACKFILL_ROOTS_UPDATE_NAME,
+                {"last_state_group": rows[-1][0]},
+            )
+
+        await self.db_pool.runInteraction(
+            self.STATE_HAMT_BACKFILL_ROOTS_UPDATE_NAME, backfill_txn
+        )
+
+        return len(rows)
+
     def _persist_state_group_snapshot_txn(
         self,
         txn: LoggingTransaction,
