@@ -12,6 +12,11 @@ psql=(docker exec -e PGPASSWORD=somesecret "$container_id" psql -h localhost -U 
 
 mkdir -p "$stats_dir"
 
+if ! "${psql[@]}" -c "SELECT 1;" >/dev/null 2>&1; then
+    echo "PostgreSQL unavailable; stats skipped" >"$stats_file"
+    exit 0
+fi
+
 {
     echo "Complement PostgreSQL diagnostics"
     echo "test: $test_name"
