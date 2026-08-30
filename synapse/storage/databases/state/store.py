@@ -1000,7 +1000,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             )
             return 0
 
-        from synapse.api.errors import NotFoundError
+        from synapse.api.errors import NotFoundError, UnsupportedRoomVersionError
         from synapse.synapse_rust import state_hamt
 
         main_store = self.hs.get_datastores().main
@@ -1011,11 +1011,15 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 continue
             try:
                 room_version = await main_store.get_room_version(room_id)
-            except NotFoundError:
-                # No `rooms` row for this room -- can't compute the HAMT
-                # room prefix without knowing msc4291_room_ids_as_hashes.
+            except (NotFoundError, UnsupportedRoomVersionError):
+                # Either no `rooms` row for this room, or one whose
+                # room_version is unknown/no longer supported -- either way
+                # we can't compute the HAMT room prefix (it needs
+                # msc4291_room_ids_as_hashes off a resolved RoomVersion).
                 # Leave it unbackfilled; `None` still lets the batch make
-                # progress (below) rather than looping forever on it.
+                # progress (below) rather than looping forever on it, or
+                # -- for UnsupportedRoomVersionError -- failing the whole
+                # background update outright.
                 room_prefixes[room_id] = None
                 continue
             room_prefixes[room_id] = state_hamt.room_tikv_prefix(

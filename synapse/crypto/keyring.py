@@ -1086,7 +1086,23 @@ class ServerKeyFetcher(BaseV2KeyFetcher):
             self._backoff.record_failure(server_name)
             raise KeyLookupError("Remote server returned an error: %s" % (e,))
 
-        assert isinstance(response, dict)
+        if not isinstance(response, dict):
+            # A malformed/malicious server can return any valid JSON here
+            # (a list, string, null, ...), not just an object -- `get_json`'s
+            # `JsonDict` return type is what we expect, not a runtime
+            # guarantee about what actually came off the wire, hence mypy
+            # (wrongly, for this purpose) considering this unreachable.
+            # `assert` both crashes ungracefully on that and disappears
+            # entirely under `python -O`, in which case `"server_name" not
+            # in response` below would raise a different, less useful
+            # exception (e.g. TypeError for a list). Handle it the same way
+            # as the other failure modes here: a clean KeyLookupError with
+            # the failure recorded for backoff.
+            self._backoff.record_failure(server_name)  # type: ignore[unreachable]
+            raise KeyLookupError(
+                f"Expected an object response for server {server_name!r}, "
+                f"got {type(response).__name__}"
+            )
         if "server_name" not in response or response["server_name"] != server_name:
             self._backoff.record_failure(server_name)
             raise KeyLookupError(
