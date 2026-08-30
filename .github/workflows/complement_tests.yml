@@ -127,7 +127,7 @@ jobs:
           set -o pipefail
           COMPLEMENT_DIR=`pwd`/complement synapse/scripts-dev/complement.sh --in-repo -p 1 -json -run 'TestSynapseVersion/Synapse_version_matches_current_git_checkout' 2>&1 \
             | tee /tmp/gotest-sanity-check-complement.log \
-            | "${{ github.workspace }}/.ci/scripts/format_complement.sh"
+            | "${{ github.workspace }}/synapse/.ci/scripts/format_complement.sh"
         shell: bash
         env:
           POSTGRES: ${{ (startsWith(matrix.database, 'Postgres')) && 1 || '' }}
@@ -160,7 +160,7 @@ jobs:
           set -o pipefail
           COMPLEMENT_DIR=`pwd`/complement synapse/scripts-dev/complement.sh -p 1 -json 2>&1 \
             | tee /tmp/gotest-complement.log \
-            | "${{ github.workspace }}/.ci/scripts/format_complement.sh"
+            | "${{ github.workspace }}/synapse/.ci/scripts/format_complement.sh"
         shell: bash
         env:
           POSTGRES: ${{ (startsWith(matrix.database, 'Postgres')) && 1 || '' }}
@@ -194,7 +194,7 @@ jobs:
           set -o pipefail
           COMPLEMENT_DIR=`pwd`/complement synapse/scripts-dev/complement.sh --in-repo -p 1 -json 2>&1 \
             | tee /tmp/gotest-in-repo-complement.log \
-            | "${{ github.workspace }}/.ci/scripts/format_complement.sh"
+            | "${{ github.workspace }}/synapse/.ci/scripts/format_complement.sh"
         shell: bash
         env:
           POSTGRES: ${{ (startsWith(matrix.database, 'Postgres')) && 1 || '' }}
