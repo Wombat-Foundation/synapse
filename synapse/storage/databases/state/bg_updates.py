@@ -302,11 +302,25 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         # no HAMT root. Since HAMT roots are always published before the
         # SQL transaction that creates their state group commits (see
         # `_get_state_groups_from_groups` in store.py), (b) can only mean
-        # corruption -- but only when TiKV is NOT configured system-wide.
-        # When TiKV is the primary store and use_tikv=False is passed as
-        # an explicit SQL fallback, a missing SQL root is expected (the
-        # root lives in TiKV, not state_hamt_roots).
-        if not getattr(self, "tikv_pd_endpoints", None):
+        # corruption -- except when TiKV is the primary store *and* this
+        # particular call explicitly resolved to the SQL fallback
+        # (use_tikv=False passed in), in which case a missing SQL root is
+        # expected (the root lives in TiKV, not state_hamt_roots).
+        #
+        # This must key off the *resolved* use_tikv for this call, not just
+        # whether TiKV is configured system-wide: an internal caller inside
+        # an open transaction (e.g. `_background_deduplicate_state`, which
+        # calls this directly rather than through the async
+        # `_get_state_groups_from_groups` in store.py) can resolve to
+        # use_tikv=True while TiKV is configured, and a missing root there
+        # is exactly the same corruption as in pure-SQL mode -- gating
+        # solely on `tikv_pd_endpoints` would silently skip it.
+        resolved_use_tikv = (
+            use_tikv
+            if use_tikv is not None
+            else bool(getattr(self, "tikv_pd_endpoints", None))
+        )
+        if resolved_use_tikv or not getattr(self, "tikv_pd_endpoints", None):
             existing_rows = self.db_pool.simple_select_many_txn(
                 txn,
                 table="state_groups",
