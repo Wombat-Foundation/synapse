@@ -798,7 +798,7 @@ class RoomsCreateTestCase(RoomBase):
         # When TiKV is configured, HAMT nodes and root pointers move from
         # SQL tables (state_hamt_nodes / state_hamt_roots) to TiKV, reducing
         # the number of SQL transactions needed.
-        expected_txn_count = 26 if self.hs.config.database.tikv_pd_endpoints else 35
+        expected_txn_count = 26 if self.hs.config.database.tikv_pd_endpoints else 32
         self.assertEqual(expected_txn_count, channel.resource_usage.db_txn_count)
 
     def test_post_room_initial_state(self) -> None:
@@ -809,11 +809,11 @@ class RoomsCreateTestCase(RoomBase):
             b'{"initial_state":[{"type": "m.bridge", "content": {}}]}',
         )
 
-        self.assertEqual(HTTPStatus.OK, channel.code, channel.result)
+        self.assertEqual(HTTPStatus.OK, channel.code)
         self.assertTrue("room_id" in channel.json_body)
         assert channel.resource_usage is not None
         # See the comment in test_post_room_no_keys.
-        expected_txn_count = 26 if self.hs.config.database.tikv_pd_endpoints else 38
+        expected_txn_count = 26 if self.hs.config.database.tikv_pd_endpoints else 34
         self.assertEqual(expected_txn_count, channel.resource_usage.db_txn_count)
 
     def test_post_room_topic(self) -> None:
