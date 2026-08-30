@@ -33,15 +33,15 @@ split roots (SQL) from nodes (TiKV) unconditionally.
 Target costs (`S` = total state size, `S_T` = one type's state size, `D` =
 differing leaves between two roots, `K` = changed keys in an update):
 
-| operation                | cost                  |
-|---------------------------|-----------------------|
-| one state-key update      | O(log₃₂ S) new nodes  |
-| K changed keys             | O(K log₃₂ S)          |
-| point lookup                | O(log₃₂ S)            |
-| all state of type T        | O(log₃₂ S + S_T)      |
-| full snapshot               | O(S)                  |
-| root equality                | O(1)                  |
-| structural diff              | O(D log₃₂ S)          |
+| operation            | cost                 |
+| -------------------- | -------------------- |
+| one state-key update | O(log₃₂ S) new nodes |
+| K changed keys       | O(K log₃₂ S)         |
+| point lookup         | O(log₃₂ S)           |
+| all state of type T  | O(log₃₂ S + S_T)     |
+| full snapshot        | O(S)                 |
+| root equality        | O(1)                 |
+| structural diff      | O(D log₃₂ S)         |
 
 A brand-new state imported from a flat map necessarily costs O(S) — that's an
 information lower bound (every entry must be read at least once), not a
@@ -55,18 +55,18 @@ measures it directly against full-map rebuild (`build_root_handle_with_lattice`)
 over a cumulative build from an empty room to 4096 entries (see that file's
 module doc for methodology, and `rust/benches/README.md` for how to run it).
 Results (single run, debug workstation, not a controlled benchmark
-environment — treat the *shape*, not the absolute numbers, as the claim):
+environment — treat the _shape_, not the absolute numbers, as the claim):
 
 | state size (S) | full rebuild (cumulative) | incremental apply (cumulative) | speedup | cumulative node reads |
-|-----------------|---------------------------:|---------------------------------:|--------:|------------------------:|
-| 16              | 1.2 ms                     | 0.3 ms                           | 4.0×    | 16                       |
-| 64              | 17.3 ms                    | 1.5 ms                           | 11.4×   | 90                       |
-| 256             | 270.0 ms                   | 5.6 ms                           | 48.4×   | 454                      |
-| 1024            | 4353.9 ms                  | 25.5 ms                          | 171.0×  | 2098                     |
-| 2048            | 17685.7 ms                 | 54.9 ms                          | 321.9×  | 4587                     |
-| 4096            | 70661.1 ms                 | 113.0 ms                         | 625.4×  | 10299                    |
+| -------------- | ------------------------: | -----------------------------: | ------: | --------------------: |
+| 16             |                    1.2 ms |                         0.3 ms |    4.0× |                    16 |
+| 64             |                   17.3 ms |                         1.5 ms |   11.4× |                    90 |
+| 256            |                  270.0 ms |                         5.6 ms |   48.4× |                   454 |
+| 1024           |                 4353.9 ms |                        25.5 ms |  171.0× |                  2098 |
+| 2048           |                17685.7 ms |                        54.9 ms |  321.9× |                  4587 |
+| 4096           |                70661.1 ms |                       113.0 ms |  625.4× |                 10299 |
 
-The speedup *grows* with S rather than converging to a constant, which is the
+The speedup _grows_ with S rather than converging to a constant, which is the
 actual signature of O(K log S) beating O(S) rather than just "a faster
 constant factor." Cumulative node reads track the prediction closely: 4096
 single-key updates against a HAMT with branching factor 32 predicts
@@ -181,7 +181,7 @@ document. The adopted split is backend-local:
   written in the same TiKV transaction/batch.
 - **SQL-root/TiKV-node mode** (the shape the current short-term fix already
   uses, per `docs/development-gg/tikv-state-root-longterm.txt`) is a
-  *compatibility* mode for the existing deployment, not the target
+  _compatibility_ mode for the existing deployment, not the target
   architecture for making SQL independently efficient.
 
 SQL shape (roots as indexed metadata, not opaque blobs, so common columns

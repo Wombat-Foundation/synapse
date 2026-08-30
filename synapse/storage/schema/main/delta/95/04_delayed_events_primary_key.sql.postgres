@@ -1,14 +1,5 @@
 -- Delay IDs are global opaque identifiers. The store addresses delayed events
 -- by delay_id alone, so make that invariant a primary-key constraint.
---
--- Preflight: surface any colliding delay_ids so migration handlers can inspect
--- them before the deduplication DELETE runs. Each row in this result represents
--- a delay_id shared by more than one event (potentially across different users).
-SELECT delay_id, array_agg(ctid) AS ctids, count(*) AS cnt
-FROM delayed_events
-GROUP BY delay_id
-HAVING count(*) > 1;
-
 ALTER TABLE delayed_events DROP CONSTRAINT delayed_events_pkey;
 DELETE FROM delayed_events WHERE ctid IN (
     SELECT ctid FROM (
