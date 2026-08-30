@@ -2,14 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from opentracing import Span as OpenTracingSpan, Tracer as OpenTracingTracer
+from opentracing import Tracer as OpenTracingTracer
 
-class SpanContext: ...
-
-class Span(OpenTracingSpan):
-    context: SpanContext
-    start_time: float | None
-    end_time: float | None
+from .reporter import BaseReporter
+from .span import Span
 
 class Tracer(OpenTracingTracer):
     active_span: Span | None
@@ -20,14 +16,27 @@ class ConstSampler(Sampler):
     def __init__(self, decision: bool) -> None: ...
 
 class Config:
+    config: dict[str, Any]
+    service_name: str | None
+    validate: bool
+    metrics: Any
+    metrics_factory: Any
+    scope_manager: Any
     sampler: Any
 
     def __init__(
         self,
-        config: Any,
-        service_name: str,
-        scope_manager: Any,
+        config: dict[str, Any] | Any,
+        service_name: str | None = ...,
+        validate: bool = ...,
+        metrics: Any = ...,
         metrics_factory: Any = ...,
+        scope_manager: Any = ...,
     ) -> None: ...
-    def create_tracer(self, sampler: Any, reporter: Any = ...) -> Any: ...
+    def create_tracer(
+        self,
+        reporter: BaseReporter | Any,
+        sampler: Sampler | Any,
+        throttler: Any = ...,
+    ) -> Tracer: ...
     def initialize_tracer(self, io_loop: Any = ...) -> Tracer | None: ...

@@ -959,10 +959,16 @@ def generate_worker_files(
     else:
         healthcheck_urls = ["http://localhost:8080/health"]
 
+    # The URLs above hit each worker's `/health` directly, bypassing nginx, so
+    # they never prove nginx itself is up and routing correctly. Always add a
+    # federation version check through nginx: the main process serves it when
+    # no federation_reader worker is configured.
     # Get the set of all worker types that we have configured
     all_worker_types_in_use = set(
         chain(*[worker.worker_types for worker in requested_workers])
     )
+    if requested_workers:
+        healthcheck_urls.append("http://localhost:8008/_matrix/federation/v1/version")
     # Map locations to upstreams (corresponding to worker types) in Nginx
     # but only if we use the appropriate worker type
     for worker_type in all_worker_types_in_use:
@@ -1233,8 +1239,11 @@ def generate_worker_files(
     # Support TiKV offloading in Complement integration tests
     tikv_endpoints = os.environ.get("SYNAPSE_TIKV_PD_ENDPOINTS")
     if tikv_endpoints:
+        pd_endpoints = [ep.strip() for ep in tikv_endpoints.split(",") if ep.strip()]
+        if not pd_endpoints:
+            raise RuntimeError("SYNAPSE_TIKV_PD_ENDPOINTS was set but had no endpoints")
         shared_config["tikv"] = {
-            "pd_endpoints": [ep.strip() for ep in tikv_endpoints.split(",")]
+            "pd_endpoints": pd_endpoints,
         }
 
     # Shared homeserver config

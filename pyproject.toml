@@ -144,7 +144,7 @@ sytest = [
     "service-identity==24.2.0",
 ]
 
-sentry = ["sentry-sdk>=0.7.2"]
+sentry = ["sentry-sdk>=1.0.0"]
 opentracing = [
     "jaeger-client>=4.2.0",
     "opentracing>=2.2.0",
@@ -188,7 +188,7 @@ all = [
     # url-preview
     "lxml>=4.6.3",
     # sentry
-    "sentry-sdk>=0.7.2",
+    "sentry-sdk>=1.0.0",
     # opentracing
     "jaeger-client>=4.2.0", "opentracing>=2.2.0",
     # redis
@@ -226,7 +226,6 @@ generate_signing_key = "synapse._scripts.generate_signing_key:main"
 hash_password = "synapse._scripts.hash_password:main"
 register_new_matrix_user = "synapse._scripts.register_new_matrix_user:main"
 synapse_port_db = "synapse._scripts.synapse_port_db:main"
-synapse_migrate_tikv = "synapse._scripts.migrate_state_to_tikv:main"
 synapse_review_recent_signups = "synapse._scripts.review_recent_signups:main"
 update_synapse_database = "synapse._scripts.update_synapse_database:main"
 
@@ -317,7 +316,7 @@ core_dev = [
     # Core dependencies from the 'all' extra, excluding enterprise SSO (SAML/LDAP) C-bindings
     "authlib>=0.15.1",
     "lxml>=4.6.3",
-    "sentry-sdk>=0.7.2",
+    "sentry-sdk>=1.0.0",
     "jaeger-client>=4.2.0",
     "opentracing>=2.2.0",
     "thrift>=0.10",
@@ -513,4 +512,3 @@ environment= { PATH = "$PATH:$HOME/.cargo/bin" }
 before-build = "rm -rf {project}/build"
 build-frontend = "build"
 test-command = "python -c 'from synapse.synapse_rust import sum_as_string; print(sum_as_string(1, 2))'"
-

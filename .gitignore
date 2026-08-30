@@ -68,6 +68,12 @@ tmp/
 # docs
 book/
 
+# test stuff
+/media
+*.crt
+*.csr
+*.cnf
+
 # complement
 /complement-*
 /main.tar.gz

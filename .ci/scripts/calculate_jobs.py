@@ -92,16 +92,28 @@ trial_no_extra_tests = [
     }
 ]
 
+trial_tikv_tests = [
+    {
+        "python-version": "3.10",
+        "database": "tikv",
+        "extras": "all",
+    }
+]
+
 print("::group::Calculated trial jobs")
 print(
     json.dumps(
-        trial_sqlite_tests + trial_postgres_tests + trial_no_extra_tests, indent=4
+        trial_sqlite_tests
+        + trial_postgres_tests
+        + trial_no_extra_tests
+        + trial_tikv_tests,
+        indent=4,
     )
 )
 print("::endgroup::")
 
 test_matrix = json.dumps(
-    trial_sqlite_tests + trial_postgres_tests + trial_no_extra_tests
+    trial_sqlite_tests + trial_postgres_tests + trial_no_extra_tests + trial_tikv_tests
 )
 set_output("trial_test_matrix", test_matrix)
 
@@ -129,6 +141,12 @@ sytest_tests = [
         "postgres": "multi-postgres",
         "workers": "workers",
         "reactor": "asyncio",
+    },
+    {
+        "sytest-tag": "bookworm",
+        "postgres": "multi-postgres",
+        "workers": "workers",
+        "tikv": "tikv",
     },
 ]
 

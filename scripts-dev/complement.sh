@@ -176,6 +176,33 @@ main() {
     echo "Checkout available at 'complement-${COMPLEMENT_REF}'"
   fi
 
+  if [[ -z "$use_in_repo_tests" ]] && [[ "$(realpath "$COMPLEMENT_DIR")" == "$(realpath ./complement)" ]]; then
+    echo "COMPLEMENT_DIR points at this repository's in-repo Complement tests." >&2
+    echo "Use --in-repo with COMPLEMENT_DIR=./complement, or unset COMPLEMENT_DIR to test against upstream Complement." >&2
+    return 1
+  fi
+
+  # Compute this before deciding whether to rebuild images. The version-check
+  # test also runs with --fast and --editable, where the standard-image build
+  # branch below is skipped.
+  pkg_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml | head -n1)"
+  git_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+  [ -n "$git_branch" ] && git_branch="b=$git_branch"
+  git_tag="$(git describe --exact-match 2>/dev/null || true)"
+  [ -n "$git_tag" ] && git_tag="t=$git_tag"
+  git_commit="$(git rev-parse --short HEAD 2>/dev/null || true)"
+  git_dirty=""
+  if git describe --dirty=-this_is_a_dirty_checkout 2>/dev/null | grep -q -- '-this_is_a_dirty_checkout$'; then
+    git_dirty="dirty"
+  fi
+  git_version="$(IFS=,; echo "${git_branch:+$git_branch,}${git_tag:+$git_tag,}${git_commit:+$git_commit,}${git_dirty:+$git_dirty,}" | sed 's/,$//')"
+  if [ -n "$git_version" ]; then
+    synapse_version_string="$pkg_version ($git_version)"
+  else
+    synapse_version_string="$pkg_version"
+  fi
+  export SYNAPSE_VERSION_STRING="$synapse_version_string"
+
   if [ -n "$use_editable_synapse" ]; then
     if [[ -e synapse/synapse_rust.abi3.so ]]; then
       # In an editable install, back up the host's compiled Rust module to prevent
@@ -233,9 +260,6 @@ main() {
       # We remove the `egg-info` as it can contain outdated information which won't line
       # up with our current reality.
       rm -rf matrix_synapse.egg-info/
-      # Figure out the Synapse version string in our current checkout
-      synapse_version_string="$(uv run python -c 'from synapse.util import SYNAPSE_VERSION; print(SYNAPSE_VERSION)')"
-
       # Build the base Synapse image from the local checkout
       echo_if_github "::group::Build Docker image: matrixdotorg/synapse"
       $CONTAINER_RUNTIME build ${DOCKER_BUILD_ARGS:-} \
@@ -378,23 +402,30 @@ main() {
   # particularly tricky.
   export PASS_SYNAPSE_LOG_TESTING=1
 
+  if [[ -n "$SYNAPSE_TIKV_PD_ENDPOINTS" ]]; then
+    export PASS_SYNAPSE_TIKV_PD_ENDPOINTS="$SYNAPSE_TIKV_PD_ENDPOINTS"
+  fi
+
   if [ -n "$skip_complement_run" ]; then
     echo "Skipping Complement run as requested."
     return 0
   fi
 
+  local test_start_seconds=$SECONDS
+  local go_test_exit_code=0
+
   # Print out the executed commands so it's more obvious what's happening at the end here.
   # Things are slightly ambiguous with the in-repo vs Complement tests.
   set -x
-  
+
   if [ -n "$use_in_repo_tests" ]; then
     # Run the suite of Complement tests in the `./complement` directory in this repo
     cd "./complement"
-    go test "${test_args[@]}" "$@" "${default_in_repo_complement_test_packages[@]}"
+    go test "${test_args[@]}" "$@" "${default_in_repo_complement_test_packages[@]}" || go_test_exit_code=$?
   else
     # Run the tests (from the Complement repo)!
     cd "$COMPLEMENT_DIR"
-    go test "${test_args[@]}" "$@" "${default_complement_test_packages[@]}"
+    go test "${test_args[@]}" "$@" "${default_complement_test_packages[@]}" || go_test_exit_code=$?
   fi
 
   # We don't need to print out executed commands anymore
@@ -402,6 +433,35 @@ main() {
   # This is just `set +x` without printing `+ set +x` to the console (via
   # https://stackoverflow.com/questions/13195655/bash-set-x-without-it-being-printed/19226038#19226038)
   { set +x; } 2>/dev/null
+
+  local test_duration_seconds=$((SECONDS - test_start_seconds))
+
+  # Benchmark every run: print a clearly greppable duration line for local
+  # trend-watching, and add it to the GitHub Actions job summary when
+  # running in CI so each run's duration is visible/browsable in the
+  # Actions UI without any extra CLI archaeology.
+  #
+  # In CI, do NOT print to stdout/stderr: this script's combined
+  # stdout+stderr is piped (via `2>&1 | tee ... | ...`) into a log file that
+  # a downstream step feeds straight to `gotestfmt` for strict
+  # `go test -json` parsing (see .github/workflows/complement_tests.yml's
+  # "Sanity check Complement image" / "Run Complement Tests" steps). A
+  # stray non-JSON line there breaks gotestfmt's parser (exit code 2) even
+  # though go test itself passed -- unlike that workflow's own `jq`
+  # progress filter, which explicitly tolerates non-JSON lines, gotestfmt
+  # does not. $GITHUB_STEP_SUMMARY is a separate file untouched by that
+  # pipe, so it's always safe.
+  if [ -z "${GITHUB_ACTIONS:-}" ]; then
+    echo "COMPLEMENT_DURATION_SECONDS=${test_duration_seconds}"
+  fi
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    {
+      echo "### Complement duration"
+      echo "\`${test_duration_seconds}s\` (in_repo=\`${use_in_repo_tests:-0}\`)"
+    } >> "$GITHUB_STEP_SUMMARY"
+  fi
+
+  return "$go_test_exit_code"
 }
 
 main "$@"

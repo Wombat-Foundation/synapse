@@ -461,13 +461,22 @@ async def main() -> None:
                     state_before: dict[tuple[str, str], str] = {}
                 elif len(prev_ids) == 1:
                     prev_id = prev_ids[0]
-                    state_before = dict(event_states.get(prev_id, {}))
+                    if prev_id not in event_states:
+                        raise ValueError(
+                            f"Event {ev.event_id} references predecessor {prev_id} "
+                            "which has not appeared earlier in the JSONL input"
+                        )
+                    state_before = dict(event_states[prev_id])
                 else:
                     # Merge point! We must resolve the states after the prev events
                     state_sets = []
                     for pid in prev_ids:
-                        if pid in event_states:
-                            state_sets.append(event_states[pid])
+                        if pid not in event_states:
+                            raise ValueError(
+                                f"Event {ev.event_id} references predecessor {pid} "
+                                "which has not appeared earlier in the JSONL input"
+                            )
+                        state_sets.append(event_states[pid])
 
                     if not state_sets:
                         state_before = {}
@@ -498,8 +507,17 @@ async def main() -> None:
                 bookkeeping_s += time.perf_counter() - loop_start
 
             duration = time.perf_counter() - start_time
-            # Get state of the last event
-            final_state = event_states[events_list[-1].event_id]
+            terminal_events = {event.event_id for event in events_list} - {
+                predecessor
+                for event in events_list
+                for predecessor in event.prev_event_ids()
+            }
+            if len(terminal_events) != 1:
+                raise ValueError(
+                    "JSONL DAG must have exactly one forward extremity, found "
+                    f"{len(terminal_events)}"
+                )
+            final_state = event_states[next(iter(terminal_events))]
             return (
                 RunStats(
                     total_s=duration,
