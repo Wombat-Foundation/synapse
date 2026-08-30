@@ -1169,10 +1169,21 @@ class StateBackgroundUpdateStore(StateGroupBackgroundUpdateStore):
         # lives on `StateGroupDataStore` (store.py), which is where
         # `_persist_state_hamt_txn` -- the same root-building logic used for
         # newly-created groups -- is defined.
-        self.db_pool.updates.register_background_update_handler(
-            self.STATE_HAMT_BACKFILL_ROOTS_UPDATE_NAME,
-            self._background_backfill_state_hamt_roots,  # type: ignore[attr-defined]
-        )
+        #
+        # `StateBackgroundUpdateStore` is also mixed directly into
+        # `synapse_port_db`'s composed `Store` class, which does *not*
+        # inherit `StateGroupDataStore` and so has no
+        # `_background_backfill_state_hamt_roots` (or `_persist_state_hamt_txn`)
+        # to call. `update_synapse_database` has already fully migrated the
+        # source database, including this backfill, before `synapse_port_db`
+        # runs, so there is nothing for the port script to do here -- guard
+        # the registration so constructing that composed `Store` doesn't
+        # crash on the missing attribute.
+        if hasattr(self, "_background_backfill_state_hamt_roots"):
+            self.db_pool.updates.register_background_update_handler(
+                self.STATE_HAMT_BACKFILL_ROOTS_UPDATE_NAME,
+                self._background_backfill_state_hamt_roots,
+            )
 
     async def _background_deduplicate_state(
         self, progress: dict, batch_size: int

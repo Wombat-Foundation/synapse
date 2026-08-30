@@ -224,6 +224,18 @@ IGNORED_TABLES = {
     "worker_read_write_locks",
 }
 
+# Columns present in the SQLite schema for a table but not in the Postgres
+# schema for the same table. `handle_table` below copies whatever columns
+# SQLite reports for a row, so these must be dropped before inserting into
+# Postgres or the insert fails with an undefined-column error.
+SQLITE_ONLY_COLUMNS: dict[str, set[str]] = {
+    # 95/03_state_hamt_pure_tikv.sql.postgres drops `published` since HAMT
+    # roots and nodes became authoritative in TiKV; the SQLite counterpart
+    # leaves it in place because older supported SQLite versions can't drop
+    # a column (see that migration's comment).
+    "state_hamt_roots": {"published"},
+}
+
 
 # These background updates will not be applied upon creation of the postgres database.
 IGNORED_BACKGROUND_UPDATES = {
@@ -231,6 +243,12 @@ IGNORED_BACKGROUND_UPDATES = {
     # already having waited for the SQLite database to complete all running background
     # updates.
     "mark_unreferenced_state_groups_for_deletion_bg_update",
+    # Same reasoning: the SQLite source has already had this backfill run against it
+    # (see the wait for `has_completed_background_updates` above). It also *can't* be
+    # rerun here -- this script's composed `Store` mixes in `StateBackgroundUpdateStore`
+    # directly rather than the full `StateGroupDataStore`, so it has no
+    # `_persist_state_hamt_txn`/`_background_backfill_state_hamt_roots` to run it with.
+    "state_hamt_backfill_roots",
 }
 
 
@@ -526,6 +544,23 @@ class Porter:
                     backward_chunk = min(row[0] for row in brows) - 1
 
                 rows = frows + brows
+
+                sqlite_only_columns = SQLITE_ONLY_COLUMNS.get(table)
+                if sqlite_only_columns:
+                    # headers[0] is the synthetic `rowid` column selected
+                    # above, not a real column -- always keep it. Filter
+                    # before `_convert_rows`, which strips that `rowid`
+                    # element from each row (keeping headers as-is): doing
+                    # this after would misalign the indices below against
+                    # the now rowid-less rows.
+                    keep_indices = [
+                        i
+                        for i, header in enumerate(headers)
+                        if i == 0 or header not in sqlite_only_columns
+                    ]
+                    headers = [headers[i] for i in keep_indices]
+                    rows = [tuple(row[i] for i in keep_indices) for row in rows]
+
                 rows = self._convert_rows(table, headers, rows)
 
                 def insert(txn: LoggingTransaction) -> None:
