@@ -8,16 +8,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gamesguru/complement"
+	"github.com/matrix-org/complement"
 
 	"github.com/matrix-org/gomatrixserverlib"
 
 	"github.com/tidwall/gjson"
 
-	"github.com/gamesguru/complement/b"
-	"github.com/gamesguru/complement/federation"
-	"github.com/gamesguru/complement/helpers"
-	"github.com/gamesguru/complement/must"
+	"github.com/matrix-org/complement/b"
+	"github.com/matrix-org/complement/federation"
+	"github.com/matrix-org/complement/helpers"
+	"github.com/matrix-org/complement/must"
 )
 
 // This test verifies that events sent into a room between a /make_join and

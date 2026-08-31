@@ -20,10 +20,10 @@ import (
 
 	dockerClient "github.com/docker/docker/client"
 	"github.com/gamesguru/sithnapse/tests/internal/dockerutil"
-	"github.com/gamesguru/complement"
-	"github.com/gamesguru/complement/client"
-	"github.com/gamesguru/complement/match"
-	"github.com/gamesguru/complement/must"
+	"github.com/matrix-org/complement"
+	"github.com/matrix-org/complement/client"
+	"github.com/matrix-org/complement/match"
+	"github.com/matrix-org/complement/must"
 )
 
 const OIDC_HOMESERVER_CONFIG string = `

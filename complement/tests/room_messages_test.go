@@ -20,10 +20,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gamesguru/complement"
-	"github.com/gamesguru/complement/b"
-	"github.com/gamesguru/complement/client"
-	"github.com/gamesguru/complement/helpers"
+	"github.com/matrix-org/complement"
+	"github.com/matrix-org/complement/b"
+	"github.com/matrix-org/complement/client"
+	"github.com/matrix-org/complement/helpers"
 	"github.com/matrix-org/gomatrixserverlib/spec"
 	"github.com/tidwall/gjson"
 )
