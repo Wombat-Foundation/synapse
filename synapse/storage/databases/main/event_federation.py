@@ -62,6 +62,7 @@ from synapse.util.json import json_encoder
 
 if TYPE_CHECKING:
     from synapse.server import HomeServer
+    from synapse.storage.databases.main.lock import Lock
 
 oldest_pdu_in_federation_staging = Gauge(
     "synapse_federation_server_oldest_inbound_pdu_in_staging",
@@ -2221,6 +2222,70 @@ class EventFederationWorkerStore(
         )
 
         return origin, event
+
+    async def remove_received_event_and_get_next_staged_event_for_room(
+        self,
+        origin: str,
+        event_id: str,
+        room_id: str,
+        room_version: RoomVersion,
+        lock: "Lock",
+    ) -> tuple[int | None, tuple[str, EventBase] | None, bool]:
+        """Remove a handled PDU, check the room lock, and fetch the next PDU.
+
+        The next PDU remains staged until it has been handled successfully. This
+        keeps the staging queue crash-safe while combining the normal drain-loop
+        database interactions into one transaction.
+
+        Returns:
+            The removed PDU's received timestamp, the next staged PDU if any, and
+            whether the room lock is still valid.
+        """
+
+        def _remove_and_get_next_txn(
+            txn: LoggingTransaction,
+        ) -> tuple[int | None, tuple[str, str, str] | None, bool]:
+            txn.execute(
+                """
+                    DELETE FROM federation_inbound_events_staging
+                    WHERE origin = ? AND event_id = ?
+                    RETURNING received_ts
+                """,
+                (origin, event_id),
+            )
+            row = cast(tuple[int] | None, txn.fetchone())
+            received_ts = row[0] if row is not None else None
+
+            if not lock.is_still_valid_txn(txn):
+                return received_ts, None, False
+
+            txn.execute(
+                """
+                    SELECT event_json, internal_metadata, origin
+                    FROM federation_inbound_events_staging
+                    WHERE room_id = ?
+                    ORDER BY received_ts ASC
+                    LIMIT 1
+                """,
+                (room_id,),
+            )
+            next_row = cast(tuple[str, str, str] | None, txn.fetchone())
+            return received_ts, next_row, True
+
+        received_ts, next_row, lock_is_valid = await self.db_pool.runInteraction(
+            "remove_received_event_and_get_next_staged_event_for_room",
+            _remove_and_get_next_txn,
+        )
+
+        if next_row is None:
+            return received_ts, None, lock_is_valid
+
+        event = make_event_from_dict(
+            event_dict=db_to_json(next_row[0]),
+            room_version=room_version,
+            internal_metadata_dict=db_to_json(next_row[1]),
+        )
+        return received_ts, (next_row[2], event), lock_is_valid
 
     async def prune_staged_events_in_room(
         self,

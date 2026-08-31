@@ -997,6 +997,91 @@ class EventFederationWorkerStoreTestCase(tests.unittest.HomeserverTestCase):
         _, event_id = next_staged_event_info
         self.assertEqual(event_id, "$fake_event_id_500")
 
+    def test_remove_received_event_and_get_next_staged_event_keeps_next_staged(
+        self,
+    ) -> None:
+        """The fused drain operation must not claim the next event prematurely."""
+
+        room_id = "!staging-room:test"
+        origin = "remote.test"
+        # Room v1 takes an explicit event ID, which keeps this storage fixture
+        # concise while still exercising event deserialization.
+        room_version = KNOWN_ROOM_VERSIONS["1"]
+
+        def event_json(event_id: str) -> str:
+            return json_encoder.encode(
+                {
+                    "event_id": event_id,
+                    "room_id": room_id,
+                    "sender": "@alice:remote.test",
+                    "type": EventTypes.Message,
+                    "content": {"body": event_id, "msgtype": "m.text"},
+                    "origin_server_ts": 0,
+                    "depth": 1,
+                    "prev_events": [],
+                    "auth_events": [],
+                    "hashes": {},
+                    "signatures": {},
+                }
+            )
+
+        self.get_success(
+            self.store.db_pool.simple_insert_many(
+                table="federation_inbound_events_staging",
+                keys=(
+                    "origin",
+                    "room_id",
+                    "received_ts",
+                    "event_id",
+                    "event_json",
+                    "internal_metadata",
+                ),
+                values=[
+                    (
+                        origin,
+                        room_id,
+                        1,
+                        "$first:test",
+                        event_json("$first:test"),
+                        "{}",
+                    ),
+                    (
+                        origin,
+                        room_id,
+                        2,
+                        "$second:test",
+                        event_json("$second:test"),
+                        "{}",
+                    ),
+                ],
+                desc="test_fused_staging_drain",
+            )
+        )
+
+        lock = self.get_success(
+            self.store.try_acquire_lock("test_staging_drain", room_id)
+        )
+        assert lock is not None
+        try:
+            received_ts, next_event, lock_is_valid = self.get_success(
+                self.store.remove_received_event_and_get_next_staged_event_for_room(
+                    origin, "$first:test", room_id, room_version, lock
+                )
+            )
+        finally:
+            self.get_success(lock.release())
+
+        self.assertEqual(received_ts, 1)
+        self.assertTrue(lock_is_valid)
+        assert next_event is not None
+        self.assertEqual(next_event[1].event_id, "$second:test")
+
+        # The next event was only fetched: it remains crash-recoverable in staging.
+        self.assertEqual(
+            self.get_success(self.store.get_next_staged_event_id_for_room(room_id)),
+            (origin, "$second:test"),
+        )
+
     def _setup_room_for_backfill_tests(self) -> _BackfillSetupInfo:
         """
         Sets up a room with various events and backward extremities to test
