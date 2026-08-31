@@ -102,6 +102,10 @@ if TYPE_CHECKING:
 # parallel, up to this limit.
 TRANSACTION_CONCURRENCY_LIMIT = 10
 
+# `prune_staged_events_in_room` starts with a COUNT query. Check periodically
+# while draining a busy room rather than paying for that query after every PDU.
+STAGED_EVENT_QUEUE_PRUNE_INTERVAL = 20
+
 logger = logging.getLogger(__name__)
 
 received_pdus_counter = Counter(
@@ -1443,6 +1447,7 @@ class FederationServer(FederationBase):
         # progress: events for a room must be processed in order. Check that the
         # lock is still valid between events so a stale lock cannot keep draining.
         async with lock:
+            events_since_prune_check = 0
             while True:
                 logger.info("handling received PDU in room %s: %s", room_id, event)
                 try:
@@ -1480,6 +1485,8 @@ class FederationServer(FederationBase):
                         **{SERVER_NAME_LABEL: self.server_name}
                     ).observe((self._clock.time_msec() - received_ts) / 1000)
 
+                events_since_prune_check += 1
+
                 if not await lock.is_still_valid():
                     logger.info(
                         "Lost inbound PDU processing lock for room %s while draining",
@@ -1496,24 +1503,24 @@ class FederationServer(FederationBase):
 
                 origin, event = next
 
-                # Prune the event queue if it's getting large.
-                #
-                # We do this *after* handling the first event as the common case is
-                # that the queue is empty (/has the single event in), and so there's
-                # no need to do this check.
-                pruned = await self.store.prune_staged_events_in_room(
-                    room_id, room_version
-                )
-                if pruned:
-                    # If we have pruned the queue check we need to refetch the next
-                    # event to handle.
-                    next = await self.store.get_next_staged_event_for_room(
+                # Prune a busy queue periodically. The queue itself is only pruned
+                # once it reaches 100 events, so checking every event just adds a
+                # COUNT query to the normal drain path.
+                if events_since_prune_check >= STAGED_EVENT_QUEUE_PRUNE_INTERVAL:
+                    events_since_prune_check = 0
+                    pruned = await self.store.prune_staged_events_in_room(
                         room_id, room_version
                     )
-                    if not next:
-                        return
+                    if pruned:
+                        # If we have pruned the queue check we need to refetch the next
+                        # event to handle.
+                        next = await self.store.get_next_staged_event_for_room(
+                            room_id, room_version
+                        )
+                        if not next:
+                            return
 
-                    origin, event = next
+                        origin, event = next
 
     async def exchange_third_party_invite(
         self, sender_user_id: str, target_user_id: str, room_id: str, signed: dict
