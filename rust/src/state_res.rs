@@ -15,7 +15,7 @@
 use std::collections::{HashMap, HashSet};
 
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PySet, PyTuple};
+use pyo3::types::{PyAny, PyDict, PyList, PySet, PyTuple};
 use pythonize::depythonize;
 use rezzy::{
     auth::roaring::AuthGraph, basespec::event_types::EventType, resolve_lattice_fold, LeanEvent,
@@ -169,19 +169,46 @@ pub fn resolve_v2_via_lattice_fold<'py>(
     conflicted_event_ids: Bound<'py, PyAny>,
     event_map: Bound<'py, PyDict>,
 ) -> PyResult<Bound<'py, PyDict>> {
-    let version = StateResVersion::V2;
+    let parsed_events = parse_event_map(event_map)?;
+    resolve_v2_from_parsed_events(py, unconflicted_state, conflicted_event_ids, &parsed_events)
+}
 
-    let mut unconf_state = SharedState::new();
-    for (k, v) in unconflicted_state.iter() {
-        let (type_str, state_key): (String, String) = k.extract()?;
-        let val: String = v.extract()?;
-        unconf_state.insert((EventType::from(type_str), state_key), val);
+/// Resolve several state graphs which share an event graph.
+///
+/// Python currently invokes the resolver once per event context. The callers which
+/// process an ordered PDU queue therefore repeatedly convert the same event graph
+/// into Rust objects. This is the native batching primitive: it performs that
+/// conversion once, then resolves every `(unconflicted_state, conflicted_event_ids)`
+/// pair against it.
+#[pyfunction]
+#[pyo3(text_signature = "(requests, event_map, /)")]
+pub fn resolve_v2_batch_via_lattice_fold<'py>(
+    py: Python<'py>,
+    requests: Bound<'py, PyAny>,
+    event_map: Bound<'py, PyDict>,
+) -> PyResult<Bound<'py, PyList>> {
+    let parsed_events = parse_event_map(event_map)?;
+    let resolved_states = PyList::empty(py);
+
+    for request in requests.try_iter()? {
+        let request = request?;
+        let (unconflicted_state, conflicted_event_ids): (Bound<'py, PyDict>, Bound<'py, PyAny>) =
+            request.extract()?;
+        resolved_states.append(resolve_v2_from_parsed_events(
+            py,
+            unconflicted_state,
+            conflicted_event_ids,
+            &parsed_events,
+        )?)?;
     }
 
-    let conflicted_ids: Vec<String> = conflicted_event_ids.extract()?;
+    Ok(resolved_states)
+}
 
-    let mut parsed_events: HashMap<String, LeanEvent<String, Value>> =
-        HashMap::with_capacity(event_map.len());
+fn parse_event_map(
+    event_map: Bound<'_, PyDict>,
+) -> PyResult<HashMap<String, LeanEvent<String, Value>>> {
+    let mut parsed_events = HashMap::with_capacity(event_map.len());
     for (k, v) in event_map.iter() {
         let event_id: String = k.extract()?;
         let lean_ev = if let Ok(event) = v.extract::<PyRef<Event>>() {
@@ -191,7 +218,23 @@ pub fn resolve_v2_via_lattice_fold<'py>(
         };
         parsed_events.insert(event_id, lean_ev);
     }
+    Ok(parsed_events)
+}
 
+fn resolve_v2_from_parsed_events<'py>(
+    py: Python<'py>,
+    unconflicted_state: Bound<'py, PyDict>,
+    conflicted_event_ids: Bound<'py, PyAny>,
+    parsed_events: &HashMap<String, LeanEvent<String, Value>>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let mut unconf_state = SharedState::new();
+    for (k, v) in unconflicted_state.iter() {
+        let (type_str, state_key): (String, String) = k.extract()?;
+        let val: String = v.extract()?;
+        unconf_state.insert((EventType::from(type_str), state_key), val);
+    }
+
+    let conflicted_ids: Vec<String> = conflicted_event_ids.extract()?;
     let mut conflicted_events = HashMap::with_capacity(conflicted_ids.len());
     for id in conflicted_ids {
         if let Some(ev) = parsed_events.get(&id) {
@@ -199,7 +242,12 @@ pub fn resolve_v2_via_lattice_fold<'py>(
         }
     }
 
-    let resolved = resolve_lattice_fold(unconf_state, conflicted_events, &parsed_events, version);
+    let resolved = resolve_lattice_fold(
+        unconf_state,
+        conflicted_events,
+        parsed_events,
+        StateResVersion::V2,
+    );
 
     let py_resolved = PyDict::new(py);
     for ((type_, state_key), event_id) in resolved {
@@ -218,6 +266,10 @@ pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     )?)?;
     child_module.add_function(wrap_pyfunction!(
         resolve_v2_via_lattice_fold,
+        &child_module
+    )?)?;
+    child_module.add_function(wrap_pyfunction!(
+        resolve_v2_batch_via_lattice_fold,
         &child_module
     )?)?;
     m.add_submodule(&child_module)?;
