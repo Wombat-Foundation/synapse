@@ -437,8 +437,6 @@ class HomeServer(metaclass=abc.ABCMeta):
         object in the garbage collector.
         """
 
-        self._is_shutdown = True
-
         logger.info(
             "Received shutdown request for %s (%s).",
             self.hostname,
@@ -513,18 +511,38 @@ class HomeServer(metaclass=abc.ABCMeta):
         for shutdown_handler in self._async_shutdown_handlers:
             try:
                 self.get_reactor().removeSystemEventTrigger(shutdown_handler.trigger_id)
+            except NotImplementedError:
+                # The in-memory reactor used by unit tests does not implement
+                # trigger removal. The test cleanup clears its trigger list.
+                pass
+            except Exception:
+                logger.exception("Error removing shutdown async handler")
+
+            try:
                 defer.ensureDeferred(shutdown_handler.func(**shutdown_handler.kwargs))
-            except Exception as e:
-                logger.error("Error calling shutdown async handler: %s", e)
+            except Exception:
+                logger.exception("Error starting shutdown async handler")
         self._async_shutdown_handlers.clear()
 
         for shutdown_handler in self._sync_shutdown_handlers:
             try:
                 self.get_reactor().removeSystemEventTrigger(shutdown_handler.trigger_id)
+            except NotImplementedError:
+                # See the corresponding async-handler case above.
+                pass
+            except Exception:
+                logger.exception("Error removing shutdown sync handler")
+
+            try:
                 shutdown_handler.func(**shutdown_handler.kwargs)
-            except Exception as e:
-                logger.error("Error calling shutdown sync handler: %s", e)
+            except Exception:
+                logger.exception("Error calling shutdown sync handler")
         self._sync_shutdown_handlers.clear()
+
+        # Registered shutdown handlers commonly use @wrap_as_background_process.
+        # Keep the homeserver able to start those teardown processes until they
+        # have been invoked, then prevent any new normal background work.
+        self._is_shutdown = True
 
         self.get_clock().shutdown()
 
