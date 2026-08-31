@@ -503,6 +503,15 @@ class Lock:
             and self._clock.time_msec() - _LOCK_TIMEOUT.as_millis() < last_renewed_ts
         )
 
+    def get_validity_query_parameters(self) -> tuple[str, str, str, int]:
+        """Return parameters for an inline check of this lock's validity."""
+        return (
+            self._lock_name,
+            self._lock_key,
+            self._token,
+            self._clock.time_msec() - _LOCK_TIMEOUT.as_millis(),
+        )
+
     async def __aenter__(self) -> None:
         if self._dropped:
             raise Exception("Cannot reuse a Lock object")

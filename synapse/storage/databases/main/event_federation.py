@@ -2245,6 +2245,74 @@ class EventFederationWorkerStore(
         def _remove_and_get_next_txn(
             txn: LoggingTransaction,
         ) -> tuple[int | None, tuple[str, str, str] | None, bool]:
+            if isinstance(self.database_engine, PostgresEngine):
+                # Keep this as one statement on Postgres. A data-modifying CTE
+                # shares a snapshot with the following SELECT, so explicitly
+                # exclude the completed event from `next_event`: it is not yet
+                # invisible to the SELECT in that snapshot.
+                txn.execute(
+                    """
+                        WITH removed AS (
+                            DELETE FROM federation_inbound_events_staging
+                            WHERE origin = ? AND event_id = ?
+                            RETURNING received_ts
+                        ), lock_valid AS (
+                            SELECT EXISTS (
+                                SELECT 1
+                                FROM worker_locks
+                                WHERE lock_name = ?
+                                  AND lock_key = ?
+                                  AND token = ?
+                                  AND last_renewed_ts > ?
+                            ) AS is_valid
+                        ), next_event AS (
+                            SELECT event_json, internal_metadata, origin
+                            FROM federation_inbound_events_staging
+                            WHERE room_id = ?
+                              AND (origin, event_id) <> (?, ?)
+                            ORDER BY received_ts ASC
+                            LIMIT 1
+                        )
+                        SELECT
+                            (SELECT received_ts FROM removed),
+                            lock_valid.is_valid,
+                            next_event.event_json,
+                            next_event.internal_metadata,
+                            next_event.origin
+                        FROM lock_valid
+                        LEFT JOIN next_event ON lock_valid.is_valid
+                    """,
+                    (
+                        origin,
+                        event_id,
+                        *lock.get_validity_query_parameters(),
+                        room_id,
+                        origin,
+                        event_id,
+                    ),
+                )
+                postgres_row = cast(
+                    tuple[int | None, bool, str | None, str | None, str | None],
+                    txn.fetchone(),
+                )
+                (
+                    received_ts,
+                    lock_is_valid,
+                    event_json,
+                    internal_metadata,
+                    next_origin,
+                ) = postgres_row
+                if event_json is None:
+                    return received_ts, None, lock_is_valid
+
+                assert internal_metadata is not None
+                assert next_origin is not None
+                return (
+                    received_ts,
+                    (event_json, internal_metadata, next_origin),
+                    lock_is_valid,
+                )
+
             txn.execute(
                 """
                     DELETE FROM federation_inbound_events_staging
@@ -2253,8 +2321,8 @@ class EventFederationWorkerStore(
                 """,
                 (origin, event_id),
             )
-            row = cast(tuple[int] | None, txn.fetchone())
-            received_ts = row[0] if row is not None else None
+            deleted_row = cast(tuple[int] | None, txn.fetchone())
+            received_ts = deleted_row[0] if deleted_row is not None else None
 
             if not lock.is_still_valid_txn(txn):
                 return received_ts, None, False
