@@ -1370,11 +1370,6 @@ def setup_test_homeserver(
             deferred = defer.ensureDeferred(cleanup_hs.shutdown())
         return deferred
 
-    # Register the cleanup hook for the homeserver.
-    # A full `hs.shutdown()` is necessary otherwise CI tests will fail while exhibiting
-    # strange behaviours.
-    cleanup_func(shutdown_hs_on_cleanup)
-
     # Install @cache_in_self attributes
     for key, val in extra_homeserver_attributes.items():
         setattr(hs, "_" + key, val)
@@ -1391,6 +1386,13 @@ def setup_test_homeserver(
     # throughout tests, we keep the existing behavior for now. We probably just need to
     # rename this function.
     start_test_homeserver(hs=hs, cleanup_func=cleanup_func, reactor=reactor)
+
+    # Cleanups run in reverse registration order. Register this after
+    # `start_test_homeserver`, which registers the PostgreSQL pool cleanup, so
+    # teardown is: homeserver shutdown, pool close, database drop. Shutting down
+    # after closing the pool can leave a live PostgreSQL session behind and make
+    # DROP DATABASE fail.
+    cleanup_func(shutdown_hs_on_cleanup)
 
     return hs
 
