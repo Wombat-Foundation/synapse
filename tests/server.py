@@ -893,20 +893,25 @@ class ThreadPool:
         *args: P.args,
         **kwargs: P.kwargs,
     ) -> "Deferred[None]":
-        def _(res: Any) -> None:
-            if isinstance(res, Failure):
-                onResult(False, res)
+        def run() -> None:
+            try:
+                result = function(*args, **kwargs)
+            except (KeyboardInterrupt, SystemExit):
+                # This test pool runs its "worker" on the main thread. Do not
+                # route process-control exceptions through a Deferred: Twisted
+                # converts them to a test failure, which makes Ctrl-C unable to
+                # stop a PostgreSQL test run.
+                raise
+            except Exception:
+                onResult(False, Failure())
             else:
-                onResult(True, res)
+                onResult(True, result)
 
-        d: "Deferred[None]" = Deferred()
-        d.addCallback(lambda x: function(*args, **kwargs))
-        d.addBoth(_)
         # mypy ignored here because:
         #   - this is part of the test infrastructure (outside of Synapse) so tracking
         #     these calls for for homeserver shutdown doesn't make sense.
-        self._reactor.callLater(0, d.callback, True)  # type: ignore[call-later-not-tracked]
-        return d
+        self._reactor.callLater(0, run)  # type: ignore[call-later-not-tracked]
+        return succeed(None)
 
 
 def get_clock() -> tuple[ThreadedMemoryReactorClock, Clock]:
