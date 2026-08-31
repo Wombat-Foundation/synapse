@@ -106,10 +106,6 @@ TRANSACTION_CONCURRENCY_LIMIT = 10
 # while draining a busy room rather than paying for that query after every PDU.
 STAGED_EVENT_QUEUE_PRUNE_INTERVAL = 20
 
-# The federation event handler only batches a strict linear run of non-state
-# events. Keep this comfortably below the 200-event replication request limit.
-STAGED_EVENT_BATCH_SIZE = 20
-
 logger = logging.getLogger(__name__)
 
 received_pdus_counter = Counter(
@@ -1439,57 +1435,6 @@ class FederationServer(FederationBase):
         async with lock:
             events_since_prune_check = 0
             while True:
-                # A burst normally arrives in staging before this worker gets its
-                # first turn. Give the event handler a chance to persist a simple
-                # linear run in one replication request. It declines anything with
-                # state changes, forks, duplicates, or missing predecessors, which
-                # continues through the conservative one-at-a-time path below.
-                staged_events = await self.store.get_staged_events_for_room(
-                    room_id, room_version, STAGED_EVENT_BATCH_SIZE
-                )
-                if (
-                    len(staged_events) > 1
-                    and staged_events[0][0] == origin
-                    and staged_events[0][1].event_id == event.event_id
-                    and await self._federation_event_handler.try_on_receive_pdu_batch(
-                        staged_events
-                    )
-                ):
-                    for staged_origin, staged_event in staged_events:
-                        received_ts = (
-                            await self.store.remove_received_event_from_staging(
-                                staged_origin, staged_event.event_id
-                            )
-                        )
-                        if received_ts is not None:
-                            pdu_process_time.labels(
-                                **{SERVER_NAME_LABEL: self.server_name}
-                            ).observe((self._clock.time_msec() - received_ts) / 1000)
-
-                    events_since_prune_check += len(staged_events)
-
-                    if not await lock.is_still_valid():
-                        logger.info(
-                            "Lost inbound PDU processing lock for room %s while draining",
-                            room_id,
-                        )
-                        return
-
-                    if events_since_prune_check >= STAGED_EVENT_QUEUE_PRUNE_INTERVAL:
-                        events_since_prune_check = 0
-                        await self.store.prune_staged_events_in_room(
-                            room_id, room_version
-                        )
-
-                    next = await self._get_next_nonspam_staged_event_for_room(
-                        room_id, room_version
-                    )
-                    if not next:
-                        return
-
-                    origin, event = next
-                    continue
-
                 logger.info("handling received PDU in room %s: %s", room_id, event)
                 try:
                     with nested_logging_context(event.event_id):
