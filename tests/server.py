@@ -1429,22 +1429,6 @@ def start_test_homeserver(
     # thread, we need to stop the event fetcher hogging that one thread.
     hs.get_datastores().main.USE_DEDICATED_DB_THREADS_FOR_EVENT_FETCHING = False
 
-    if USE_POSTGRES_FOR_TESTS:
-        # Capture the `database_pool` as a `weakref` here to ensure there is no scenario where uncalled
-        # cleanup functions result in holding the `hs` in memory.
-        database_pool = weakref.ref(hs.get_datastores().databases[0])
-
-        # We need to do cleanup on PostgreSQL
-        def cleanup() -> None:
-            # Close all the db pools
-            db_pool = database_pool()
-            if db_pool is not None:
-                db_pool._db_pool.close()
-
-        if not LEAVE_DB:
-            # Register the cleanup hook
-            cleanup_func(cleanup)
-
     # bcrypt is far too slow to be doing in unit tests
     # Need to let the HS build an auth handler and then mess with it
     # because AuthHandler's constructor requires the HS, so we can't make one
