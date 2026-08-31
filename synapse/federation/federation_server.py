@@ -1359,6 +1359,29 @@ class FederationServer(FederationBase):
                 pdu.room_id, room_version, lock, origin, pdu
             )
 
+    async def _get_next_nonspam_staged_event_for_room(
+        self, room_id: str, room_version: RoomVersion
+    ) -> tuple[str, EventBase] | None:
+        """Fetch the first non-spam event from the staging queue."""
+
+        while True:
+            next = await self.store.get_next_staged_event_for_room(
+                room_id, room_version
+            )
+            if next is None:
+                return None
+
+            origin, event = next
+            if not await self._spam_checker_module_callbacks.should_drop_federated_event(
+                event
+            ):
+                return next
+
+            logger.warning(
+                "Staged federated event contains spam, dropping %s", event.event_id
+            )
+            await self.store.remove_received_event_from_staging(origin, event.event_id)
+
     @wrap_as_background_process("_process_incoming_pdus_in_room_inner")
     async def _process_incoming_pdus_in_room_inner(
         self,
@@ -1440,12 +1463,8 @@ class FederationServer(FederationBase):
                         exc_info=(f.type, f.value, f.getTracebackObject()),
                     )
 
-                (
-                    received_ts,
-                    next,
-                    lock_is_valid,
-                ) = await self.store.remove_received_event_and_get_next_staged_event_for_room(
-                    origin, event.event_id, room_id, room_version, lock
+                received_ts = await self.store.remove_received_event_from_staging(
+                    origin, event.event_id
                 )
                 if received_ts is not None:
                     pdu_process_time.labels(
@@ -1454,40 +1473,20 @@ class FederationServer(FederationBase):
 
                 events_since_prune_check += 1
 
-                if not lock_is_valid:
+                if not await lock.is_still_valid():
                     logger.info(
                         "Lost inbound PDU processing lock for room %s while draining",
                         room_id,
                     )
                     return
 
+                next = await self._get_next_nonspam_staged_event_for_room(
+                    room_id, room_version
+                )
                 if not next:
                     return
 
                 origin, event = next
-
-                # Events are normally spam-checked before they are staged, but a
-                # checker can be enabled after an event was queued. Preserve that
-                # check while explicitly removing an event which is now known to
-                # be spam; leaving it staged would make the drain retry it forever.
-                while await self._spam_checker_module_callbacks.should_drop_federated_event(
-                    event
-                ):
-                    logger.warning(
-                        "Staged federated event contains spam, dropping %s",
-                        event.event_id,
-                    )
-                    (
-                        _,
-                        next,
-                        lock_is_valid,
-                    ) = await self.store.remove_received_event_and_get_next_staged_event_for_room(
-                        origin, event.event_id, room_id, room_version, lock
-                    )
-                    if not lock_is_valid or not next:
-                        return
-
-                    origin, event = next
 
                 # Prune a busy queue periodically. The queue itself is only pruned
                 # once it reaches 100 events, so checking every event just adds a
