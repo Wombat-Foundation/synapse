@@ -1437,11 +1437,13 @@ class FederationServer(FederationBase):
             origin = latest_origin
             event = latest_event
 
-        # We loop round until there are no more events in the room in the
-        # staging area, or we fail to get the lock (which means another process
-        # has started processing).
-        while True:
-            async with lock:
+        # Keep the distributed lock while draining the staging queue. Releasing and
+        # reacquiring it for every PDU adds a DELETE and an INSERT .. ON CONFLICT
+        # round trip per event, while not allowing another worker to make useful
+        # progress: events for a room must be processed in order. Check that the
+        # lock is still valid between events so a stale lock cannot keep draining.
+        async with lock:
+            while True:
                 logger.info("handling received PDU in room %s: %s", room_id, event)
                 try:
                     with nested_logging_context(event.event_id):
@@ -1478,38 +1480,40 @@ class FederationServer(FederationBase):
                         **{SERVER_NAME_LABEL: self.server_name}
                     ).observe((self._clock.time_msec() - received_ts) / 1000)
 
-            next = await self._get_next_nonspam_staged_event_for_room(
-                room_id, room_version
-            )
+                if not await lock.is_still_valid():
+                    logger.info(
+                        "Lost inbound PDU processing lock for room %s while draining",
+                        room_id,
+                    )
+                    return
 
-            if not next:
-                break
-
-            origin, event = next
-
-            # Prune the event queue if it's getting large.
-            #
-            # We do this *after* handling the first event as the common case is
-            # that the queue is empty (/has the single event in), and so there's
-            # no need to do this check.
-            pruned = await self.store.prune_staged_events_in_room(room_id, room_version)
-            if pruned:
-                # If we have pruned the queue check we need to refetch the next
-                # event to handle.
-                next = await self.store.get_next_staged_event_for_room(
+                next = await self._get_next_nonspam_staged_event_for_room(
                     room_id, room_version
                 )
+
                 if not next:
-                    break
+                    return
 
                 origin, event = next
 
-            new_lock = await self.store.try_acquire_lock(
-                _INBOUND_EVENT_HANDLING_LOCK_NAME, room_id
-            )
-            if not new_lock:
-                return
-            lock = new_lock
+                # Prune the event queue if it's getting large.
+                #
+                # We do this *after* handling the first event as the common case is
+                # that the queue is empty (/has the single event in), and so there's
+                # no need to do this check.
+                pruned = await self.store.prune_staged_events_in_room(
+                    room_id, room_version
+                )
+                if pruned:
+                    # If we have pruned the queue check we need to refetch the next
+                    # event to handle.
+                    next = await self.store.get_next_staged_event_for_room(
+                        room_id, room_version
+                    )
+                    if not next:
+                        return
+
+                    origin, event = next
 
     async def exchange_third_party_invite(
         self, sender_user_id: str, target_user_id: str, room_id: str, signed: dict
