@@ -81,6 +81,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# A partial-state room must eventually be resynchronised. In particular, a
+# transient database error late in the resync must not leave the room partial
+# forever, since several client endpoints wait for that flag to clear.
+_PARTIAL_STATE_SYNC_RETRY_DELAY = Duration(seconds=1)
+
 # Added to debug performance and track progress on optimizations
 backfill_processing_before_timer = Histogram(
     "synapse_federation_backfill_processing_before_time_seconds",
@@ -1916,11 +1921,21 @@ class FederationHandler:
 
             self._active_partial_state_syncs.add(room_id)
 
+            sync_failed = False
             try:
                 await self._sync_partial_state_room(
                     initial_destination=initial_destination,
                     other_destinations=other_destinations,
                     room_id=room_id,
+                )
+            except Exception:
+                # A failure here can happen after we have fetched and applied all
+                # state but before clearing the partial-state flag (for example,
+                # while updating device lists). Retrying is required to avoid
+                # leaving the room permanently partial.
+                sync_failed = True
+                logger.exception(
+                    "Failed to resynchronise partial-state room %s", room_id
                 )
             finally:
                 # Read the room's partial state flag while we still hold the claim to
@@ -1934,18 +1949,39 @@ class FederationHandler:
                 )
                 self._active_partial_state_syncs.remove(room_id)
 
-                if room_id in self._partial_state_syncs_maybe_needing_restart:
+                restart_params = self._partial_state_syncs_maybe_needing_restart.pop(
+                    room_id, None
+                )
+
+                if restart_params is not None:
                     (
                         restart_initial_destination,
                         restart_other_destinations,
-                    ) = self._partial_state_syncs_maybe_needing_restart.pop(room_id)
+                    ) = restart_params
 
                     if is_still_partial_state_room:
-                        self._start_partial_state_room_sync(
-                            initial_destination=restart_initial_destination,
-                            other_destinations=restart_other_destinations,
-                            room_id=room_id,
-                        )
+                        if sync_failed:
+                            self.clock.call_later(
+                                _PARTIAL_STATE_SYNC_RETRY_DELAY,
+                                self._start_partial_state_room_sync,
+                                restart_initial_destination,
+                                restart_other_destinations,
+                                room_id,
+                            )
+                        else:
+                            self._start_partial_state_room_sync(
+                                initial_destination=restart_initial_destination,
+                                other_destinations=restart_other_destinations,
+                                room_id=room_id,
+                            )
+                elif sync_failed and is_still_partial_state_room:
+                    self.clock.call_later(
+                        _PARTIAL_STATE_SYNC_RETRY_DELAY,
+                        self._start_partial_state_room_sync,
+                        initial_destination,
+                        other_destinations,
+                        room_id,
+                    )
 
         self.hs.run_as_background_process(
             desc="sync_partial_state_room",
