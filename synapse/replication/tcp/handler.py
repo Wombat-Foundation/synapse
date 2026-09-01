@@ -722,8 +722,9 @@ class ReplicationCommandHandler:
         # `current_token == cmd.prev_token` as "nothing missing" would skip
         # the catch-up fetch below and leave those caches silently stale,
         # even though the id gen (and hence `now_token`) has moved on.
-        missing_updates = (cmd.prev_token < cmd.new_token) and (
-            current_token < cmd.new_token
+        missing_updates = not (
+            cmd.prev_token == cmd.new_token == current_token
+            or cmd.prev_token < current_token <= cmd.new_token
         )
         while missing_updates:
             # Note: There may very well not be any new updates, but we check to
