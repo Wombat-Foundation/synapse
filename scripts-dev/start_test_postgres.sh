@@ -73,19 +73,23 @@ else
 	# tests/utils.py itself uses for POSTGRES_BASE_DB.
 	initdb -D "$PGDATA" -U postgres --auth=trust -E UTF8 --locale=C >/dev/null
 
-	cat >>"$PGDATA/postgresql.conf" <<EOF
+	cat >>"$PGDATA/postgresql.conf" <<'EOF'
 
 # --- scripts-dev/start_test_postgres.sh: throwaway test cluster config ---
 fsync = off
 synchronous_commit = off
 full_page_writes = off
-# Headroom for `trial --jobs=N`: each worker's homeserver pool defaults to
-# cp_max=5, plus setup/teardown connections outside the pool.
+# Headroom for parallel trial workers (e.g. `trial --jobs=N`): each worker's
+# homeserver pool defaults to cp_max=5, plus setup/teardown connections
+# outside the pool.
 max_connections = 200
 EOF
 
+	# listen_addresses='' means unix-socket only: this is a local throwaway
+	# instance, so there's no need to bind a TCP port at all (and doing so
+	# needlessly risks colliding with anything else already using $PGPORT).
 	pg_ctl -D "$PGDATA" \
-		-o "-p $PGPORT -k $PGSOCKETDIR" \
+		-o "-p $PGPORT -k $PGSOCKETDIR -c listen_addresses=''" \
 		-l "$LOGFILE" start >/dev/null
 
 	# No need to pre-create a template database here: tests/utils.py creates

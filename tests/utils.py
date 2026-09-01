@@ -57,13 +57,20 @@ logger = logging.getLogger(__name__)
 # create another unique database, using the base database as a template.
 USE_POSTGRES_FOR_TESTS = os.environ.get("SYNAPSE_POSTGRES", False)
 LEAVE_DB = os.environ.get("SYNAPSE_LEAVE_DB", False)
-POSTGRES_USER = os.environ.get("SYNAPSE_POSTGRES_USER", None)
-POSTGRES_HOST = os.environ.get("SYNAPSE_POSTGRES_HOST", None)
+FAST_PG_SOCKET = "/tmp/synapse-pgtest/.s.PGSQL.5433"
+HAS_FAST_PG = os.path.exists(FAST_PG_SOCKET)
+
+POSTGRES_USER = os.environ.get(
+    "SYNAPSE_POSTGRES_USER", "postgres" if HAS_FAST_PG else None
+)
+POSTGRES_HOST = os.environ.get(
+    "SYNAPSE_POSTGRES_HOST", "/tmp/synapse-pgtest" if HAS_FAST_PG else None
+)
 POSTGRES_PASSWORD = os.environ.get("SYNAPSE_POSTGRES_PASSWORD", None)
 POSTGRES_PORT = (
     int(os.environ["SYNAPSE_POSTGRES_PORT"])
     if "SYNAPSE_POSTGRES_PORT" in os.environ
-    else None
+    else (5433 if HAS_FAST_PG else None)
 )
 POSTGRES_BASE_DB = "_synapse_unit_tests_base_%s" % (os.getpid(),)
 
