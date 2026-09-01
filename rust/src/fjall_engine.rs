@@ -78,26 +78,29 @@ fn map_fjall_err(e: fjall::Error) -> PyErr {
     pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
 }
 
+fn open_client_sync(path: &str) -> Result<(), String> {
+    if KEYSPACE.get().is_some() {
+        return Ok(());
+    }
+    let keyspace = Config::new(path).open().map_err(|e| e.to_string())?;
+    let partition = keyspace
+        .open_partition(PARTITION_NAME, PartitionCreateOptions::default())
+        .map_err(|e| e.to_string())?;
+    if KEYSPACE.set(keyspace).is_err() || PARTITION.set(partition).is_err() {
+        // Another thread raced us to it; both OnceCells reject the loser's
+        // value, which is fine -- the first writer wins and subsequent
+        // callers all observe a consistent, open keyspace.
+    }
+    Ok(())
+}
+
 /// Opens (or creates) the fjall keyspace at `path`. Must be called at most
 /// once per process, from whichever single process this deployment has
 /// designated as the HAMT storage writer -- see the module doc comment.
 #[pyfunction]
 pub fn open_client(py: Python<'_>, path: String) -> PyResult<()> {
-    if KEYSPACE.get().is_some() {
-        return Ok(());
-    }
-    py.detach(|| -> PyResult<()> {
-        let keyspace = Config::new(&path).open().map_err(map_fjall_err)?;
-        let partition = keyspace
-            .open_partition(PARTITION_NAME, PartitionCreateOptions::default())
-            .map_err(map_fjall_err)?;
-        if KEYSPACE.set(keyspace).is_err() || PARTITION.set(partition).is_err() {
-            // Another thread raced us to it; both OnceCells reject the
-            // loser's value, which is fine -- the first writer wins and
-            // subsequent callers all observe a consistent, open keyspace.
-        }
-        Ok(())
-    })
+    py.detach(|| open_client_sync(&path))
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
 }
 
 #[pyfunction]
@@ -614,4 +617,118 @@ pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
         .getattr("modules")?
         .set_item("synapse.synapse_rust.fjall_engine", child_module)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state_hamt::build_root_handle_and_nodes;
+
+    /// Opens the (process-global) fjall keyspace against a fresh temp
+    /// directory exactly once, sharing it across every test below --
+    /// KEYSPACE/PARTITION are `OnceCell`s and can only be initialized once
+    /// per test binary. Each test uses its own namespace/room-prefix keys,
+    /// so sharing the keyspace doesn't let tests interfere with each other.
+    fn ensure_open() {
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            let dir = tempfile::tempdir().expect("tempdir");
+            // Leak the tempdir so it outlives the process-global keyspace
+            // instead of being cleaned up while still in use.
+            let path = dir.keep();
+            open_client_sync(path.to_str().unwrap()).expect("open fjall keyspace");
+        });
+    }
+
+    #[test]
+    fn put_get_roundtrip() {
+        ensure_open();
+        let part = PARTITION.get().unwrap();
+        part.insert(b"fjall:test:roundtrip".to_vec(), b"hello".to_vec())
+            .unwrap();
+        assert_eq!(
+            part.get(b"fjall:test:roundtrip")
+                .unwrap()
+                .map(|v| v.to_vec()),
+            Some(b"hello".to_vec())
+        );
+    }
+
+    #[test]
+    fn batch_commit_is_atomic_and_scan_prefix_finds_it() {
+        ensure_open();
+        let ks = KEYSPACE.get().unwrap();
+        let part = PARTITION.get().unwrap();
+        let mut batch = ks.batch();
+        batch.insert(part, b"fjall:test:scan:a".to_vec(), b"1".to_vec());
+        batch.insert(part, b"fjall:test:scan:b".to_vec(), b"2".to_vec());
+        batch.commit().unwrap();
+
+        let mut results: Vec<(Vec<u8>, Vec<u8>)> = part
+            .prefix(b"fjall:test:scan:")
+            .map(|r| {
+                let (k, v) = r.unwrap();
+                (k.to_vec(), v.to_vec())
+            })
+            .collect();
+        results.sort();
+        assert_eq!(
+            results,
+            vec![
+                (b"fjall:test:scan:a".to_vec(), b"1".to_vec()),
+                (b"fjall:test:scan:b".to_vec(), b"2".to_vec()),
+            ]
+        );
+    }
+
+    /// End-to-end: build a real HAMT via `build_root_handle_and_nodes`,
+    /// persist its nodes through the fjall engine exactly as
+    /// `put_state_hamt_objects` would, then materialize it back out via
+    /// `materialize_state_hamt_sync` and check the round trip.
+    #[test]
+    fn materialize_state_hamt_round_trips_through_fjall() {
+        ensure_open();
+        let namespace = "test-namespace-materialize";
+        let server_secret = [7u8; 32];
+        let room_id = "!room:example.org";
+        let room_prefix: [u8; ROOM_PREFIX_LEN] = [1, 2, 3, 4, 5, 6, 7, 8];
+
+        let entries = vec![
+            (
+                "m.room.create".to_owned(),
+                "".to_owned(),
+                "$create:example.org".to_owned(),
+            ),
+            (
+                "m.room.member".to_owned(),
+                "@alice:example.org".to_owned(),
+                "$join:example.org".to_owned(),
+            ),
+        ];
+        let ((root_hash, _state_group_id), nodes) =
+            build_root_handle_and_nodes(&server_secret, room_id, entries.clone())
+                .expect("build HAMT");
+
+        for (hash, bytes) in nodes {
+            let hash: StructuralHash = hash;
+            let key = node_key(namespace, &room_prefix, &hash);
+            put_raw(&key, &bytes);
+        }
+
+        let root_hash: StructuralHash = root_hash;
+        let structural_key = room_structural_key_raw(&server_secret, room_id);
+        let mut materialized =
+            materialize_state_hamt_sync(namespace, &room_prefix, root_hash, &structural_key)
+                .expect("materialize");
+        materialized.sort();
+
+        let mut expected = entries;
+        expected.sort();
+        assert_eq!(materialized, expected);
+    }
+
+    fn put_raw(key: &[u8], value: &[u8]) {
+        let part = PARTITION.get().unwrap();
+        part.insert(key.to_vec(), value.to_vec()).unwrap();
+    }
 }
