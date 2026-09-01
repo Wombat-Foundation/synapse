@@ -71,6 +71,7 @@ lru = "0.12"
 itertools = "0.14.0"
 tikv-client = { version = "0.4.0", default-features = false }
 rezzy = { git = "https://github.com/gamesguru/rezzy.git", rev = "82c9078f69297fe81cecf12516af71236e398712" }
+fjall = { version = "2.11.2", features = ["single_writer_tx"] }
 
 [build-dependencies]
 blake2 = "0.10.4"
