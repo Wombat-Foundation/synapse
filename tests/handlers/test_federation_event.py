@@ -160,8 +160,22 @@ class FederationEventHandlerTests(unittest.FederatingHomeserverTestCase):
 
         handler = self.hs.get_federation_event_handler()
         store = self.hs.get_datastores().main
-        persist_events_and_notify = mock.AsyncMock()
-        handle_encrypted_event = mock.AsyncMock()
+        persisted = False
+
+        async def persist_events(*args: object, **kwargs: object) -> None:
+            nonlocal persisted
+            persisted = True
+
+        persist_events_and_notify = mock.AsyncMock(side_effect=persist_events)
+
+        # Device-cache validation is post-persistence. A failure must not make
+        # the already-persisted batch fall back to the single-event path.
+        async def handle_encrypted(event: object) -> None:
+            self.assertTrue(persisted)
+            if event is first_event:
+                raise Exception()
+
+        handle_encrypted_event = mock.AsyncMock(side_effect=handle_encrypted)
 
         with (
             mock.patch.object(

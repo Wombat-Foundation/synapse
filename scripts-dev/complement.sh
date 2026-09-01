@@ -159,10 +159,11 @@ main() {
   # Check for a user-specified Complement checkout
   if [[ -z "$COMPLEMENT_DIR" ]]; then
     COMPLEMENT_REF=${COMPLEMENT_REF:-main}
-    echo "COMPLEMENT_DIR not set. Fetching Complement checkout from ${COMPLEMENT_REF}..."
+    COMPLEMENT_REPO=${COMPLEMENT_REPO:-matrix-org/complement}
+    echo "COMPLEMENT_DIR not set. Fetching ${COMPLEMENT_REPO} at ${COMPLEMENT_REF}..."
 
     # Download the Complement checkout at the specified ref.
-    wget -q -O ${COMPLEMENT_REF}.tar.gz https://github.com/gamesguru/complement/archive/${COMPLEMENT_REF}.tar.gz
+    wget -q -O "${COMPLEMENT_REF}.tar.gz" "https://github.com/${COMPLEMENT_REPO}/archive/${COMPLEMENT_REF}.tar.gz"
 
     # Delete the existing complement checkout. Otherwise we'll end up with stale
     # test files after they're deleted server-side, and `tar` will not delete
@@ -170,7 +171,7 @@ main() {
     rm -rf complement-${COMPLEMENT_REF}
 
     # Extract the checkout.
-    tar -xzf ${COMPLEMENT_REF}.tar.gz
+    tar -xzf "${COMPLEMENT_REF}.tar.gz"
 
     COMPLEMENT_DIR=complement-${COMPLEMENT_REF}
     echo "Checkout available at 'complement-${COMPLEMENT_REF}'"

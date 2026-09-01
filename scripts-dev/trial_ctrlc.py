@@ -39,6 +39,10 @@ def run() -> None:
     _initialDebugSetup(config)
     if config["jobs"] is not None:
         raise SystemExit(f"{sys.argv[0]}: --jobs is not supported by this wrapper")
+    if config["dry-run"]:
+        raise SystemExit(f"{sys.argv[0]}: --dry-run is not supported by this wrapper")
+    if config["profile"]:
+        raise SystemExit(f"{sys.argv[0]}: --profile is not supported by this wrapper")
 
     trialRunner = _makeRunner(config)
     assert isinstance(trialRunner, TrialRunner)

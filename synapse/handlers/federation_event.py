@@ -497,7 +497,16 @@ class FederationEventHandler:
                 raise
 
             for event, _ in event_and_contexts:
-                await self._handle_encrypted_event(event)
+                try:
+                    await self._handle_encrypted_event(event)
+                except Exception:
+                    # Persistence has already succeeded. Device-cache handling is
+                    # a post-persistence side effect, so it must not make the
+                    # caller fall back and remove these events from staging.
+                    logger.exception(
+                        "Failed to handle encrypted event %s after batch persistence",
+                        event.event_id,
+                    )
 
             return True
 

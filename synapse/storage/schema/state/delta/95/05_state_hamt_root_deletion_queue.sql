@@ -2,5 +2,5 @@
 -- state-group IDs until that external cleanup succeeds, so failures can be
 -- retried instead of leaving directly-readable stale roots indefinitely.
 CREATE TABLE state_hamt_root_deletion_queue (
-    state_group BIGINT PRIMARY KEY
+    state_group BIGINT NOT NULL PRIMARY KEY
 );

@@ -181,6 +181,8 @@ Changes in SCHEMA_VERSION = 95
     - Add tables to store HAMT roots and shared nodes for state groups.
     - Add `published` column and `state_hamt_pending_nodes` table for the
       publication bridge (removed in the pure-TiKV variant).
+    - Add a durable queue for TiKV HAMT roots which must be deleted after a
+      room purge commits.
     - Change `delayed_events` primary key to be globally unique rather than
       scoped to a user localpart (MSC4140).
 

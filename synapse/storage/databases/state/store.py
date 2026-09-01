@@ -21,7 +21,6 @@
 
 import logging
 import time
-import traceback
 from typing import (
     TYPE_CHECKING,
     Iterable,
@@ -40,6 +39,7 @@ from synapse.events.snapshot import (
 from synapse.logging.context import defer_to_thread
 from synapse.logging.opentracing import tag_args, trace
 from synapse.metrics import SERVER_NAME_LABEL
+from synapse.metrics.background_process_metrics import wrap_as_background_process
 from synapse.storage._base import SQLBaseStore
 from synapse.storage.database import (
     DatabasePool,
@@ -62,6 +62,7 @@ from synapse.types.state import StateFilter
 from synapse.util.caches import intern_string
 from synapse.util.caches.dictionary_cache import DictionaryCache
 from synapse.util.cancellation import cancellable
+from synapse.util.duration import Duration
 
 if TYPE_CHECKING:
     from synapse.server import HomeServer
@@ -163,6 +164,12 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 raise RuntimeError(
                     f"Failed to connect to TiKV cluster at {self.tikv_pd_endpoints}"
                 ) from e
+
+            if hs.config.worker.run_background_tasks:
+                hs.get_clock().looping_call(
+                    self._drain_tikv_state_hamt_root_deletion_queue,
+                    Duration(minutes=5),
+                )
 
     @trace
     @tag_args
@@ -1693,54 +1700,66 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         return dict(rows)
 
     async def purge_room_state(self, room_id: str) -> None:
-        deleted_state_groups: list[int] = await self.db_pool.runInteraction(
+        await self.db_pool.runInteraction(
             "purge_room_state",
             self._purge_room_state_txn,
             room_id,
         )
         if self.tikv_pd_endpoints:
-            # The transaction recorded these IDs before removing their SQL state
-            # groups. Include previously failed deletions so a later purge retries
-            # them too.
-            queued_state_groups = await self.db_pool.simple_select_list(
-                table="state_hamt_root_deletion_queue",
-                keyvalues={},
-                retcols=("state_group",),
-                desc="get_tikv_state_hamt_root_deletion_queue",
+            await self._drain_tikv_state_hamt_root_deletion_queue()
+
+    @wrap_as_background_process("drain_tikv_state_hamt_root_deletion_queue")
+    async def _drain_tikv_state_hamt_root_deletion_queue(self) -> None:
+        """Delete queued TiKV roots after their SQL state groups are purged."""
+
+        if not self.tikv_pd_endpoints:
+            return
+
+        from synapse.synapse_rust import tikv_engine
+
+        while True:
+
+            def get_batch_txn(txn: LoggingTransaction) -> list[int]:
+                txn.execute(
+                    """
+                    SELECT state_group
+                    FROM state_hamt_root_deletion_queue
+                    LIMIT 500
+                    """
+                )
+                return [int(row[0]) for row in txn]
+
+            state_groups = await self.db_pool.runInteraction(
+                "get_tikv_state_hamt_root_deletion_queue_batch", get_batch_txn
             )
-            state_groups_to_clean = {int(row[0]) for row in queued_state_groups}
-            state_groups_to_clean.update(deleted_state_groups)
-            if not state_groups_to_clean:
+            if not state_groups:
                 return
-            from synapse.synapse_rust import tikv_engine
 
             try:
                 await defer_to_thread(
                     self.hs.get_reactor(),
                     tikv_engine.batch_delete,
                     [
-                        _state_hamt_root_tikv_key(self.tikv_namespace, sg)
-                        for sg in state_groups_to_clean
+                        _state_hamt_root_tikv_key(self.tikv_namespace, state_group)
+                        for state_group in state_groups
                     ],
                 )
                 await self.db_pool.simple_delete_many(
                     table="state_hamt_root_deletion_queue",
                     column="state_group",
-                    iterable=state_groups_to_clean,
+                    iterable=state_groups,
                     keyvalues={},
-                    desc="remove_tikv_state_hamt_root_deletion_queue",
+                    desc="remove_tikv_state_hamt_root_deletion_queue_batch",
                 )
             except Exception:
-                # The IDs remain durably queued, so a later room purge can retry
-                # deleting roots which otherwise remain directly readable in TiKV.
+                # The IDs remain durably queued for the periodic retry, so a
+                # TiKV outage cannot leave directly-readable stale roots forever.
                 logger.warning(
-                    "[purge] Failed to clean up queued TiKV HAMT roots for room %s "
-                    "(%d state groups); they will be retried on a later purge. "
-                    "Error: %s",
-                    room_id,
-                    len(state_groups_to_clean),
-                    traceback.format_exc(),
+                    "Failed to clean up %d queued TiKV HAMT roots; will retry",
+                    len(state_groups),
+                    exc_info=True,
                 )
+                return
 
     def _purge_room_state_txn(
         self,

@@ -46,6 +46,7 @@ import yaml
 
 from twisted.internet import defer, reactor as reactor_
 
+from synapse.api.room_versions import KNOWN_ROOM_VERSIONS
 from synapse.config.database import DatabaseConnectionConfig
 from synapse.config.homeserver import HomeServerConfig
 from synapse.logging.context import (
@@ -1221,20 +1222,30 @@ class Porter:
         and reset the background update so Synapse executes it on startup.
         """
 
-        def has_missing_root_txn(txn: LoggingTransaction) -> bool:
+        def get_missing_root_room_versions_txn(txn: LoggingTransaction) -> set[str]:
             txn.execute(
                 """
-                SELECT 1
+                SELECT DISTINCT r.room_version
                 FROM state_groups AS sg
                 LEFT JOIN state_hamt_roots AS hr ON hr.state_group = sg.id
+                INNER JOIN rooms AS r ON r.room_id = sg.room_id
                 WHERE hr.state_group IS NULL
-                LIMIT 1
                 """
             )
-            return txn.fetchone() is not None
+            return {room_version for (room_version,) in txn}
 
-        if not await self.postgres_store.db_pool.runInteraction(
-            "find_missing_state_hamt_roots", has_missing_root_txn
+        missing_root_room_versions = await self.postgres_store.db_pool.runInteraction(
+            "find_missing_state_hamt_roots", get_missing_root_room_versions_txn
+        )
+        if not missing_root_room_versions:
+            return
+
+        # The backfill can only reconstruct roots for rooms whose version is
+        # known. Missing and unsupported rooms are deliberately skipped by the
+        # handler, so they must not cause a needless full backfill scan.
+        if not any(
+            room_version in KNOWN_ROOM_VERSIONS
+            for room_version in missing_root_room_versions
         ):
             return
 
