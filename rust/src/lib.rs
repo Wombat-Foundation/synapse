@@ -11,6 +11,7 @@ pub mod deferred;
 pub mod duration;
 pub mod errors;
 pub mod events;
+pub mod fjall_engine;
 pub mod handlers;
 pub mod http;
 pub mod http_client;
@@ -86,6 +87,7 @@ fn synapse_rust(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     state_res::register_module(py, m)?;
     types::register_module(py, m)?;
     tikv_engine::register_module(py, m)?;
+    fjall_engine::register_module(py, m)?;
 
     Ok(())
 }
