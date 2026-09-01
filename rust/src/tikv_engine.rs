@@ -617,15 +617,17 @@ async fn materialize_state_hamts_async(
     roots: Vec<([u8; ROOM_PREFIX_LEN], StructuralHash, [u8; 32])>,
 ) -> Result<Vec<Vec<(String, String, String)>>, String> {
     let client = get_client().await?;
-    type NodeLocation = ([u8; ROOM_PREFIX_LEN], StructuralHash);
-
-    let structural_keys: HashMap<[u8; ROOM_PREFIX_LEN], [u8; 32]> = roots
-        .iter()
-        .map(|(room_prefix, _, structural_key)| (*room_prefix, *structural_key))
-        .collect();
+    // Carries the room's structural_key as part of the location itself,
+    // rather than deriving it from room_prefix via a side lookup: room_prefix
+    // is only 8 bytes and exists purely for TiKV keyspace locality (see
+    // `room_tikv_prefix_raw`), so two different rooms colliding on the same
+    // prefix is a real (if rare) possibility -- a `room_prefix -> key`
+    // lookup would silently pick one room's key for both, verifying the
+    // other room's nodes against the wrong key and failing spuriously.
+    type NodeLocation = ([u8; ROOM_PREFIX_LEN], [u8; 32], StructuralHash);
 
     let mut node_map: HashMap<NodeLocation, Arc<HamtNode<String, String>>> = HashMap::new();
-    let mut seen: HashSet<NodeLocation> = roots.iter().map(|(p, h, _)| (*p, *h)).collect();
+    let mut seen: HashSet<NodeLocation> = roots.iter().copied().collect();
     let mut to_fetch = seen.clone();
 
     while !to_fetch.is_empty() {
@@ -636,25 +638,26 @@ async fn materialize_state_hamts_async(
         let mut still_missing = Vec::with_capacity(current_batch.len());
         {
             let mut cache = node_cache().lock().unwrap();
-            for (room_prefix, hash) in current_batch {
+            for (room_prefix, structural_key, hash) in current_batch {
                 let key = node_tikv_key(namespace, &room_prefix, &hash);
                 match cache.get(&key) {
                     Some(node) => {
                         if node.structural_hash != hash {
                             cache.pop(&key);
-                            still_missing.push((room_prefix, hash));
+                            still_missing.push((room_prefix, structural_key, hash));
                         } else {
                             let node = node.clone();
                             for child in &node.children {
-                                let child_location = (room_prefix, child.structural_hash());
+                                let child_location =
+                                    (room_prefix, structural_key, child.structural_hash());
                                 if seen.insert(child_location) {
                                     to_fetch.insert(child_location);
                                 }
                             }
-                            node_map.insert((room_prefix, hash), node);
+                            node_map.insert((room_prefix, structural_key, hash), node);
                         }
                     }
-                    None => still_missing.push((room_prefix, hash)),
+                    None => still_missing.push((room_prefix, structural_key, hash)),
                 }
             }
         }
@@ -662,10 +665,10 @@ async fn materialize_state_hamts_async(
         for chunk in still_missing.chunks(NODE_FETCH_BATCH_SIZE) {
             let key_to_location: HashMap<Vec<u8>, NodeLocation> = chunk
                 .iter()
-                .map(|(room_prefix, hash)| {
+                .map(|(room_prefix, structural_key, hash)| {
                     (
                         node_tikv_key(namespace, room_prefix, hash),
-                        (*room_prefix, *hash),
+                        (*room_prefix, *structural_key, *hash),
                     )
                 })
                 .collect();
@@ -683,35 +686,34 @@ async fn materialize_state_hamts_async(
             for pair in rows {
                 let (key, node_bytes): (tikv_client::Key, tikv_client::Value) = pair.into();
                 let key: Vec<u8> = key.into();
-                let (room_prefix, expected_hash) = key_to_location
+                let (room_prefix, structural_key, expected_hash) = key_to_location
                     .get(&key)
                     .copied()
                     .ok_or_else(|| "TiKV returned an unexpected HAMT node key".to_owned())?;
-                let structural_key = structural_keys.get(&room_prefix).ok_or_else(|| {
-                    format!(
-                        "No structural_key supplied for room prefix: {}",
-                        hex::encode(room_prefix)
-                    )
-                })?;
                 let node =
-                    decode_persisted_node_verified(&node_bytes, structural_key, expected_hash)?;
+                    decode_persisted_node_verified(&node_bytes, &structural_key, expected_hash)?;
 
                 for child in &node.children {
-                    let child_location = (room_prefix, child.structural_hash());
+                    let child_location = (room_prefix, structural_key, child.structural_hash());
                     if seen.insert(child_location) {
                         to_fetch.insert(child_location);
                     }
                 }
 
                 node_cache().lock().unwrap().put(key, node.clone());
-                node_map.insert((room_prefix, expected_hash), node);
+                node_map.insert((room_prefix, structural_key, expected_hash), node);
             }
         }
     }
 
+    // Regrouping by room_prefix alone here (dropping structural_key) is safe
+    // even if two rooms share a prefix: structural_hash is a 256-bit HMAC
+    // digest, so two different rooms' nodes coinciding on the same hash
+    // value is cryptographically negligible -- unlike verifying against the
+    // wrong key above, merging by hash here can't produce wrong content.
     type PrefixNodeMap = HashMap<StructuralHash, Arc<HamtNode<String, String>>>;
     let mut nodes_by_prefix: HashMap<[u8; ROOM_PREFIX_LEN], PrefixNodeMap> = HashMap::new();
-    for ((room_prefix, hash), node) in node_map {
+    for ((room_prefix, _, hash), node) in node_map {
         nodes_by_prefix
             .entry(room_prefix)
             .or_default()
@@ -849,15 +851,15 @@ where
     F: Fn(Vec<Vec<u8>>) -> Fut,
     Fut: std::future::Future<Output = Result<Vec<(Vec<u8>, Vec<u8>)>, String>>,
 {
-    type NodeLocation = ([u8; ROOM_PREFIX_LEN], StructuralHash);
-
-    let structural_keys: HashMap<[u8; ROOM_PREFIX_LEN], [u8; 32]> = queries
-        .iter()
-        .map(|(room_prefix, _, structural_key, _)| (*room_prefix, *structural_key))
-        .collect();
+    // See the comment on the equivalent type in `materialize_state_hamts_async`:
+    // room_prefix alone is only 8 bytes and exists purely for TiKV keyspace
+    // locality, so it's carried alongside (not derived from) the location's
+    // structural_key to avoid two different rooms sharing a prefix silently
+    // having one verified against the other's key.
+    type NodeLocation = ([u8; ROOM_PREFIX_LEN], [u8; 32], StructuralHash);
 
     let mut node_map: HashMap<NodeLocation, Arc<HamtNode<String, String>>> = HashMap::new();
-    let mut seen: HashSet<NodeLocation> = queries.iter().map(|(p, h, _, _)| (*p, *h)).collect();
+    let mut seen: HashSet<NodeLocation> = queries.iter().map(|(p, h, k, _)| (*p, *k, *h)).collect();
     let mut to_fetch: HashSet<NodeLocation> = seen.clone();
 
     while !to_fetch.is_empty() {
@@ -866,19 +868,19 @@ where
         let mut still_missing = Vec::with_capacity(current_batch.len());
         {
             let mut cache = node_cache().lock().unwrap();
-            for (room_prefix, hash) in current_batch {
+            for (room_prefix, structural_key, hash) in current_batch {
                 let key = node_tikv_key(namespace, &room_prefix, &hash);
                 match cache.get(&key) {
                     Some(node) => {
                         if node.structural_hash != hash {
                             cache.pop(&key);
-                            still_missing.push((room_prefix, hash));
+                            still_missing.push((room_prefix, structural_key, hash));
                         } else {
                             let node = node.clone();
-                            node_map.insert((room_prefix, hash), node);
+                            node_map.insert((room_prefix, structural_key, hash), node);
                         }
                     }
-                    None => still_missing.push((room_prefix, hash)),
+                    None => still_missing.push((room_prefix, structural_key, hash)),
                 }
             }
         }
@@ -886,10 +888,10 @@ where
         for chunk in still_missing.chunks(NODE_FETCH_BATCH_SIZE) {
             let key_to_location: HashMap<Vec<u8>, NodeLocation> = chunk
                 .iter()
-                .map(|(room_prefix, hash)| {
+                .map(|(room_prefix, structural_key, hash)| {
                     (
                         node_tikv_key(namespace, room_prefix, hash),
-                        (*room_prefix, *hash),
+                        (*room_prefix, *structural_key, *hash),
                     )
                 })
                 .collect();
@@ -905,28 +907,26 @@ where
             }
 
             for (key, node_bytes) in rows {
-                let (room_prefix, expected_hash) = key_to_location
+                let (room_prefix, structural_key, expected_hash) = key_to_location
                     .get(&key)
                     .copied()
                     .ok_or_else(|| "TiKV returned an unexpected HAMT node key".to_owned())?;
-                let structural_key = structural_keys.get(&room_prefix).ok_or_else(|| {
-                    format!(
-                        "No structural_key supplied for room prefix: {}",
-                        hex::encode(room_prefix)
-                    )
-                })?;
                 let node =
-                    decode_persisted_node_verified(&node_bytes, structural_key, expected_hash)?;
+                    decode_persisted_node_verified(&node_bytes, &structural_key, expected_hash)?;
 
                 node_cache().lock().unwrap().put(key, node.clone());
-                node_map.insert((room_prefix, expected_hash), node);
+                node_map.insert((room_prefix, structural_key, expected_hash), node);
             }
         }
 
-        // Group loaded nodes by room prefix so we can query each room's tree
+        // Group loaded nodes by room prefix so we can query each room's tree.
+        // Dropping structural_key here (merging by hash only) is safe even
+        // under a prefix collision: structural_hash is a 256-bit HMAC digest,
+        // so two different rooms' nodes coinciding on it is cryptographically
+        // negligible.
         type PrefixNodeMap = HashMap<StructuralHash, Arc<HamtNode<String, String>>>;
         let mut nodes_by_prefix: HashMap<[u8; ROOM_PREFIX_LEN], PrefixNodeMap> = HashMap::new();
-        for ((room_prefix, hash), node) in &node_map {
+        for ((room_prefix, _, hash), node) in &node_map {
             nodes_by_prefix
                 .entry(*room_prefix)
                 .or_default()
@@ -939,7 +939,7 @@ where
                     let (_entries, missing) =
                         lookup_from_node_map(root_hash, structural_key, keys, prefix_nodes)?;
                     for missing_hash in missing {
-                        let child_loc = (*room_prefix, missing_hash);
+                        let child_loc = (*room_prefix, *structural_key, missing_hash);
                         if seen.insert(child_loc) {
                             to_fetch.insert(child_loc);
                         }
@@ -951,7 +951,7 @@ where
 
     type PrefixNodeMap = HashMap<StructuralHash, Arc<HamtNode<String, String>>>;
     let mut nodes_by_prefix: HashMap<[u8; ROOM_PREFIX_LEN], PrefixNodeMap> = HashMap::new();
-    for ((room_prefix, hash), node) in node_map {
+    for ((room_prefix, _, hash), node) in node_map {
         nodes_by_prefix
             .entry(room_prefix)
             .or_default()

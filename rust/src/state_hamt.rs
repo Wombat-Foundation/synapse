@@ -1159,6 +1159,63 @@ pub fn materialize_state_entries(
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)
 }
 
+/// Look up a set of `(event_type, state_key)` entries in a room's HAMT,
+/// given a pool of already-fetched `(hash, node_bytes)` pairs.
+///
+/// `nodes` may contain entries irrelevant to this room -- callers resolving
+/// several state groups in one batch (e.g.
+/// `_lookup_state_hamt_from_postgres_many_txn`) share one fetched-node pool
+/// across every group's call, including nodes belonging to entirely
+/// different rooms that were never meant to be dereferenced by *this* room's
+/// tree. So nodes are decoded unverified up front, and only verified after
+/// the lookup, scoped to whatever actually turned out to be reachable from
+/// `root_hash` -- which structurally can never include another room's nodes
+/// (their hashes never appear as a child of this room's nodes). A
+/// verification failure there is the real thing this function exists to
+/// catch: corrupted/substituted bytes for a node this room's own tree
+/// actually depends on.
+fn lookup_state_entries_impl(
+    structural_key: &[u8; 32],
+    root_node_bytes: &[u8],
+    nodes: Vec<(StructuralHash, Vec<u8>)>,
+    keys: &[(String, String)],
+) -> Result<(Vec<PyStateEntry>, Vec<StructuralHash>), String> {
+    let root_node = decode_persisted_node_with_key(root_node_bytes, structural_key)?;
+    let root_hash = root_node.structural_hash;
+    let mut node_map = HashMap::from([(root_hash, root_node)]);
+    let mut raw_bytes: HashMap<StructuralHash, Vec<u8>> = HashMap::new();
+    for (hash, node_bytes) in nodes {
+        let node = decode_persisted_node_unverified(&node_bytes, hash)?;
+        raw_bytes.insert(hash, node_bytes);
+        node_map.insert(hash, node);
+    }
+
+    let (entries, missing) = lookup_from_node_map(&root_hash, structural_key, keys, &node_map)?;
+
+    if let Ok(typed_root) = TypedRoot::decode_v1(root_node_bytes) {
+        for (event_type, subtree_root_hash) in typed_root.directory {
+            let subtree_key = typed_subtree_key(structural_key, &event_type);
+            let mut seen = HashSet::from([subtree_root_hash]);
+            let mut stack = vec![subtree_root_hash];
+            while let Some(hash) = stack.pop() {
+                if let Some(bytes) = raw_bytes.get(&hash) {
+                    decode_persisted_node_verified(bytes, &subtree_key, hash)?;
+                }
+                if let Some(node) = node_map.get(&hash) {
+                    for child in &node.children {
+                        let child_hash = child.structural_hash();
+                        if seen.insert(child_hash) {
+                            stack.push(child_hash);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok((entries, missing.into_iter().collect()))
+}
+
 #[pyfunction]
 #[pyo3(text_signature = "(server_secret, room_id, root_node_bytes, nodes, keys, /)")]
 pub fn lookup_state_entries(
@@ -1172,18 +1229,15 @@ pub fn lookup_state_entries(
         .try_into()
         .map_err(|_| pyo3::exceptions::PyValueError::new_err("server_secret must be 32 bytes"))?;
     let structural_key = room_structural_key_raw(&server_secret, room_id);
-    let root_node = decode_persisted_node_with_key(&root_node_bytes, &structural_key)
-        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
-    let root_hash = root_node.structural_hash;
-    let mut node_map = HashMap::from([(root_hash, root_node)]);
-    for (hash_bytes, node_bytes) in nodes {
-        let hash = structural_hash_from_bytes(hash_bytes)?;
-        let node = decode_persisted_node_verified(&node_bytes, &structural_key, hash)
+    let nodes = nodes
+        .into_iter()
+        .map(|(hash_bytes, node_bytes)| {
+            structural_hash_from_bytes(hash_bytes).map(|hash| (hash, node_bytes))
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    let (entries, missing) =
+        lookup_state_entries_impl(&structural_key, &root_node_bytes, nodes, &keys)
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
-        node_map.insert(hash, node);
-    }
-    let (entries, missing) = lookup_from_node_map(&root_hash, &structural_key, &keys, &node_map)
-        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
     Ok((
         entries,
         missing.into_iter().map(|hash| hash.to_vec()).collect(),
@@ -2103,6 +2157,61 @@ mod tests {
                 "@user-42:test.example".to_owned(),
                 "$42".to_owned()
             )]
+        );
+    }
+
+    #[test]
+    fn lookup_state_entries_impl_tolerates_another_rooms_nodes_in_the_batch() {
+        // Regression test for a real production bug: callers resolving
+        // several state groups in one round (e.g.
+        // `_lookup_state_hamt_from_postgres_many_txn`) share one fetched-node
+        // pool across every group's `lookup_state_entries` call, so it can
+        // legitimately contain nodes belonging to a different room. Eagerly
+        // verifying every supplied node against *this* room's key used to
+        // reject the lookup outright over a hash mismatch that was never a
+        // real problem -- reproduced against real sytest/Complement failures
+        // (cross-room backfill pagination, room-upgrade search) once
+        // `lookup_state_entries` started verifying node hashes for real.
+        let server_secret = [77u8; 32];
+        let room_id = "!room:test.example";
+        let other_room_id = "!other:test.example";
+
+        let entries = vec![("m.room.name".to_owned(), "".to_owned(), "$name".to_owned())];
+        let ((root_hash, _), nodes) = build_root_handle_and_nodes(&server_secret, room_id, entries)
+            .expect("HAMT root should build");
+        let root_node_bytes = nodes
+            .iter()
+            .find(|(hash, _)| *hash == root_hash)
+            .map(|(_, bytes)| bytes.clone())
+            .expect("root node bytes should be present");
+
+        let other_entries = vec![(
+            "m.room.name".to_owned(),
+            "".to_owned(),
+            "$other-name".to_owned(),
+        )];
+        let ((_other_root_hash, _), other_nodes) =
+            build_root_handle_and_nodes(&server_secret, other_room_id, other_entries)
+                .expect("HAMT root should build");
+
+        // Simulate the shared multi-room fetch pool: this room's own nodes,
+        // plus another room's, exactly as `_lookup_state_hamt_from_postgres_many_txn`
+        // would hand them to `lookup_state_entries`.
+        let combined_nodes: Vec<(StructuralHash, Vec<u8>)> =
+            nodes.into_iter().chain(other_nodes).collect();
+
+        let structural_key = room_structural_key_raw(&server_secret, room_id);
+        let keys = vec![("m.room.name".to_owned(), "".to_owned())];
+
+        let (entries, missing) =
+            lookup_state_entries_impl(&structural_key, &root_node_bytes, combined_nodes, &keys)
+                .expect(
+                    "lookup must not fail just because the batch also carries another room's nodes",
+                );
+        assert!(missing.is_empty());
+        assert_eq!(
+            entries,
+            vec![("m.room.name".to_owned(), "".to_owned(), "$name".to_owned())]
         );
     }
 
