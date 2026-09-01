@@ -1302,7 +1302,7 @@ mod tests {
 
         // 2. Assert exact BFS round structure:
         let batches = recorded_batches.lock().unwrap().clone();
-        assert_eq!(batches.len(), 2, "Expected exactly 2 BFS batch rounds");
+        assert_eq!(batches.len(), 3, "Expected 3 BFS batch rounds");
 
         // Round 0: Both roots requested together in 1 unified batch
         let root_key_1 = node_tikv_key(namespace, &prefix_1, &root_hash_1);
@@ -1311,8 +1311,7 @@ mod tests {
         assert!(batches[0].contains(&root_key_1));
         assert!(batches[0].contains(&root_key_2));
 
-        // Round 1: Missing child nodes across both rooms fetched in 1 unified batch
-        assert!(!batches[1].is_empty());
+        // Subsequent rounds: Missing child nodes across both rooms fetched in unified batches
         let prefix_stem_1 = format!(
             "hamt:node:{}:{}:",
             hex::encode(&Sha256::digest(namespace.as_bytes())[..16]),
@@ -1324,11 +1323,14 @@ mod tests {
             hex::encode(prefix_2)
         );
 
-        for key in &batches[1] {
-            assert!(
-                key.starts_with(prefix_stem_1.as_bytes())
-                    || key.starts_with(prefix_stem_2.as_bytes())
-            );
+        for round in &batches[1..] {
+            assert!(!round.is_empty());
+            for key in round {
+                assert!(
+                    key.starts_with(prefix_stem_1.as_bytes())
+                        || key.starts_with(prefix_stem_2.as_bytes())
+                );
+            }
         }
     }
 }

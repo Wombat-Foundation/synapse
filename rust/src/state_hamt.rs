@@ -105,7 +105,7 @@ impl TypedRoot {
         if take(&mut cursor, 1)?[0] != TYPED_ROOT_FORMAT {
             return Err("not a typed HAMT root".to_owned());
         }
-        let structural_hash: StructuralHash = take(&mut cursor, 16)?.try_into().unwrap();
+        let structural_hash: StructuralHash = take(&mut cursor, 32)?.try_into().unwrap();
         let state_group_id: StateGroupId = take(&mut cursor, 32)?.try_into().unwrap();
         let count = u16::from_le_bytes(take(&mut cursor, 2)?.try_into().unwrap());
         let mut directory = Vec::with_capacity(count as usize);
@@ -114,7 +114,7 @@ impl TypedRoot {
             let event_type = std::str::from_utf8(take(&mut cursor, len as usize)?)
                 .map_err(|_| "typed root event type is not UTF-8".to_owned())?
                 .to_owned();
-            let hash: StructuralHash = take(&mut cursor, 16)?.try_into().unwrap();
+            let hash: StructuralHash = take(&mut cursor, 32)?.try_into().unwrap();
             directory.push((event_type, hash));
         }
         if cursor != bytes.len() {
@@ -147,7 +147,7 @@ fn typed_root_hash(room_key: &[u8; 32], directory: &[(String, StructuralHash)]) 
         mac.update(hash);
     }
     let digest = mac.finalize().into_bytes();
-    digest[..16].try_into().unwrap()
+    digest.into()
 }
 
 fn build_typed_root_and_nodes(
@@ -1171,27 +1171,19 @@ pub fn node_child_hashes(node_bytes: Vec<u8>) -> PyResult<Vec<Vec<u8>>> {
 #[pyfunction]
 #[pyo3(text_signature = "(root_node_bytes, roots, universe, nodes, /)")]
 pub fn reachability_audit(
-    root_node_bytes: Vec<u8>,
+    _root_node_bytes: Vec<u8>,
     roots: Vec<Vec<u8>>,
     universe: Vec<Vec<u8>>,
     nodes: Vec<(Vec<u8>, Vec<u8>)>,
 ) -> PyResult<PyReachabilityAudit> {
-    let mut root_hash = None;
     let mut node_map: HashMap<StructuralHash, Arc<HamtNode<String, String>>> = HashMap::new();
 
     for (hash_bytes, node_bytes) in nodes {
         let hash = structural_hash_from_bytes(hash_bytes)?;
-        if node_bytes == root_node_bytes {
-            root_hash = Some(hash);
-        }
         let node = decode_persisted_node(&node_bytes, hash)
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
         node_map.insert(hash, node);
     }
-
-    let root_hash = root_hash.ok_or_else(|| {
-        pyo3::exceptions::PyValueError::new_err("root_node_bytes not found in nodes list")
-    })?;
 
     let roots = roots
         .into_iter()
@@ -1890,12 +1882,12 @@ mod tests {
             build_root_handle_and_nodes(&server_secret, room_id, entries)
                 .expect("HAMT root should build");
 
-        assert_eq!(structural_hash.len(), 16);
+        assert_eq!(structural_hash.len(), 32);
         assert_eq!(state_group_id.len(), 32);
         assert!(!nodes.is_empty());
         assert!(nodes
             .iter()
-            .all(|(hash, bytes)| hash.len() == 16 && !bytes.is_empty()));
+            .all(|(hash, bytes)| hash.len() == 32 && !bytes.is_empty()));
     }
 
     #[test]
