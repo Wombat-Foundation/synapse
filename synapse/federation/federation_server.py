@@ -1512,11 +1512,20 @@ class FederationServer(FederationBase):
 
                         events_since_prune_check += len(staged_events)
 
-                        if not await lock.is_still_valid():
+                        (
+                            queue_is_empty,
+                            lock_is_valid,
+                        ) = await self.store.release_inbound_pdu_lock_if_staging_empty(
+                            room_id, lock
+                        )
+                        if not lock_is_valid:
                             logger.info(
                                 "Lost inbound PDU processing lock for room %s while draining",
                                 room_id,
                             )
+                            return
+
+                        if queue_is_empty:
                             return
 
                         if (
@@ -1570,8 +1579,12 @@ class FederationServer(FederationBase):
                         exc_info=(f.type, f.value, f.getTracebackObject()),
                     )
 
-                received_ts = await self.store.remove_received_event_from_staging(
-                    origin, event.event_id
+                (
+                    received_ts,
+                    next,
+                    lock_is_valid,
+                ) = await self.store.remove_received_event_and_get_next_staged_event_for_room(
+                    origin, event.event_id, room_id, room_version, lock
                 )
                 if received_ts is not None:
                     pdu_process_time.labels(
@@ -1580,16 +1593,13 @@ class FederationServer(FederationBase):
 
                 events_since_prune_check += 1
 
-                if not await lock.is_still_valid():
+                if not lock_is_valid:
                     logger.info(
                         "Lost inbound PDU processing lock for room %s while draining",
                         room_id,
                     )
                     return
 
-                next = await self._get_next_nonspam_staged_event_for_room(
-                    room_id, room_version
-                )
                 if not next:
                     return
 

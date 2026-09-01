@@ -478,20 +478,43 @@ class Lock:
 
     async def is_still_valid(self) -> bool:
         """Check if the lock is still held by us"""
-        last_renewed_ts = await self._store.db_pool.simple_select_one_onecol(
-            table=self._table,
-            keyvalues={
-                "lock_name": self._lock_name,
-                "lock_key": self._lock_key,
-                "token": self._token,
-            },
-            retcol="last_renewed_ts",
-            allow_none=True,
-            desc="is_lock_still_valid",
+
+        def _is_still_valid_txn(txn: LoggingTransaction) -> bool:
+            return self.is_still_valid_txn(txn)
+
+        return await self._store.db_pool.runInteraction(
+            "is_lock_still_valid", _is_still_valid_txn
         )
+
+    def is_still_valid_txn(self, txn: LoggingTransaction) -> bool:
+        """Check whether this lock is still held, within an existing transaction."""
+        txn.execute(
+            f"""
+                SELECT last_renewed_ts
+                FROM {self._table}
+                WHERE lock_name = ? AND lock_key = ? AND token = ?
+            """,
+            (self._lock_name, self._lock_key, self._token),
+        )
+        row = txn.fetchone()
+        last_renewed_ts = row[0] if row is not None else None
         return (
             last_renewed_ts is not None
             and self._clock.time_msec() - _LOCK_TIMEOUT.as_millis() < last_renewed_ts
+        )
+
+    def release_txn(self, txn: LoggingTransaction) -> None:
+        """Release this lock within an existing transaction.
+
+        The caller must subsequently call :meth:`mark_released` to stop renewal
+        and discard the local lock bookkeeping.
+        """
+        txn.execute(
+            f"""
+                DELETE FROM {self._table}
+                WHERE lock_name = ? AND lock_key = ? AND token = ?
+            """,
+            (self._lock_name, self._lock_key, self._token),
         )
 
     async def __aenter__(self) -> None:
@@ -530,12 +553,24 @@ class Lock:
             desc="drop_lock",
         )
 
+        self.mark_released()
+
+    def mark_released(self) -> None:
+        """Stop tracking a lock which was released in another transaction."""
+        if self._dropped:
+            return
+
+        if self._looping_call and self._looping_call.running:
+            self._looping_call.stop()
+
         if self._read_write:
-            self._store._live_read_write_lock_tokens.pop(
-                (self._lock_name, self._lock_key, self._token), None
-            )
+            read_write_key = (self._lock_name, self._lock_key, self._token)
+            if self._store._live_read_write_lock_tokens.get(read_write_key) is self:
+                self._store._live_read_write_lock_tokens.pop(read_write_key, None)
         else:
-            self._store._live_lock_tokens.pop((self._lock_name, self._lock_key), None)
+            lock_key = (self._lock_name, self._lock_key)
+            if self._store._live_lock_tokens.get(lock_key) is self:
+                self._store._live_lock_tokens.pop(lock_key, None)
 
         self._dropped = True
 
