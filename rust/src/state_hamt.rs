@@ -1169,9 +1169,8 @@ pub fn node_child_hashes(node_bytes: Vec<u8>) -> PyResult<Vec<Vec<u8>>> {
 }
 
 #[pyfunction]
-#[pyo3(text_signature = "(root_node_bytes, roots, universe, nodes, /)")]
+#[pyo3(text_signature = "(roots, universe, nodes, /)")]
 pub fn reachability_audit(
-    _root_node_bytes: Vec<u8>,
     roots: Vec<Vec<u8>>,
     universe: Vec<Vec<u8>>,
     nodes: Vec<(Vec<u8>, Vec<u8>)>,
@@ -1242,14 +1241,13 @@ pub fn reachability_audit(
 }
 
 #[pyfunction]
-#[pyo3(text_signature = "(root_node_bytes, roots, universe, nodes, /)")]
+#[pyo3(text_signature = "(roots, universe, nodes, /)")]
 pub fn unreachable_node_hashes(
-    root_node_bytes: Vec<u8>,
     roots: Vec<Vec<u8>>,
     universe: Vec<Vec<u8>>,
     nodes: Vec<(Vec<u8>, Vec<u8>)>,
 ) -> PyResult<Vec<Vec<u8>>> {
-    reachability_audit(root_node_bytes, roots, universe, nodes).map(|(_, unreachable)| unreachable)
+    reachability_audit(roots, universe, nodes).map(|(_, unreachable)| unreachable)
 }
 
 pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -2092,7 +2090,7 @@ mod tests {
             build_root_handle_and_nodes(&server_secret, room_id, orphan_entries)
                 .expect("orphan HAMT root should build");
 
-        let (live_root_hash, live_root_bytes) = live_nodes
+        let (live_root_hash, _live_root_bytes) = live_nodes
             .last()
             .cloned()
             .expect("live root node should exist");
@@ -2107,13 +2105,9 @@ mod tests {
             .collect();
         let universe: Vec<_> = all_nodes.iter().map(|(hash, _)| hash.clone()).collect();
 
-        let (reachable, unreachable) = reachability_audit(
-            live_root_bytes,
-            vec![live_root_hash.to_vec()],
-            universe,
-            all_nodes,
-        )
-        .expect("reachability audit should succeed");
+        let (reachable, unreachable) =
+            reachability_audit(vec![live_root_hash.to_vec()], universe, all_nodes)
+                .expect("reachability audit should succeed");
 
         assert!(reachable.contains(&live_root_hash.to_vec()));
         assert!(!reachable.contains(&orphan_root_hash.to_vec()));

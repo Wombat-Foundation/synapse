@@ -155,13 +155,11 @@ def lookup_state_entries(
 
 def node_child_hashes(node_bytes: bytes) -> list[bytes]: ...
 def reachability_audit(
-    root_node_bytes: bytes,
     roots: Sequence[bytes],
     universe: Sequence[bytes],
     nodes: Sequence[tuple[bytes, bytes]],
 ) -> tuple[list[bytes], list[bytes]]: ...
 def unreachable_node_hashes(
-    root_node_bytes: bytes,
     roots: Sequence[bytes],
     universe: Sequence[bytes],
     nodes: Sequence[tuple[bytes, bytes]],
