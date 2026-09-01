@@ -27,7 +27,7 @@ from twisted.python import usage
 from twisted.scripts.trial import Options, _getSuite, _initialDebugSetup, _makeRunner
 from twisted.trial import itrial, unittest
 from twisted.trial._asyncrunner import _iterateTests
-from twisted.trial.runner import _logFile, _testDirectory
+from twisted.trial.runner import TrialRunner, _logFile, _testDirectory
 
 
 def run() -> None:
@@ -41,7 +41,10 @@ def run() -> None:
         raise SystemExit(f"{sys.argv[0]}: {ue}")
 
     _initialDebugSetup(config)
+    # `_makeRunner` always returns a `TrialRunner` here since we don't pass
+    # `--jobs` (which would make it a `DistTrialRunner`, unsupported below).
     trialRunner = _makeRunner(config)
+    assert isinstance(trialRunner, TrialRunner)
     suite = _getSuite(config)
     test = unittest.decorate(suite, itrial.ITestCase)
 
@@ -63,8 +66,9 @@ def run() -> None:
 
     previousHandler = signal.signal(signal.SIGINT, onSigint)
     try:
-        with _testDirectory(trialRunner.workingDirectory), _logFile(
-            trialRunner.logfile
+        with (
+            _testDirectory(trialRunner.workingDirectory),
+            _logFile(trialRunner.logfile),
         ):
             for single in _iterateTests(test):
                 if interrupted:
