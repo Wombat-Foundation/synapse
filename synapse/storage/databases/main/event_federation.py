@@ -2222,6 +2222,50 @@ class EventFederationWorkerStore(
 
         return origin, event
 
+    async def get_staged_events_for_room(
+        self,
+        room_id: str,
+        room_version: RoomVersion,
+        limit: int,
+    ) -> list[tuple[str, EventBase]]:
+        """Get the oldest staged events for a room.
+
+        The caller holds the per-room inbound-PDU lock, so the rows remain owned by
+        it until they are removed from staging. This is deliberately a read rather
+        than a claim: an event must stay staged until it has been persisted.
+        """
+
+        def _get_staged_events_for_room_txn(
+            txn: LoggingTransaction,
+        ) -> list[tuple[str, str, str]]:
+            txn.execute(
+                """
+                SELECT event_json, internal_metadata, origin
+                FROM federation_inbound_events_staging
+                WHERE room_id = ?
+                ORDER BY received_ts ASC
+                LIMIT ?
+                """,
+                (room_id, limit),
+            )
+            return cast(list[tuple[str, str, str]], txn.fetchall())
+
+        rows = await self.db_pool.runInteraction(
+            "get_staged_events_for_room", _get_staged_events_for_room_txn
+        )
+
+        return [
+            (
+                row[2],
+                make_event_from_dict(
+                    event_dict=db_to_json(row[0]),
+                    room_version=room_version,
+                    internal_metadata_dict=db_to_json(row[1]),
+                ),
+            )
+            for row in rows
+        ]
+
     async def prune_staged_events_in_room(
         self,
         room_id: str,
