@@ -24,6 +24,7 @@ import hashlib
 import logging
 import os
 import signal
+import sys
 import uuid
 from types import FrameType, TracebackType
 from typing import (
@@ -57,21 +58,38 @@ logger = logging.getLogger(__name__)
 # create another unique database, using the base database as a template.
 USE_POSTGRES_FOR_TESTS = os.environ.get("SYNAPSE_POSTGRES", False)
 LEAVE_DB = os.environ.get("SYNAPSE_LEAVE_DB", False)
-FAST_PG_SOCKET = "/tmp/synapse-pgtest/.s.PGSQL.5433"
-HAS_FAST_PG = os.path.exists(FAST_PG_SOCKET)
+
+# If scripts-dev/start_test_postgres.sh's RAM-disk cluster is up, connect to
+# that instead of requiring `eval "$(scripts-dev/start_test_postgres.sh)"`
+# every time -- but only as a fallback: any of SYNAPSE_POSTGRES_HOST/_USER/
+# _PORT set explicitly always wins over this, same as every other var here.
+# Announced below (not silent) specifically because a test run silently
+# talking to a different Postgres than the one you think you configured is
+# exactly the kind of thing that's maddening to debug.
+FAST_PG_SOCKET_DIR = "/tmp/synapse-pgtest"
+FAST_PG_PORT = 5433
+HAS_FAST_PG = os.path.exists(f"{FAST_PG_SOCKET_DIR}/.s.PGSQL.{FAST_PG_PORT}")
 
 POSTGRES_USER = os.environ.get(
     "SYNAPSE_POSTGRES_USER", "postgres" if HAS_FAST_PG else None
 )
 POSTGRES_HOST = os.environ.get(
-    "SYNAPSE_POSTGRES_HOST", "/tmp/synapse-pgtest" if HAS_FAST_PG else None
+    "SYNAPSE_POSTGRES_HOST", FAST_PG_SOCKET_DIR if HAS_FAST_PG else None
 )
 POSTGRES_PASSWORD = os.environ.get("SYNAPSE_POSTGRES_PASSWORD", None)
 POSTGRES_PORT = (
     int(os.environ["SYNAPSE_POSTGRES_PORT"])
     if "SYNAPSE_POSTGRES_PORT" in os.environ
-    else (5433 if HAS_FAST_PG else None)
+    else (FAST_PG_PORT if HAS_FAST_PG else None)
 )
+
+if USE_POSTGRES_FOR_TESTS and HAS_FAST_PG and "SYNAPSE_POSTGRES_HOST" not in os.environ:
+    print(
+        f"tests/utils.py: using the RAM-disk test Postgres at "
+        f"{FAST_PG_SOCKET_DIR} (found its socket) -- set SYNAPSE_POSTGRES_HOST "
+        f"explicitly to use a different one.",
+        file=sys.stderr,
+    )
 POSTGRES_BASE_DB = "_synapse_unit_tests_base_%s" % (os.getpid(),)
 
 # When debugging a specific test, it's occasionally useful to write the
