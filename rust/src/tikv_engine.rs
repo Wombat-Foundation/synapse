@@ -582,7 +582,7 @@ async fn materialize_state_hamt_async(
                     .get(&key)
                     .copied()
                     .ok_or_else(|| "TiKV returned an unexpected HAMT node key".to_owned())?;
-                let node = decode_persisted_node(&node_bytes)?;
+                let node = decode_persisted_node(&node_bytes, expected_hash)?;
                 if node.structural_hash != expected_hash {
                     return Err("HAMT node hash does not match its TiKV key".to_owned());
                 }
@@ -679,7 +679,7 @@ async fn materialize_state_hamts_async(
                     .get(&key)
                     .copied()
                     .ok_or_else(|| "TiKV returned an unexpected HAMT node key".to_owned())?;
-                let node = decode_persisted_node(&node_bytes)?;
+                let node = decode_persisted_node(&node_bytes, expected_hash)?;
                 if node.structural_hash != expected_hash {
                     return Err("HAMT node hash does not match its TiKV key".to_owned());
                 }
@@ -878,7 +878,7 @@ where
                     .get(&key)
                     .copied()
                     .ok_or_else(|| "TiKV returned an unexpected HAMT node key".to_owned())?;
-                let node = decode_persisted_node(&node_bytes)?;
+                let node = decode_persisted_node(&node_bytes, expected_hash)?;
                 if node.structural_hash != expected_hash {
                     return Err("HAMT node hash does not match its TiKV key".to_owned());
                 }
@@ -1174,7 +1174,7 @@ mod tests {
             build_root_handle_and_nodes(&secret, room_id, entries).unwrap();
         let mut node_map = HashMap::new();
         for (h, node_bytes) in nodes {
-            let node = decode_persisted_node(&node_bytes).unwrap();
+            let node = decode_persisted_node(&node_bytes, h).unwrap();
             node_map.insert(h, node);
         }
 

@@ -459,12 +459,12 @@ fn apply_flat_state_updates_impl(
     let structural_key = room_structural_key_raw(server_secret, room_id);
     let mut lattice = lattice_from_bytes(lattice_bytes)?;
 
-    let root_node = decode_persisted_node(root_node_bytes)?;
+    let root_node = decode_persisted_node_with_key(root_node_bytes, &structural_key)?;
     let mut node_map: HashMap<StructuralHash, Arc<HamtNode<String, String>>> = HashMap::new();
     node_map.insert(root_node.structural_hash, root_node.clone());
     for (hash_bytes, node_bytes) in nodes {
         let hash = structural_hash_from_slice(&hash_bytes)?;
-        let node = decode_persisted_node(&node_bytes)?;
+        let node = decode_persisted_node(&node_bytes, hash)?;
         if node.structural_hash != hash {
             return Err(format!(
                 "HAMT node structural hash does not match its key: \
@@ -622,7 +622,7 @@ fn apply_typed_state_updates_impl(
     let mut node_map: HashMap<StructuralHash, Arc<HamtNode<String, String>>> = HashMap::new();
     for (hash_bytes, node_bytes) in nodes {
         let hash = structural_hash_from_slice(&hash_bytes)?;
-        let node = decode_persisted_node(&node_bytes)?;
+        let node = decode_persisted_node(&node_bytes, hash)?;
         if node.structural_hash != hash {
             return Err(format!(
                 "HAMT node structural hash does not match its key: \
@@ -745,13 +745,22 @@ fn apply_typed_state_updates_impl(
 
 pub(crate) fn decode_persisted_node(
     node_bytes: &[u8],
+    structural_hash: StructuralHash,
 ) -> Result<Arc<HamtNode<String, String>>, String> {
     let persisted = PersistedInternalNode::<String, String>::decode_v1_unverified(node_bytes)
         .map_err(|e| format!("Failed to decode persisted HAMT node: {e}"))?;
-    let node: HamtNode<String, String> = persisted
-        .try_into()
-        .map_err(|e| format!("Failed to reconstruct HAMT node: {e}"))?;
-    Ok(Arc::new(node))
+    let children: Vec<NodeRef<String, String>> = persisted
+        .child_hashes
+        .into_iter()
+        .map(NodeRef::Lazy)
+        .collect();
+    Ok(Arc::new(HamtNode {
+        datamap: persisted.datamap,
+        nodemap: persisted.nodemap,
+        leaves: persisted.leaves,
+        children,
+        structural_hash,
+    }))
 }
 
 /// Decode just enough of a persisted node to read its children's hashes,
@@ -760,6 +769,38 @@ pub(crate) fn node_child_hashes_raw(node_bytes: &[u8]) -> Result<Vec<StructuralH
     let node = PersistedInternalNode::<String, String>::decode_v1_unverified(node_bytes)
         .map_err(|e| format!("Failed to decode persisted HAMT node: {e}"))?;
     Ok(node.child_hashes)
+}
+
+/// Decode a persisted HAMT node, computing its structural hash from `structural_key`.
+///
+/// Use this when the node's hash is not known in advance (e.g. root nodes that
+/// were stored only as bytes, without an accompanying hash). When the hash is
+/// already known, prefer [`decode_persisted_node`] which avoids the recomputation.
+fn decode_persisted_node_with_key(
+    node_bytes: &[u8],
+    structural_key: &[u8],
+) -> Result<Arc<HamtNode<String, String>>, String> {
+    let persisted = PersistedInternalNode::<String, String>::decode_v1_unverified(node_bytes)
+        .map_err(|e| format!("Failed to decode persisted HAMT node: {e}"))?;
+    let children: Vec<NodeRef<String, String>> = persisted
+        .child_hashes
+        .into_iter()
+        .map(NodeRef::Lazy)
+        .collect();
+    let structural_hash = HamtNode::<String, String>::compute_structural_hash(
+        structural_key,
+        persisted.datamap,
+        persisted.nodemap,
+        &persisted.leaves,
+        &children,
+    );
+    Ok(Arc::new(HamtNode {
+        datamap: persisted.datamap,
+        nodemap: persisted.nodemap,
+        leaves: persisted.leaves,
+        children,
+        structural_hash,
+    }))
 }
 
 /// Walk a fully-resolved HAMT (every reachable node present in `node_map`)
@@ -1067,18 +1108,22 @@ pub fn materialize_state_entries(
     root_node_bytes: Vec<u8>,
     nodes: Vec<(Vec<u8>, Vec<u8>)>,
 ) -> PyResult<Vec<PyStateEntry>> {
-    let root_node = decode_persisted_node(&root_node_bytes)
-        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
-    let root_hash = root_node.structural_hash;
+    let mut root_hash = None;
     let mut node_map: HashMap<StructuralHash, Arc<HamtNode<String, String>>> = HashMap::new();
-    node_map.insert(root_hash, root_node);
 
     for (hash_bytes, node_bytes) in nodes {
         let hash = structural_hash_from_bytes(hash_bytes)?;
-        let node = decode_persisted_node(&node_bytes)
+        if node_bytes == root_node_bytes {
+            root_hash = Some(hash);
+        }
+        let node = decode_persisted_node(&node_bytes, hash)
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
         node_map.insert(hash, node);
     }
+
+    let root_hash = root_hash.ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err("root_node_bytes not found in nodes list")
+    })?;
 
     materialize_from_node_map(&root_hash, &node_map)
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)
@@ -1097,13 +1142,13 @@ pub fn lookup_state_entries(
         .try_into()
         .map_err(|_| pyo3::exceptions::PyValueError::new_err("server_secret must be 32 bytes"))?;
     let structural_key = room_structural_key_raw(&server_secret, room_id);
-    let root_node = decode_persisted_node(&root_node_bytes)
+    let root_node = decode_persisted_node_with_key(&root_node_bytes, &structural_key)
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
     let root_hash = root_node.structural_hash;
     let mut node_map = HashMap::from([(root_hash, root_node)]);
     for (hash_bytes, node_bytes) in nodes {
         let hash = structural_hash_from_bytes(hash_bytes)?;
-        let node = decode_persisted_node(&node_bytes)
+        let node = decode_persisted_node(&node_bytes, hash)
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
         node_map.insert(hash, node);
     }
@@ -1131,19 +1176,22 @@ pub fn reachability_audit(
     universe: Vec<Vec<u8>>,
     nodes: Vec<(Vec<u8>, Vec<u8>)>,
 ) -> PyResult<PyReachabilityAudit> {
-    let root_node = decode_persisted_node(&root_node_bytes)
-        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
-    let root_hash = root_node.structural_hash;
-
+    let mut root_hash = None;
     let mut node_map: HashMap<StructuralHash, Arc<HamtNode<String, String>>> = HashMap::new();
-    node_map.insert(root_hash, root_node);
 
     for (hash_bytes, node_bytes) in nodes {
         let hash = structural_hash_from_bytes(hash_bytes)?;
-        let node = decode_persisted_node(&node_bytes)
+        if node_bytes == root_node_bytes {
+            root_hash = Some(hash);
+        }
+        let node = decode_persisted_node(&node_bytes, hash)
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
         node_map.insert(hash, node);
     }
+
+    let root_hash = root_hash.ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err("root_node_bytes not found in nodes list")
+    })?;
 
     let roots = roots
         .into_iter()
@@ -1990,7 +2038,7 @@ mod tests {
         let all_nodes = nodes
             .into_iter()
             .map(|(hash, bytes)| {
-                decode_persisted_node(&bytes)
+                decode_persisted_node(&bytes, hash)
                     .map(|node| (hash, node))
                     .expect("node should decode")
             })
@@ -2127,7 +2175,7 @@ mod tests {
         let mut combined_nodes: HashMap<StructuralHash, Arc<HamtNode<String, String>>> =
             HashMap::new();
         for (h, node_bytes) in nodes_1.into_iter().chain(nodes_2) {
-            let node = decode_persisted_node(&node_bytes).unwrap();
+            let node = decode_persisted_node(&node_bytes, h).unwrap();
             combined_nodes.insert(h, node);
         }
 
