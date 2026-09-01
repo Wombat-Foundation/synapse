@@ -14,7 +14,8 @@ use tokio::runtime::Runtime;
 use tokio::time::{sleep, timeout, Duration};
 
 use crate::state_hamt::{
-    decode_persisted_node_unverified, lookup_from_node_map, materialize_from_node_map,
+    decode_persisted_node_verified, lookup_from_node_map, materialize_from_node_map,
+    room_structural_key_raw,
 };
 
 static RUNTIME: OnceCell<Runtime> = OnceCell::new();
@@ -513,19 +514,15 @@ async fn get_client() -> Result<&'static RawClient, String> {
 /// `(event_type, state_key, event_id)` triples -- without crossing back into
 /// Python per node.
 ///
-/// The caller supplies the TiKV namespace, room prefix, and root hash. Node
-/// keys are namespaced because content-addressing is only safe to share when
-/// every deployment uses the same HAMT secret.
-///
-/// Deliberately keyless (see the pyfunction's doc comment): nodes are decoded
-/// with [`decode_persisted_node_unverified`], trusting that a byte string
-/// stored under a given TiKV key genuinely hashes to that key rather than
-/// recomputing it -- a corrupted or substituted TiKV value for an existing
-/// key would not be caught here.
+/// The caller supplies the TiKV namespace, room prefix, root hash, and this
+/// room's `structural_key` (see `room_structural_key_raw`) so every fetched
+/// node's hash can be verified against its actual decoded content, not just
+/// trusted because it matches the TiKV key it was fetched under.
 async fn materialize_state_hamt_async(
     namespace: &str,
     room_prefix: &[u8; ROOM_PREFIX_LEN],
     root_structural_hash: StructuralHash,
+    structural_key: &[u8; 32],
 ) -> Result<Vec<(String, String, String)>, String> {
     let client = get_client().await?;
 
@@ -590,10 +587,8 @@ async fn materialize_state_hamt_async(
                     .get(&key)
                     .copied()
                     .ok_or_else(|| "TiKV returned an unexpected HAMT node key".to_owned())?;
-                let node = decode_persisted_node_unverified(&node_bytes, expected_hash)?;
-                if node.structural_hash != expected_hash {
-                    return Err("HAMT node hash does not match its TiKV key".to_owned());
-                }
+                let node =
+                    decode_persisted_node_verified(&node_bytes, structural_key, expected_hash)?;
 
                 for child in &node.children {
                     let child_hash = child.structural_hash();
@@ -619,13 +614,18 @@ async fn materialize_state_hamt_async(
 /// same room can share fetched subtrees.
 async fn materialize_state_hamts_async(
     namespace: &str,
-    roots: Vec<([u8; ROOM_PREFIX_LEN], StructuralHash)>,
+    roots: Vec<([u8; ROOM_PREFIX_LEN], StructuralHash, [u8; 32])>,
 ) -> Result<Vec<Vec<(String, String, String)>>, String> {
     let client = get_client().await?;
     type NodeLocation = ([u8; ROOM_PREFIX_LEN], StructuralHash);
 
+    let structural_keys: HashMap<[u8; ROOM_PREFIX_LEN], [u8; 32]> = roots
+        .iter()
+        .map(|(room_prefix, _, structural_key)| (*room_prefix, *structural_key))
+        .collect();
+
     let mut node_map: HashMap<NodeLocation, Arc<HamtNode<String, String>>> = HashMap::new();
-    let mut seen: HashSet<NodeLocation> = roots.iter().copied().collect();
+    let mut seen: HashSet<NodeLocation> = roots.iter().map(|(p, h, _)| (*p, *h)).collect();
     let mut to_fetch = seen.clone();
 
     while !to_fetch.is_empty() {
@@ -687,10 +687,14 @@ async fn materialize_state_hamts_async(
                     .get(&key)
                     .copied()
                     .ok_or_else(|| "TiKV returned an unexpected HAMT node key".to_owned())?;
-                let node = decode_persisted_node_unverified(&node_bytes, expected_hash)?;
-                if node.structural_hash != expected_hash {
-                    return Err("HAMT node hash does not match its TiKV key".to_owned());
-                }
+                let structural_key = structural_keys.get(&room_prefix).ok_or_else(|| {
+                    format!(
+                        "No structural_key supplied for room prefix: {}",
+                        hex::encode(room_prefix)
+                    )
+                })?;
+                let node =
+                    decode_persisted_node_verified(&node_bytes, structural_key, expected_hash)?;
 
                 for child in &node.children {
                     let child_location = (room_prefix, child.structural_hash());
@@ -716,7 +720,7 @@ async fn materialize_state_hamts_async(
 
     roots
         .into_iter()
-        .map(|(room_prefix, root_hash)| {
+        .map(|(room_prefix, root_hash, _)| {
             let nodes = nodes_by_prefix.get(&room_prefix).ok_or_else(|| {
                 format!(
                     "Missing nodes for room prefix: {}",
@@ -732,12 +736,16 @@ async fn materialize_state_hamts_async(
 /// Rust. `room_prefix` and `root_structural_hash` come from the TiKV root
 /// record, so this needs no room_id or room-version lookup.
 #[pyfunction]
-#[pyo3(text_signature = "(namespace, room_prefix, root_structural_hash, /)")]
+#[pyo3(
+    text_signature = "(namespace, room_prefix, root_structural_hash, server_secret, room_id, /)"
+)]
 pub fn materialize_state_hamt(
     py: Python<'_>,
     namespace: String,
     room_prefix: Vec<u8>,
     root_structural_hash: Vec<u8>,
+    server_secret: Vec<u8>,
+    room_id: &str,
 ) -> PyResult<Option<Vec<(String, String, String)>>> {
     let room_prefix: [u8; ROOM_PREFIX_LEN] = room_prefix.try_into().map_err(|_| {
         pyo3::exceptions::PyValueError::new_err(format!(
@@ -745,14 +753,19 @@ pub fn materialize_state_hamt(
         ))
     })?;
     let root_structural_hash: StructuralHash = root_structural_hash.try_into().map_err(|_| {
-        pyo3::exceptions::PyValueError::new_err("root_structural_hash must be 16 bytes")
+        pyo3::exceptions::PyValueError::new_err("root_structural_hash must be 32 bytes")
     })?;
+    let server_secret: [u8; 32] = server_secret
+        .try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("server_secret must be 32 bytes"))?;
+    let structural_key = room_structural_key_raw(&server_secret, room_id);
     let rt = get_runtime();
     py.detach(|| {
         rt.block_on(materialize_state_hamt_async(
             &namespace,
             &room_prefix,
             root_structural_hash,
+            &structural_key,
         ))
     })
     .map(Some)
@@ -765,24 +778,29 @@ pub fn materialize_state_hamt(
 /// multi-root reads; the single-root function avoids the small setup cost for
 /// the common case.
 #[pyfunction]
-#[pyo3(text_signature = "(namespace, roots, /)")]
+#[pyo3(text_signature = "(namespace, server_secret, roots, /)")]
 pub fn materialize_state_hamts(
     py: Python<'_>,
     namespace: String,
-    roots: Vec<(Vec<u8>, Vec<u8>)>,
+    server_secret: Vec<u8>,
+    roots: Vec<(Vec<u8>, Vec<u8>, String)>,
 ) -> PyResult<Vec<Vec<(String, String, String)>>> {
+    let server_secret: [u8; 32] = server_secret
+        .try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("server_secret must be 32 bytes"))?;
     let roots = roots
         .into_iter()
-        .map(|(room_prefix, root_hash)| {
+        .map(|(room_prefix, root_hash, room_id)| {
             let room_prefix: [u8; ROOM_PREFIX_LEN] = room_prefix.try_into().map_err(|_| {
                 pyo3::exceptions::PyValueError::new_err(format!(
                     "room_prefix must be {ROOM_PREFIX_LEN} bytes"
                 ))
             })?;
             let root_hash: StructuralHash = root_hash.try_into().map_err(|_| {
-                pyo3::exceptions::PyValueError::new_err("root_structural_hash must be 16 bytes")
+                pyo3::exceptions::PyValueError::new_err("root_structural_hash must be 32 bytes")
             })?;
-            Ok((room_prefix, root_hash))
+            let structural_key = room_structural_key_raw(&server_secret, &room_id);
+            Ok((room_prefix, root_hash, structural_key))
         })
         .collect::<PyResult<Vec<_>>>()?;
     let rt = get_runtime();
@@ -832,6 +850,11 @@ where
     Fut: std::future::Future<Output = Result<Vec<(Vec<u8>, Vec<u8>)>, String>>,
 {
     type NodeLocation = ([u8; ROOM_PREFIX_LEN], StructuralHash);
+
+    let structural_keys: HashMap<[u8; ROOM_PREFIX_LEN], [u8; 32]> = queries
+        .iter()
+        .map(|(room_prefix, _, structural_key, _)| (*room_prefix, *structural_key))
+        .collect();
 
     let mut node_map: HashMap<NodeLocation, Arc<HamtNode<String, String>>> = HashMap::new();
     let mut seen: HashSet<NodeLocation> = queries.iter().map(|(p, h, _, _)| (*p, *h)).collect();
@@ -886,10 +909,14 @@ where
                     .get(&key)
                     .copied()
                     .ok_or_else(|| "TiKV returned an unexpected HAMT node key".to_owned())?;
-                let node = decode_persisted_node_unverified(&node_bytes, expected_hash)?;
-                if node.structural_hash != expected_hash {
-                    return Err("HAMT node hash does not match its TiKV key".to_owned());
-                }
+                let structural_key = structural_keys.get(&room_prefix).ok_or_else(|| {
+                    format!(
+                        "No structural_key supplied for room prefix: {}",
+                        hex::encode(room_prefix)
+                    )
+                })?;
+                let node =
+                    decode_persisted_node_verified(&node_bytes, structural_key, expected_hash)?;
 
                 node_cache().lock().unwrap().put(key, node.clone());
                 node_map.insert((room_prefix, expected_hash), node);

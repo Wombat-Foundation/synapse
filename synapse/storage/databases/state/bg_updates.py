@@ -599,13 +599,13 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
             _state_hamt_root_tikv_key(self.tikv_namespace, state_group): state_group
             for state_group in state_groups
         }
-        roots: dict[int, tuple[bytes, bytes]] = {}
+        roots: dict[int, tuple[bytes, bytes, str]] = {}
         for root_key, root_value in tikv_engine.batch_get(list(root_key_to_group)):
             state_group = root_key_to_group[bytes(root_key)]
-            room_prefix, root_hash, _lattice, _stored_room_id = _decode_state_hamt_root(
+            room_prefix, root_hash, _lattice, stored_room_id = _decode_state_hamt_root(
                 bytes(root_value)
             )
-            roots[state_group] = (room_prefix, root_hash)
+            roots[state_group] = (room_prefix, root_hash, stored_room_id)
 
         missing_groups = [
             state_group for state_group in state_groups if state_group not in roots
@@ -617,7 +617,9 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
             return {}, missing_groups
 
         entries_by_root = tikv_engine.materialize_state_hamts(
-            self.tikv_namespace, [roots[state_group] for state_group in present_groups]
+            self.tikv_namespace,
+            self._state_hamt_secret(),
+            [roots[state_group] for state_group in present_groups],
         )
         return dict(zip(present_groups, entries_by_root)), missing_groups
 
@@ -637,11 +639,15 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         )
         if root_value is None:
             return None
-        room_prefix, root_structural_hash, _lattice, _stored_room_id = (
+        room_prefix, root_structural_hash, _lattice, stored_room_id = (
             _decode_state_hamt_root(root_value)
         )
         return tikv_engine.materialize_state_hamt(
-            self.tikv_namespace, room_prefix, root_structural_hash
+            self.tikv_namespace,
+            room_prefix,
+            root_structural_hash,
+            self._state_hamt_secret(),
+            stored_room_id,
         )
 
     def _materialize_state_hamt_from_tikv(
