@@ -108,6 +108,12 @@ pub(crate) struct EventResolverData {
     pub(crate) prev_events: Vec<String>,
     pub(crate) auth_events: Vec<String>,
     pub(crate) prev_state_events: Vec<String>,
+    /// Whether this event's room version is one where events carry
+    /// `prev_state_events` instead of `auth_events` (MSC4242 / room version
+    /// 2.2), i.e. `room_version.msc4242_state_dags`. Lets callers pick which
+    /// field to trust explicitly, rather than guessing from which one happens
+    /// to be non-empty.
+    pub(crate) msc4242_state_dags: bool,
     pub(crate) content: Value,
     pub(crate) rejected: bool,
     pub(crate) soft_failed: bool,
@@ -675,6 +681,7 @@ impl Event {
             prev_events: self.prev_event_ids(),
             auth_events: self.auth_event_ids()?,
             prev_state_events: self.prev_state_events().unwrap_or_default(),
+            msc4242_state_dags: self.room_version.msc4242_state_dags,
             content,
             rejected: self.rejected_reason.is_some(),
             soft_failed: self.internal_metadata.is_soft_failed()?,
