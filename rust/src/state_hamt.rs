@@ -464,14 +464,7 @@ fn apply_flat_state_updates_impl(
     node_map.insert(root_node.structural_hash, root_node.clone());
     for (hash_bytes, node_bytes) in nodes {
         let hash = structural_hash_from_slice(&hash_bytes)?;
-        let node = decode_persisted_node(&node_bytes, hash)?;
-        if node.structural_hash != hash {
-            return Err(format!(
-                "HAMT node structural hash does not match its key: \
-                 expected {hash:?}, got {:?}",
-                node.structural_hash
-            ));
-        }
+        let node = decode_persisted_node_verified(&node_bytes, &structural_key, hash)?;
         node_map.insert(hash, node);
     }
     // Everything supplied by the caller is, by definition, already durable —
@@ -619,17 +612,18 @@ fn apply_typed_state_updates_impl(
     let mut directory: std::collections::BTreeMap<String, StructuralHash> =
         typed_root.directory.into_iter().collect();
 
+    // NOTE: unlike `apply_flat_state_updates_impl`, these nodes cannot be
+    // verified against a single key here: each belongs to a specific
+    // event_type's subtree, hashed under that type's `typed_subtree_key`
+    // (derived from `room_key` -- see below), not `room_key` itself, and
+    // `nodes` carries no per-entry type tag to pick the right one. Doing this
+    // properly would mean walking `directory` (type -> subtree root hash) and
+    // assigning each node to a type via BFS from its subtree root before
+    // decoding it, rather than decoding this flat list up front.
     let mut node_map: HashMap<StructuralHash, Arc<HamtNode<String, String>>> = HashMap::new();
     for (hash_bytes, node_bytes) in nodes {
         let hash = structural_hash_from_slice(&hash_bytes)?;
-        let node = decode_persisted_node(&node_bytes, hash)?;
-        if node.structural_hash != hash {
-            return Err(format!(
-                "HAMT node structural hash does not match its key: \
-                 expected {hash:?}, got {:?}",
-                node.structural_hash
-            ));
-        }
+        let node = decode_persisted_node_unverified(&node_bytes, hash)?;
         node_map.insert(hash, node);
     }
     let known: HashSet<StructuralHash> = node_map.keys().copied().collect();
@@ -743,7 +737,17 @@ fn apply_typed_state_updates_impl(
     }))
 }
 
-pub(crate) fn decode_persisted_node(
+/// Decode a persisted HAMT node **without verifying** its structural hash
+/// against its content, trusting `structural_hash` as given by the caller.
+///
+/// Only safe to use where the caller cannot possibly supply a mismatched
+/// hash/bytes pair from an untrusted source, or where the room's
+/// `structural_key` genuinely isn't available (e.g. the TiKV materialize/audit
+/// paths, which are deliberately keyless -- see their doc comments). Wherever
+/// `structural_key` is available, use [`decode_persisted_node_verified`]
+/// instead, which actually recomputes the hash from the decoded content and
+/// rejects a mismatch.
+pub(crate) fn decode_persisted_node_unverified(
     node_bytes: &[u8],
     structural_hash: StructuralHash,
 ) -> Result<Arc<HamtNode<String, String>>, String> {
@@ -763,6 +767,25 @@ pub(crate) fn decode_persisted_node(
     }))
 }
 
+/// Decode a persisted HAMT node and verify that `expected_hash` is actually
+/// the structural hash of its decoded content under `structural_key` --
+/// unlike [`decode_persisted_node_unverified`], a corrupted or substituted
+/// `node_bytes`/`expected_hash` pair is rejected rather than silently
+/// trusted.
+pub(crate) fn decode_persisted_node_verified(
+    node_bytes: &[u8],
+    structural_key: &[u8],
+    expected_hash: StructuralHash,
+) -> Result<Arc<HamtNode<String, String>>, String> {
+    let node = PersistedInternalNode::<String, String>::decode_v1_verified(
+        node_bytes,
+        structural_key,
+        expected_hash,
+    )
+    .map_err(|e| format!("Failed to decode persisted HAMT node: {e}"))?;
+    Ok(Arc::new(node))
+}
+
 /// Decode just enough of a persisted node to read its children's hashes,
 /// without reconstructing the full node. Used to drive BFS traversal.
 pub(crate) fn node_child_hashes_raw(node_bytes: &[u8]) -> Result<Vec<StructuralHash>, String> {
@@ -775,7 +798,8 @@ pub(crate) fn node_child_hashes_raw(node_bytes: &[u8]) -> Result<Vec<StructuralH
 ///
 /// Use this when the node's hash is not known in advance (e.g. root nodes that
 /// were stored only as bytes, without an accompanying hash). When the hash is
-/// already known, prefer [`decode_persisted_node`] which avoids the recomputation.
+/// already known, prefer [`decode_persisted_node_verified`] which additionally
+/// checks the result against it.
 fn decode_persisted_node_with_key(
     node_bytes: &[u8],
     structural_key: &[u8],
@@ -1102,6 +1126,12 @@ pub fn decode_typed_root(root_bytes: Vec<u8>) -> PyResult<PyDecodedTypedRoot> {
     ))
 }
 
+/// Materialize a state group's entries from already-fetched node bytes.
+///
+/// Unlike [`lookup_state_entries`], this takes no `server_secret`/`room_id`
+/// and so cannot recompute (and therefore cannot verify) nodes' structural
+/// hashes against their content -- it trusts that `nodes` genuinely came from
+/// this room's Postgres `state_hamt_nodes` table, keyed by `structural_hash`.
 #[pyfunction]
 #[pyo3(text_signature = "(root_node_bytes, nodes, /)")]
 pub fn materialize_state_entries(
@@ -1116,7 +1146,7 @@ pub fn materialize_state_entries(
         if node_bytes == root_node_bytes {
             root_hash = Some(hash);
         }
-        let node = decode_persisted_node(&node_bytes, hash)
+        let node = decode_persisted_node_unverified(&node_bytes, hash)
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
         node_map.insert(hash, node);
     }
@@ -1148,7 +1178,7 @@ pub fn lookup_state_entries(
     let mut node_map = HashMap::from([(root_hash, root_node)]);
     for (hash_bytes, node_bytes) in nodes {
         let hash = structural_hash_from_bytes(hash_bytes)?;
-        let node = decode_persisted_node(&node_bytes, hash)
+        let node = decode_persisted_node_verified(&node_bytes, &structural_key, hash)
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
         node_map.insert(hash, node);
     }
@@ -1168,6 +1198,10 @@ pub fn node_child_hashes(node_bytes: Vec<u8>) -> PyResult<Vec<Vec<u8>>> {
     Ok(hashes.into_iter().map(|hash| hash.to_vec()).collect())
 }
 
+/// Audits reachability across a batch of nodes spanning potentially many
+/// rooms at once, so (like [`materialize_state_entries`]) it has no
+/// `server_secret`/`room_id` and cannot verify nodes' structural hashes
+/// against their content.
 #[pyfunction]
 #[pyo3(text_signature = "(roots, universe, nodes, /)")]
 pub fn reachability_audit(
@@ -1179,7 +1213,7 @@ pub fn reachability_audit(
 
     for (hash_bytes, node_bytes) in nodes {
         let hash = structural_hash_from_bytes(hash_bytes)?;
-        let node = decode_persisted_node(&node_bytes, hash)
+        let node = decode_persisted_node_unverified(&node_bytes, hash)
             .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
         node_map.insert(hash, node);
     }
@@ -2028,7 +2062,7 @@ mod tests {
         let all_nodes = nodes
             .into_iter()
             .map(|(hash, bytes)| {
-                decode_persisted_node(&bytes, hash)
+                decode_persisted_node_unverified(&bytes, hash)
                     .map(|node| (hash, node))
                     .expect("node should decode")
             })
@@ -2161,7 +2195,7 @@ mod tests {
         let mut combined_nodes: HashMap<StructuralHash, Arc<HamtNode<String, String>>> =
             HashMap::new();
         for (h, node_bytes) in nodes_1.into_iter().chain(nodes_2) {
-            let node = decode_persisted_node(&node_bytes, h).unwrap();
+            let node = decode_persisted_node_unverified(&node_bytes, h).unwrap();
             combined_nodes.insert(h, node);
         }
 

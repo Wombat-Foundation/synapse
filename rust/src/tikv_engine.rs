@@ -13,7 +13,9 @@ use tikv_client::{RawClient, TransactionClient};
 use tokio::runtime::Runtime;
 use tokio::time::{sleep, timeout, Duration};
 
-use crate::state_hamt::{decode_persisted_node, lookup_from_node_map, materialize_from_node_map};
+use crate::state_hamt::{
+    decode_persisted_node_unverified, lookup_from_node_map, materialize_from_node_map,
+};
 
 static RUNTIME: OnceCell<Runtime> = OnceCell::new();
 static CLIENT: OnceCell<RawClient> = OnceCell::new();
@@ -514,6 +516,12 @@ async fn get_client() -> Result<&'static RawClient, String> {
 /// The caller supplies the TiKV namespace, room prefix, and root hash. Node
 /// keys are namespaced because content-addressing is only safe to share when
 /// every deployment uses the same HAMT secret.
+///
+/// Deliberately keyless (see the pyfunction's doc comment): nodes are decoded
+/// with [`decode_persisted_node_unverified`], trusting that a byte string
+/// stored under a given TiKV key genuinely hashes to that key rather than
+/// recomputing it -- a corrupted or substituted TiKV value for an existing
+/// key would not be caught here.
 async fn materialize_state_hamt_async(
     namespace: &str,
     room_prefix: &[u8; ROOM_PREFIX_LEN],
@@ -582,7 +590,7 @@ async fn materialize_state_hamt_async(
                     .get(&key)
                     .copied()
                     .ok_or_else(|| "TiKV returned an unexpected HAMT node key".to_owned())?;
-                let node = decode_persisted_node(&node_bytes, expected_hash)?;
+                let node = decode_persisted_node_unverified(&node_bytes, expected_hash)?;
                 if node.structural_hash != expected_hash {
                     return Err("HAMT node hash does not match its TiKV key".to_owned());
                 }
@@ -679,7 +687,7 @@ async fn materialize_state_hamts_async(
                     .get(&key)
                     .copied()
                     .ok_or_else(|| "TiKV returned an unexpected HAMT node key".to_owned())?;
-                let node = decode_persisted_node(&node_bytes, expected_hash)?;
+                let node = decode_persisted_node_unverified(&node_bytes, expected_hash)?;
                 if node.structural_hash != expected_hash {
                     return Err("HAMT node hash does not match its TiKV key".to_owned());
                 }
@@ -878,7 +886,7 @@ where
                     .get(&key)
                     .copied()
                     .ok_or_else(|| "TiKV returned an unexpected HAMT node key".to_owned())?;
-                let node = decode_persisted_node(&node_bytes, expected_hash)?;
+                let node = decode_persisted_node_unverified(&node_bytes, expected_hash)?;
                 if node.structural_hash != expected_hash {
                     return Err("HAMT node hash does not match its TiKV key".to_owned());
                 }
@@ -1151,7 +1159,7 @@ mod tests {
     #[test]
     fn node_cache_with_selective_lookup() {
         use crate::state_hamt::{
-            build_root_handle_and_nodes, decode_persisted_node, lookup_from_node_map,
+            build_root_handle_and_nodes, decode_persisted_node_unverified, lookup_from_node_map,
             room_structural_key_raw,
         };
 
@@ -1174,7 +1182,7 @@ mod tests {
             build_root_handle_and_nodes(&secret, room_id, entries).unwrap();
         let mut node_map = HashMap::new();
         for (h, node_bytes) in nodes {
-            let node = decode_persisted_node(&node_bytes, h).unwrap();
+            let node = decode_persisted_node_unverified(&node_bytes, h).unwrap();
             node_map.insert(h, node);
         }
 
