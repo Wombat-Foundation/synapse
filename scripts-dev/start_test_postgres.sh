@@ -8,7 +8,7 @@
 # This script eliminates disk IOPS bottlenecks by:
 #   - Placing PGDATA on tmpfs (/dev/shm), executing all DB operations in RAM
 #   - Disabling fsync, synchronous_commit, and full_page_writes
-#   - Pre-creating synapse_test_template and expanding max_connections=200 for parallel workers (`trial -jN`)
+#   - Raising max_connections for parallel workers (`trial --jobs=N`)
 #
 # Usage:
 #   eval "$(scripts-dev/start_test_postgres.sh)"      # start (idempotent) and export env vars
@@ -61,9 +61,17 @@ mkdir -p "$PGSOCKETDIR"
 if pg_ctl -D "$PGDATA" status >/dev/null 2>&1; then
 	echo "# PostgreSQL cluster already running at $PGDATA" >&2
 else
+	if [ -d "$PGDATA" ] && ! pg_ctl -D "$PGDATA" status >/dev/null 2>&1; then
+		rm -rf "$PGDATA"
+	fi
 	echo "# Initializing throwaway RAM-disk PostgreSQL cluster at $PGDATA..." >&2
 	mkdir -p "$PGDATA"
-	initdb -D "$PGDATA" -U postgres --auth=trust -E UTF8 --locale=C.UTF-8 >/dev/null
+	# -U postgres makes "postgres" the bootstrap superuser directly (matching
+	# what tests/server.py connects as) -- no separate `createuser` needed.
+	# -E UTF8 --locale=C (not the combined "C.UTF-8", which isn't guaranteed
+	# to exist on every system) matches the LC_COLLATE='C' LC_CTYPE='C'
+	# tests/utils.py itself uses for POSTGRES_BASE_DB.
+	initdb -D "$PGDATA" -U postgres --auth=trust -E UTF8 --locale=C >/dev/null
 
 	cat >>"$PGDATA/postgresql.conf" <<EOF
 
@@ -71,6 +79,8 @@ else
 fsync = off
 synchronous_commit = off
 full_page_writes = off
+# Headroom for `trial --jobs=N`: each worker's homeserver pool defaults to
+# cp_max=5, plus setup/teardown connections outside the pool.
 max_connections = 200
 EOF
 
@@ -78,9 +88,10 @@ EOF
 		-o "-p $PGPORT -k $PGSOCKETDIR" \
 		-l "$LOGFILE" start >/dev/null
 
-	# Pre-create test user and template DB
-	createuser -h "$PGSOCKETDIR" -p "$PGPORT" -s postgres >/dev/null 2>&1 || true
-	createdb -h "$PGSOCKETDIR" -p "$PGPORT" -O postgres synapse_test_template >/dev/null 2>&1 || true
+	# No need to pre-create a template database here: tests/utils.py creates
+	# and fully schema-migrates its own base database automatically on the
+	# first test run (POSTGRES_BASE_DB, named after the trial process's PID),
+	# then uses that as the WITH TEMPLATE source for every per-test database.
 fi
 
 cat <<EOF
