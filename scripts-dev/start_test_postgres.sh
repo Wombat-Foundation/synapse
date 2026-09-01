@@ -26,46 +26,46 @@ LOGFILE="$PGDATA.log"
 ACTION="${1:-start}"
 
 case "$ACTION" in
-    stop)
-        if [ -d "$PGDATA" ]; then
-            pg_ctl -D "$PGDATA" stop -m fast >/dev/null 2>&1 || true
-            rm -rf "$PGDATA" "$PGSOCKETDIR" "$LOGFILE"
-            echo "Stopped and cleaned RAM-disk PostgreSQL at $PGDATA" >&2
-        else
-            echo "Nothing running at $PGDATA" >&2
-        fi
-        exit 0
-        ;;
+stop)
+	if [ -d "$PGDATA" ]; then
+		pg_ctl -D "$PGDATA" stop -m fast >/dev/null 2>&1 || true
+		rm -rf "$PGDATA" "$PGSOCKETDIR" "$LOGFILE"
+		echo "Stopped and cleaned RAM-disk PostgreSQL at $PGDATA" >&2
+	else
+		echo "Nothing running at $PGDATA" >&2
+	fi
+	exit 0
+	;;
 
-    status)
-        if [ -d "$PGDATA" ] && pg_ctl -D "$PGDATA" status >/dev/null 2>&1; then
-            echo "PostgreSQL running at $PGDATA (port $PGPORT, socket $PGSOCKETDIR)" >&2
-            exit 0
-        else
-            echo "PostgreSQL not running at $PGDATA" >&2
-            exit 1
-        fi
-        ;;
+status)
+	if [ -d "$PGDATA" ] && pg_ctl -D "$PGDATA" status >/dev/null 2>&1; then
+		echo "PostgreSQL running at $PGDATA (port $PGPORT, socket $PGSOCKETDIR)" >&2
+		exit 0
+	else
+		echo "PostgreSQL not running at $PGDATA" >&2
+		exit 1
+	fi
+	;;
 
-    start)
-        ;;
+start)
+	;;
 
-    *)
-        echo "Usage: $0 {start|stop|status}" >&2
-        exit 1
-        ;;
+*)
+	echo "Usage: $0 {start|stop|status}" >&2
+	exit 1
+	;;
 esac
 
 mkdir -p "$PGSOCKETDIR"
 
 if pg_ctl -D "$PGDATA" status >/dev/null 2>&1; then
-    echo "# PostgreSQL cluster already running at $PGDATA" >&2
+	echo "# PostgreSQL cluster already running at $PGDATA" >&2
 else
-    echo "# Initializing throwaway RAM-disk PostgreSQL cluster at $PGDATA..." >&2
-    mkdir -p "$PGDATA"
-    initdb -D "$PGDATA" -U postgres --auth=trust -E UTF8 --locale=C.UTF-8 >/dev/null
+	echo "# Initializing throwaway RAM-disk PostgreSQL cluster at $PGDATA..." >&2
+	mkdir -p "$PGDATA"
+	initdb -D "$PGDATA" -U postgres --auth=trust -E UTF8 --locale=C.UTF-8 >/dev/null
 
-    cat >> "$PGDATA/postgresql.conf" <<EOF
+	cat >>"$PGDATA/postgresql.conf" <<EOF
 
 # --- scripts-dev/start_test_postgres.sh: throwaway test cluster config ---
 fsync = off
@@ -74,13 +74,13 @@ full_page_writes = off
 max_connections = 200
 EOF
 
-    pg_ctl -D "$PGDATA" \
-        -o "-p $PGPORT -k $PGSOCKETDIR" \
-        -l "$LOGFILE" start >/dev/null
+	pg_ctl -D "$PGDATA" \
+		-o "-p $PGPORT -k $PGSOCKETDIR" \
+		-l "$LOGFILE" start >/dev/null
 
-    # Pre-create test user and template DB
-    createuser -h "$PGSOCKETDIR" -p "$PGPORT" -s postgres >/dev/null 2>&1 || true
-    createdb -h "$PGSOCKETDIR" -p "$PGPORT" -O postgres synapse_test_template >/dev/null 2>&1 || true
+	# Pre-create test user and template DB
+	createuser -h "$PGSOCKETDIR" -p "$PGPORT" -s postgres >/dev/null 2>&1 || true
+	createdb -h "$PGSOCKETDIR" -p "$PGPORT" -O postgres synapse_test_template >/dev/null 2>&1 || true
 fi
 
 cat <<EOF
