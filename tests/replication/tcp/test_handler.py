@@ -418,3 +418,96 @@ class ChannelsTestCase(BaseMultiWorkerStreamTestCase):
             )
 
         spy.assert_called_once_with("master", prev_token, new_token)
+
+    def test_stream_reset_position_forces_catchup(self) -> None:
+        """A POSITION where current_token > cmd.new_token describes a stream
+        that has been "reset" (e.g. `caches` or `typing` after the writer
+        restarts and its id gen starts again from a low value). This must
+        still be treated as `missing_updates`, not silently ignored --
+        otherwise this instance stays stuck at its old (now invalid) position
+        forever, since nothing else will ever tell it to move backwards.
+        """
+        from unittest.mock import AsyncMock, patch
+
+        worker1 = self.make_worker_hs(
+            "synapse.app.generic_worker",
+            extra_config={
+                "worker_name": "worker1",
+                "run_background_tasks_on": "worker1",
+                "redis": {"enabled": True},
+            },
+        )
+        self.replicate()
+
+        worker1_cmd_handler = worker1.get_replication_command_handler()
+        fake_conn = cast(IReplicationConnection, object())
+
+        receipts_stream = worker1_cmd_handler._streams["receipts"]
+        current_token = receipts_stream.current_token("master")
+
+        # Simulate a writer restart: the incoming POSITION's new_token is
+        # lower than what we're currently sitting at.
+        prev_token = 0
+        new_token = 0
+        assert current_token > new_token
+
+        position_cmd = PositionCommand("receipts", "master", prev_token, new_token)
+
+        spy = AsyncMock(return_value=([], new_token, False))
+        with patch.object(receipts_stream, "get_updates_since", spy):
+            self.get_success(
+                worker1_cmd_handler._process_position(
+                    "receipts", fake_conn, position_cmd
+                )
+            )
+
+        spy.assert_called_once_with("master", current_token, new_token)
+
+    def test_partial_progress_position_does_not_force_catchup(self) -> None:
+        """A POSITION where cmd.prev_token < current_token < cmd.new_token
+        describes an instance that is already mid-stream, actively catching
+        up via ordinary RDATA delivery. _process_position must not force a
+        redundant `get_updates_since` fetch in this case -- the remaining gap
+        will be closed by normal RDATA processing, and forcing a fetch on
+        every such POSITION would defeat the purpose of streaming updates
+        over pub/sub.
+        """
+        from unittest.mock import AsyncMock, patch
+
+        worker1 = self.make_worker_hs(
+            "synapse.app.generic_worker",
+            extra_config={
+                "worker_name": "worker1",
+                "run_background_tasks_on": "worker1",
+                "redis": {"enabled": True},
+            },
+        )
+        self.replicate()
+
+        worker1_store = worker1.get_datastores().main
+        worker1_cmd_handler = worker1.get_replication_command_handler()
+        fake_conn = cast(IReplicationConnection, object())
+
+        receipts_stream = worker1_cmd_handler._streams["receipts"]
+        current_token = receipts_stream.current_token("master")
+
+        # Simulate normal partial progress: our current position is strictly
+        # between prev_token and new_token, i.e. we've already moved on from
+        # prev_token via ordinary RDATA delivery, but haven't reached
+        # new_token yet.
+        prev_token = current_token - 1
+        new_token = current_token + 1
+        worker1_store._receipts_id_gen._current_positions["master"] = current_token
+        worker1_store._receipts_id_gen._persisted_upto_position = current_token
+
+        position_cmd = PositionCommand("receipts", "master", prev_token, new_token)
+
+        spy = AsyncMock(return_value=([], new_token, False))
+        with patch.object(receipts_stream, "get_updates_since", spy):
+            self.get_success(
+                worker1_cmd_handler._process_position(
+                    "receipts", fake_conn, position_cmd
+                )
+            )
+
+        spy.assert_not_called()
