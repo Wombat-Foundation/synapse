@@ -997,64 +997,6 @@ class EventFederationWorkerStoreTestCase(tests.unittest.HomeserverTestCase):
         _, event_id = next_staged_event_info
         self.assertEqual(event_id, "$fake_event_id_500")
 
-    def test_remove_received_event_releases_empty_inbound_queue_lock(self) -> None:
-        """A PDU arriving as a drainer exits must be able to start a new drain."""
-
-        room_id = "!staging-room:test"
-        origin = "remote.test"
-        room_version = KNOWN_ROOM_VERSIONS["1"]
-        event_id = "$first:test"
-
-        self.get_success(
-            self.store.db_pool.simple_insert(
-                table="federation_inbound_events_staging",
-                values={
-                    "origin": origin,
-                    "room_id": room_id,
-                    "received_ts": 1,
-                    "event_id": event_id,
-                    "event_json": json_encoder.encode(
-                        {
-                            "event_id": event_id,
-                            "room_id": room_id,
-                            "sender": "@alice:remote.test",
-                            "type": EventTypes.Message,
-                            "content": {"body": "first", "msgtype": "m.text"},
-                            "origin_server_ts": 0,
-                            "depth": 1,
-                            "prev_events": [],
-                            "auth_events": [],
-                            "hashes": {},
-                            "signatures": {},
-                        }
-                    ),
-                    "internal_metadata": "{}",
-                },
-                desc="test_empty_staging_queue_releases_lock",
-            )
-        )
-
-        lock = self.get_success(
-            self.store.try_acquire_lock("test_staging_drain", room_id)
-        )
-        assert lock is not None
-        received_ts, next_event, lock_is_valid = self.get_success(
-            self.store.remove_received_event_and_get_next_staged_event_for_room(
-                origin, event_id, room_id, room_version, lock
-            )
-        )
-
-        self.assertEqual(received_ts, 1)
-        self.assertIsNone(next_event)
-        self.assertTrue(lock_is_valid)
-        # The helper releases the old lock, so a subsequently staged PDU can
-        # acquire one immediately rather than waiting for the stale-queue sweep.
-        replacement_lock = self.get_success(
-            self.store.try_acquire_lock("test_staging_drain", room_id)
-        )
-        assert replacement_lock is not None
-        self.get_success(replacement_lock.release())
-
     def _setup_room_for_backfill_tests(self) -> _BackfillSetupInfo:
         """
         Sets up a room with various events and backward extremities to test

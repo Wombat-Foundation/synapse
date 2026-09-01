@@ -1431,14 +1431,16 @@ class FederationServer(FederationBase):
             origin = latest_origin
             event = latest_event
 
-        # Keep the distributed lock while draining the staging queue. Releasing and
-        # reacquiring it for every PDU adds a DELETE and an INSERT .. ON CONFLICT
-        # round trip per event, while not allowing another worker to make useful
-        # progress: events for a room must be processed in order. Check that the
-        # lock is still valid between events so a stale lock cannot keep draining.
-        async with lock:
-            events_since_prune_check = 0
-            while True:
+        # Release and reacquire the distributed lock after each unit of work. In
+        # particular, do not hold it while checking whether the queue is empty:
+        # a newly staged PDU only makes one attempt to acquire the lock. If it
+        # observes a drainer which subsequently exits, it must either be picked
+        # up by this drainer or acquire the next lock itself.
+        events_since_prune_check = 0
+        while True:
+            batch_succeeded = False
+            skip_single_event = False
+            async with lock:
                 # A burst normally arrives in staging before this worker gets its
                 # first turn. Give the event handler a chance to persist a simple
                 # linear run in one replication request. It declines anything with
@@ -1472,15 +1474,13 @@ class FederationServer(FederationBase):
                     if staged_events:
                         origin, event = staged_events[0]
                     else:
-                        next = await self._get_next_nonspam_staged_event_for_room(
-                            room_id, room_version
-                        )
-                        if not next:
-                            return
-                        origin, event = next
+                        # The lock will be released below before we check for
+                        # another event, preserving the producer/drainer handoff.
+                        skip_single_event = True
 
                 if (
-                    len(staged_events) > 1
+                    not skip_single_event
+                    and len(staged_events) > 1
                     and staged_events[0][0] == origin
                     and staged_events[0][1].event_id == event.event_id
                 ):
@@ -1521,117 +1521,75 @@ class FederationServer(FederationBase):
 
                         events_since_prune_check += len(staged_events)
 
-                        (
-                            queue_is_empty,
-                            lock_is_valid,
-                        ) = await self.store.release_inbound_pdu_lock_if_staging_empty(
-                            room_id, lock
-                        )
-                        if not lock_is_valid:
-                            logger.info(
-                                "Lost inbound PDU processing lock for room %s while draining",
-                                room_id,
-                            )
-                            return
-
-                        if queue_is_empty:
-                            return
-
-                        if (
-                            events_since_prune_check
-                            >= STAGED_EVENT_QUEUE_PRUNE_INTERVAL
-                        ):
-                            events_since_prune_check = 0
-                            await self.store.prune_staged_events_in_room(
-                                room_id, room_version
-                            )
-
-                        next = await self._get_next_nonspam_staged_event_for_room(
-                            room_id, room_version
-                        )
-                        if not next:
-                            return
-
-                        origin, event = next
-                        continue
                     # A declined or failed batch must fall through to the
                     # conservative single-event path below. In particular, do
                     # not remove the later staged events: they may be outliers,
                     # rejected events, or events whose predecessors have not
                     # arrived yet, and each needs the normal per-event handling.
 
-                logger.info("handling received PDU in room %s: %s", room_id, event)
-                try:
-                    with nested_logging_context(event.event_id):
-                        # We're taking out a lock within a lock, which could
-                        # lead to deadlocks if we're not careful. However, it is
-                        # safe on this occasion as we only ever take a write
-                        # lock when deleting a room, which we would never do
-                        # while holding the `_INBOUND_EVENT_HANDLING_LOCK_NAME`
-                        # lock.
-                        async with self._worker_lock_handler.acquire_read_write_lock(
-                            NEW_EVENT_DURING_PURGE_LOCK_NAME, room_id, write=False
-                        ):
-                            await self._federation_event_handler.on_receive_pdu(
-                                origin, event
-                            )
-                except FederationError as e:
-                    # XXX: Ideally we'd inform the remote we failed to process
-                    # the event, but we can't return an error in the transaction
-                    # response (as we've already responded).
-                    logger.warning("Error handling PDU %s: %s", event.event_id, e)
-                except Exception:
-                    f = failure.Failure()
-                    logger.error(
-                        "Failed to handle PDU %s",
-                        event.event_id,
-                        exc_info=(f.type, f.value, f.getTracebackObject()),
-                    )
-
-                (
-                    received_ts,
-                    next,
-                    lock_is_valid,
-                ) = await self.store.remove_received_event_and_get_next_staged_event_for_room(
-                    origin, event.event_id, room_id, room_version, lock
-                )
-                if received_ts is not None:
-                    pdu_process_time.labels(
-                        **{SERVER_NAME_LABEL: self.server_name}
-                    ).observe((self._clock.time_msec() - received_ts) / 1000)
-
-                events_since_prune_check += 1
-
-                if not lock_is_valid:
-                    logger.info(
-                        "Lost inbound PDU processing lock for room %s while draining",
-                        room_id,
-                    )
-                    return
-
-                if not next:
-                    return
-
-                origin, event = next
-
-                # Prune a busy queue periodically. The queue itself is only pruned
-                # once it reaches 100 events, so checking every event just adds a
-                # COUNT query to the normal drain path.
-                if events_since_prune_check >= STAGED_EVENT_QUEUE_PRUNE_INTERVAL:
-                    events_since_prune_check = 0
-                    pruned = await self.store.prune_staged_events_in_room(
-                        room_id, room_version
-                    )
-                    if pruned:
-                        # If we have pruned the queue check we need to refetch the next
-                        # event to handle.
-                        next = await self.store.get_next_staged_event_for_room(
-                            room_id, room_version
+                if not batch_succeeded and not skip_single_event:
+                    logger.info("handling received PDU in room %s: %s", room_id, event)
+                    try:
+                        with nested_logging_context(event.event_id):
+                            # We're taking out a lock within a lock, which could
+                            # lead to deadlocks if we're not careful. However, it is
+                            # safe on this occasion as we only ever take a write
+                            # lock when deleting a room, which we would never do
+                            # while holding the `_INBOUND_EVENT_HANDLING_LOCK_NAME`
+                            # lock.
+                            async with (
+                                self._worker_lock_handler.acquire_read_write_lock(
+                                    NEW_EVENT_DURING_PURGE_LOCK_NAME,
+                                    room_id,
+                                    write=False,
+                                )
+                            ):
+                                await self._federation_event_handler.on_receive_pdu(
+                                    origin, event
+                                )
+                    except FederationError as e:
+                        # XXX: Ideally we'd inform the remote we failed to process
+                        # the event, but we can't return an error in the transaction
+                        # response (as we've already responded).
+                        logger.warning("Error handling PDU %s: %s", event.event_id, e)
+                    except Exception:
+                        f = failure.Failure()
+                        logger.error(
+                            "Failed to handle PDU %s",
+                            event.event_id,
+                            exc_info=(f.type, f.value, f.getTracebackObject()),
                         )
-                        if not next:
-                            return
 
-                        origin, event = next
+                    received_ts = await self.store.remove_received_event_from_staging(
+                        origin, event.event_id
+                    )
+                    if received_ts is not None:
+                        pdu_process_time.labels(
+                            **{SERVER_NAME_LABEL: self.server_name}
+                        ).observe((self._clock.time_msec() - received_ts) / 1000)
+                    events_since_prune_check += 1
+
+            # The lock is deliberately released before this query. If a producer
+            # staged an event before the release it will be found here; if it
+            # stages one afterwards it can acquire the lock itself.
+            if events_since_prune_check >= STAGED_EVENT_QUEUE_PRUNE_INTERVAL:
+                events_since_prune_check = 0
+                await self.store.prune_staged_events_in_room(room_id, room_version)
+
+            next = await self._get_next_nonspam_staged_event_for_room(
+                room_id, room_version
+            )
+            if not next:
+                return
+
+            new_lock = await self.store.try_acquire_lock(
+                _INBOUND_EVENT_HANDLING_LOCK_NAME, room_id
+            )
+            if not new_lock:
+                return
+
+            lock = new_lock
+            origin, event = next
 
     async def exchange_third_party_invite(
         self, sender_user_id: str, target_user_id: str, room_id: str, signed: dict
