@@ -19,7 +19,7 @@
 #
 #
 
-SCHEMA_VERSION = 96  # remember to update the list below when updating
+SCHEMA_VERSION = 95  # remember to update the list below when updating
 """Represents the expectations made by the codebase about the database schema
 
 This should be incremented whenever the codebase changes its requirements on the
@@ -184,8 +184,6 @@ Changes in SCHEMA_VERSION = 95
     - Change `delayed_events` primary key to be globally unique rather than
       scoped to a user localpart (MSC4140).
 
-Changes in SCHEMA_VERSION = 96
-    - Add a durable queue for TiKV HAMT root deletion retries.
 """
 
 
