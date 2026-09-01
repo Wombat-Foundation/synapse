@@ -702,6 +702,56 @@ class StateStoreTestCase(HomeserverTestCase):
             },
         )
 
+    def test_multi_room_exact_filter_under_pure_sql_does_not_reject_batch(self) -> None:
+        """Regression test: `_lookup_state_hamt_from_postgres_many_txn` fetches
+        one shared node pool for every group in the batch and hands the whole
+        pool to `state_hamt.lookup_state_entries` for each group individually
+        -- so a batch spanning two different *rooms* legitimately contains
+        nodes that don't belong to the room currently being resolved.
+        Real-world symptom (reproduced on CI): `RuntimeError: Failed to decode
+        persisted HAMT node: persisted node contents do not match expected
+        structural hash`, surfacing as a 500 on federation invites into an
+        empty room and on search across an upgraded room + its predecessor --
+        both cases resolve state for two rooms in the same batched call.
+        """
+        if self.state_datastore.tikv_pd_endpoints:
+            self.skipTest("Not applicable when TiKV is configured")
+
+        event1 = self.inject_state_event(
+            self.room, self.u_alice, EventTypes.Create, "", {}
+        )
+        sg1 = self.get_success(self.store._get_state_group_for_event(event1.event_id))
+
+        room2 = RoomID.from_string("!other-room:test")
+        self.get_success(
+            self.store.store_room(
+                room2.to_string(),
+                room_creator_user_id=self.u_alice.to_string(),
+                is_public=True,
+                room_version=RoomVersions.V1,
+            )
+        )
+        event2 = self.inject_state_event(room2, self.u_alice, EventTypes.Create, "", {})
+        sg2 = self.get_success(self.store._get_state_group_for_event(event2.event_id))
+        assert sg1 is not None and sg2 is not None
+        assert not self.state_datastore.tikv_pd_endpoints
+
+        state_filter = StateFilter.from_types([(EventTypes.Create, "")])
+
+        res = self.get_success(
+            self.storage.state.stores.state._get_state_groups_from_groups(
+                [sg1, sg2], state_filter
+            )
+        )
+
+        self.assertEqual(
+            res,
+            {
+                sg1: {(EventTypes.Create, ""): event1.event_id},
+                sg2: {(EventTypes.Create, ""): event2.event_id},
+            },
+        )
+
     def test_fallback_sql_does_not_call_tikv_in_transaction(self) -> None:
         """Verify that pure SQL fallback mode (use_tikv=False) makes zero TiKV calls inside runInteraction."""
         from unittest.mock import patch
