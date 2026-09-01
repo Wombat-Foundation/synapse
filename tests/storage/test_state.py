@@ -284,7 +284,7 @@ class StateStoreTestCase(HomeserverTestCase):
 
         # Insert a corrupt replacement node, then repoint the root at it. This
         # simulates corrupt node content rather than a missing node row.
-        garbage_structural_hash = random_string(16).encode("ascii")
+        garbage_structural_hash = random_string(32).encode("ascii")
         self.get_success(
             self.store.db_pool.simple_insert(
                 table="state_hamt_nodes",
@@ -354,7 +354,7 @@ class StateStoreTestCase(HomeserverTestCase):
         assert root_value is not None, "Expected a HAMT root record to exist in TiKV"
         room_prefix, _root_hash, lattice, room_id = _decode_state_hamt_root(root_value)
 
-        garbage_structural_hash = random_string(16).encode("ascii")
+        garbage_structural_hash = random_string(32).encode("ascii")
         garbage_node_key = _state_hamt_node_tikv_key(
             self.state_datastore.tikv_namespace, room_prefix, garbage_structural_hash
         )
@@ -1353,7 +1353,7 @@ class StateStoreTestCase(HomeserverTestCase):
         )
 
         room_prefix = b"01234567"
-        structural_hash = b"0123456789abcdef"
+        structural_hash = b"0123456789abcdef0123456789abcdef"
         self.assertNotEqual(
             _state_hamt_root_tikv_key("worker-one", 1),
             _state_hamt_root_tikv_key("worker-two", 1),
