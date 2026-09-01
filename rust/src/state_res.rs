@@ -53,7 +53,6 @@ pub fn get_auth_chain_difference_from_event_graph<'py>(
                 content: (),
                 prev_events: Vec::new(),
                 auth_events: auth_ids,
-                prev_state_events: Vec::new(),
                 depth: 0,
                 rejected: false,
                 soft_fail: false,
@@ -99,6 +98,14 @@ pub fn get_auth_chain_difference_from_event_graph<'py>(
 }
 
 fn resolver_data_to_lean_event(data: EventResolverData) -> LeanEvent<String, Value> {
+    // For MSC4242 (room version 2.2), events carry `prev_state_events` instead
+    // of `auth_events`. rezzy's LeanEvent folds both into a single `auth_events`
+    // field and exposes them via `prev_state_events()` returning `&self.auth_events`.
+    let auth_events = if data.prev_state_events.is_empty() {
+        data.auth_events
+    } else {
+        data.prev_state_events
+    };
     LeanEvent {
         event_id: data.event_id,
         event_type: data.event_type,
@@ -108,8 +115,7 @@ fn resolver_data_to_lean_event(data: EventResolverData) -> LeanEvent<String, Val
         sender: data.sender,
         content: data.content,
         prev_events: data.prev_events,
-        auth_events: data.auth_events,
-        prev_state_events: data.prev_state_events,
+        auth_events,
         depth: data.depth,
         rejected: data.rejected,
         soft_fail: data.soft_failed,
@@ -132,6 +138,14 @@ fn py_to_lean_event(py_ev: &Bound<'_, PyAny>) -> PyResult<LeanEvent<String, Valu
         .getattr("prev_state_events")
         .and_then(|value| value.extract())
         .unwrap_or_default();
+    // For MSC4242 (room version 2.2), events carry `prev_state_events` instead
+    // of `auth_events`. rezzy's LeanEvent folds both into a single `auth_events`
+    // field and exposes them via `prev_state_events()` returning `&self.auth_events`.
+    let auth_events = if prev_state_events.is_empty() {
+        auth_events
+    } else {
+        prev_state_events
+    };
     let rejected_reason: Option<String> = py_ev.getattr("rejected_reason")?.extract()?;
     let soft_failed: bool = py_ev
         .getattr("internal_metadata")?
@@ -153,7 +167,6 @@ fn py_to_lean_event(py_ev: &Bound<'_, PyAny>) -> PyResult<LeanEvent<String, Valu
         content,
         prev_events,
         auth_events,
-        prev_state_events,
         depth,
         rejected: rejected_reason.is_some(),
         soft_fail: soft_failed,

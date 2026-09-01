@@ -26,7 +26,7 @@ use rezzy::{
 use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
-type RootHandleParts = ([u8; 16], [u8; 32]);
+type RootHandleParts = ([u8; 32], [u8; 32]);
 type PersistedNodeBytes = (StructuralHash, Vec<u8>);
 type BuiltRoot = (RootHandleParts, Vec<PersistedNodeBytes>);
 type PyRootHandleParts = (Vec<u8>, Vec<u8>);
@@ -290,7 +290,7 @@ fn collect_persisted_nodes(
     }
 
     let persisted: PersistedInternalNode<String, String> = node.as_ref().into();
-    nodes.push((persisted.structural_hash, persisted.encode_v1()));
+    nodes.push((node.structural_hash, persisted.encode_v1()));
 }
 
 pub(crate) fn build_root_handle_and_nodes(
@@ -393,13 +393,13 @@ fn collect_new_persisted_nodes(
     }
 
     let persisted: PersistedInternalNode<String, String> = node.as_ref().into();
-    nodes.push((persisted.structural_hash, persisted.encode_v1()));
+    nodes.push((node.structural_hash, persisted.encode_v1()));
 }
 
 fn structural_hash_from_slice(hash_bytes: &[u8]) -> Result<StructuralHash, String> {
     hash_bytes
         .try_into()
-        .map_err(|_| "structural hash must be 16 bytes".to_owned())
+        .map_err(|_| "structural hash must be 32 bytes".to_owned())
 }
 
 /// The result of applying one or more single-key changes to an existing
@@ -746,7 +746,7 @@ fn apply_typed_state_updates_impl(
 pub(crate) fn decode_persisted_node(
     node_bytes: &[u8],
 ) -> Result<Arc<HamtNode<String, String>>, String> {
-    let persisted = PersistedInternalNode::<String, String>::decode_v1(node_bytes)
+    let persisted = PersistedInternalNode::<String, String>::decode_v1_unverified(node_bytes)
         .map_err(|e| format!("Failed to decode persisted HAMT node: {e}"))?;
     let node: HamtNode<String, String> = persisted
         .try_into()
@@ -757,7 +757,7 @@ pub(crate) fn decode_persisted_node(
 /// Decode just enough of a persisted node to read its children's hashes,
 /// without reconstructing the full node. Used to drive BFS traversal.
 pub(crate) fn node_child_hashes_raw(node_bytes: &[u8]) -> Result<Vec<StructuralHash>, String> {
-    let node = PersistedInternalNode::<String, String>::decode_v1(node_bytes)
+    let node = PersistedInternalNode::<String, String>::decode_v1_unverified(node_bytes)
         .map_err(|e| format!("Failed to decode persisted HAMT node: {e}"))?;
     Ok(node.child_hashes)
 }
@@ -1915,9 +1915,9 @@ mod tests {
     #[test]
     fn typed_root_rejects_unsorted_directory() {
         let root = TypedRoot {
-            structural_hash: [0u8; 16],
+            structural_hash: [0u8; 32],
             state_group_id: [0u8; 32],
-            directory: vec![("z".to_owned(), [1u8; 16]), ("a".to_owned(), [2u8; 16])],
+            directory: vec![("z".to_owned(), [1u8; 32]), ("a".to_owned(), [2u8; 32])],
         };
         let mut encoded = vec![TYPED_ROOT_FORMAT];
         encoded.extend_from_slice(&root.structural_hash);
@@ -1969,7 +1969,7 @@ mod tests {
                 && state_key == "@alice:test.example"
                 && event_id == "$1"));
         assert!(recovered.iter().any(|(_, _, event_id)| event_id == "$2"));
-        assert_eq!(root_hash.len(), 16);
+        assert_eq!(root_hash.len(), 32);
     }
 
     #[test]

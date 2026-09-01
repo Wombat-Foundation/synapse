@@ -1079,7 +1079,7 @@ mod tests {
             LruCache::new(NonZeroUsize::new(4).unwrap());
         // (matches the `NodeCache` value type used by the process-wide `node_cache()`)
 
-        let key = node_tikv_key("test-namespace", &[0u8; ROOM_PREFIX_LEN], &[0u8; 16]);
+        let key = node_tikv_key("test-namespace", &[0u8; ROOM_PREFIX_LEN], &[0u8; 32]);
         assert!(cache.get(&key).is_none());
 
         let node = Arc::new(HamtNode {
@@ -1087,7 +1087,7 @@ mod tests {
             nodemap: 0,
             leaves: Vec::new(),
             children: Vec::new(),
-            structural_hash: [0u8; 16],
+            structural_hash: [0u8; 32],
         });
         cache.put(key.clone(), node.clone());
 
