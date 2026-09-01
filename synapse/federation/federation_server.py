@@ -1536,13 +1536,11 @@ class FederationServer(FederationBase):
 
                         origin, event = next
                         continue
-                    else:
-                        # Batch failed; remove all staged events, matching the
-                        # single-event path's error-handling semantics.
-                        for staged_origin, staged_event in staged_events:
-                            await self.store.remove_received_event_from_staging(
-                                staged_origin, staged_event.event_id
-                            )
+                    # A declined or failed batch must fall through to the
+                    # conservative single-event path below. In particular, do
+                    # not remove the later staged events: they may be outliers,
+                    # rejected events, or events whose predecessors have not
+                    # arrived yet, and each needs the normal per-event handling.
 
                 logger.info("handling received PDU in room %s: %s", room_id, event)
                 try:
