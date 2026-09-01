@@ -296,34 +296,15 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         if not missing_groups:
             return results
 
-        # A missing group is either (a) genuinely purged/never existed in
-        # `state_groups`, in which case it correctly resolves to {} via the
-        # legacy fallback below, or (b) an existing `state_groups` row with
-        # no HAMT root. Since HAMT roots are always published before the
-        # SQL transaction that creates their state group commits (see
-        # `_get_state_groups_from_groups` in store.py), (b) can only mean
-        # corruption -- except when TiKV is the primary store *and* this
-        # particular call explicitly resolved to the SQL fallback
-        # (use_tikv=False passed in), in which case a missing SQL root is
-        # expected (the root lives in TiKV, not state_hamt_roots).
-        #
-        # This must key off the *resolved* use_tikv for this call, not just
-        # whether TiKV is configured system-wide: an internal caller inside
-        # an open transaction (e.g. `_background_deduplicate_state`, which
-        # calls this directly rather than through the async
-        # `_get_state_groups_from_groups` in store.py) can resolve to
-        # use_tikv=True while TiKV is configured, and a missing root there
-        # is exactly the same corruption as in pure-SQL mode -- gating
-        # solely on `tikv_pd_endpoints` would silently skip it.
-        resolved_use_tikv = (
-            use_tikv
-            if use_tikv is not None
-            else bool(getattr(self, "tikv_pd_endpoints", None))
+        # Existing groups without a root are expected only while the v95
+        # backfill is pending. Once it has completed, a missing root is data
+        # corruption regardless of whether this call reads TiKV or SQL.
+        txn.execute(
+            "SELECT 1 FROM background_updates WHERE update_name = ?",
+            ("state_hamt_backfill_roots",),
         )
-        if resolved_use_tikv:
-            # In TiKV mode, every state group must have a HAMT root in SQL
-            # (roots are published before the creating transaction commits).
-            # A missing root here is genuine corruption.
+        backfill_pending = txn.fetchone() is not None
+        if not backfill_pending:
             existing_rows = self.db_pool.simple_select_many_txn(
                 txn,
                 table="state_groups",

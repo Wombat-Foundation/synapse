@@ -250,12 +250,12 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             )
 
             if missing_groups:
-                # TiKV nodes and roots are published before the SQL transaction
-                # that creates a state group commits. Therefore an existing
-                # state group without a TiKV root is corruption, not a normal
-                # cross-worker visibility race. A group that does not exist in
-                # SQL is genuinely absent or purged and resolves to an empty
-                # state map.
+                # TiKV publication happens after the SQL transaction commits so
+                # that its network round-trips do not hold a database worker.
+                # Until publication completes (or if it must be retried), use
+                # the SQL HAMT mirror for existing groups. A group which does
+                # not exist in SQL is genuinely absent or purged and resolves
+                # to an empty state map.
                 existing_rows = await self.db_pool.simple_select_many_batch(
                     table="state_groups",
                     column="id",
@@ -268,10 +268,14 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     if group not in existing_in_sql:
                         tikv_results[group] = {}
                 if existing_in_sql:
-                    raise RuntimeError(
-                        "State group(s) exist in SQL but have no TiKV HAMT root: "
-                        f"{existing_in_sql}"
+                    sql_results = await self.db_pool.runInteraction(
+                        "_get_state_groups_from_groups.fallback_sql",
+                        self._get_state_groups_from_groups_txn,
+                        list(existing_in_sql),
+                        state_filter,
+                        use_tikv=False,
                     )
+                    tikv_results.update(sql_results)
 
             return tikv_results
 
@@ -722,29 +726,20 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             )
         )
 
-        use_tikv = bool(self.tikv_pd_endpoints)
-        if not use_tikv:
-            # In SQL mode, persist the full node tree into `state_hamt_nodes`.
-            # In TiKV mode the nodes (root included) go to TiKV, keyed by
-            # content hash.
-            self._store_state_hamt_nodes_txn(txn, nodes)
-        # The root pointer (state_group -> room_prefix + root_hash) lives in
-        # per-instance SQL. `state_group` is a per-database sequence that
-        # restarts at 1 for every Synapse instance, so it is NOT globally
-        # unique -- keeping this mapping in shared TiKV would let two instances
-        # overwrite each other's `hamt:root:<state_group>` pointer whenever they
-        # share one cluster. SQL is per-instance, so it is isolated.
-        if not use_tikv:
-            self.db_pool.simple_insert_txn(
-                txn,
-                table="state_hamt_roots",
-                values={
-                    "state_group": state_group,
-                    "room_prefix": bytearray(room_prefix),
-                    "root_structural_hash": bytearray(root_structural_hash),
-                    "root_lattice": bytearray(root_lattice),
-                },
-            )
+        # Keep an SQL mirror even when TiKV is enabled. TiKV publication is
+        # deliberately post-commit; the mirror is the read fallback during
+        # that window and if a transient TiKV failure needs a later retry.
+        self._store_state_hamt_nodes_txn(txn, nodes)
+        self.db_pool.simple_insert_txn(
+            txn,
+            table="state_hamt_roots",
+            values={
+                "state_group": state_group,
+                "room_prefix": bytearray(room_prefix),
+                "root_structural_hash": bytearray(root_structural_hash),
+                "root_lattice": bytearray(root_lattice),
+            },
+        )
 
         logger.debug(
             "[gg-state-timing] _persist_state_hamt_txn mode=rebuild "
@@ -906,21 +901,17 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
 
         new_root_hash, _new_state_group_id, new_lattice, new_nodes = applied
 
-        if not use_tikv:
-            # In TiKV mode, nodes are published before the surrounding SQL
-            # transaction commits, after all groups in the batch are built.
-            self._store_state_hamt_nodes_txn(txn, new_nodes)
-        if not use_tikv:
-            self.db_pool.simple_insert_txn(
-                txn,
-                table="state_hamt_roots",
-                values={
-                    "state_group": state_group,
-                    "room_prefix": bytearray(room_prefix),
-                    "root_structural_hash": bytearray(new_root_hash),
-                    "root_lattice": bytearray(new_lattice),
-                },
-            )
+        self._store_state_hamt_nodes_txn(txn, new_nodes)
+        self.db_pool.simple_insert_txn(
+            txn,
+            table="state_hamt_roots",
+            values={
+                "state_group": state_group,
+                "room_prefix": bytearray(room_prefix),
+                "root_structural_hash": bytearray(new_root_hash),
+                "root_lattice": bytearray(new_lattice),
+            },
+        )
         logger.debug(
             "[gg-state-timing] _persist_state_hamt_incremental_txn "
             "group=%d prev=%d updates=%d nodes=%d elapsed_ms=%.1f",

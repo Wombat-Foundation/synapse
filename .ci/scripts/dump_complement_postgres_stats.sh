@@ -17,6 +17,10 @@ if ! "${psql[@]}" -c "SELECT 1;" >/dev/null 2>&1; then
     exit 0
 fi
 
+run_query() {
+    "${psql[@]}" -c "$1" || true
+}
+
 {
     echo "Complement PostgreSQL diagnostics"
     echo "test: $test_name"
@@ -24,25 +28,25 @@ fi
     echo "timestamp: $(date --iso-8601=seconds)"
     echo
     echo "== database size =="
-    "${psql[@]}" -c "SELECT pg_size_pretty(pg_database_size(current_database())) AS size;"
+    run_query "SELECT pg_size_pretty(pg_database_size(current_database())) AS size;"
 
     echo
     echo "== database activity =="
-    "${psql[@]}" -c "SELECT xact_commit, xact_rollback, blks_read, blks_hit, tup_returned, tup_fetched, tup_inserted, tup_updated, tup_deleted, temp_files, temp_bytes, deadlocks FROM pg_catalog.pg_stat_database WHERE datname = current_database();"
+    run_query "SELECT xact_commit, xact_rollback, blks_read, blks_hit, tup_returned, tup_fetched, tup_inserted, tup_updated, tup_deleted, temp_files, temp_bytes, deadlocks FROM pg_catalog.pg_stat_database WHERE datname = current_database();"
 
     echo
     echo "== largest tables =="
-    "${psql[@]}" -c "SELECT schemaname || '.' || relname AS table_name, pg_size_pretty(pg_total_relation_size(relid)) AS total_size, pg_size_pretty(pg_relation_size(relid)) AS table_size, pg_size_pretty(pg_indexes_size(relid)) AS index_size FROM pg_catalog.pg_stat_user_tables ORDER BY pg_total_relation_size(relid) DESC LIMIT 10;"
+    run_query "SELECT schemaname || '.' || relname AS table_name, pg_size_pretty(pg_total_relation_size(relid)) AS total_size, pg_size_pretty(pg_relation_size(relid)) AS table_size, pg_size_pretty(pg_indexes_size(relid)) AS index_size FROM pg_catalog.pg_stat_user_tables ORDER BY pg_total_relation_size(relid) DESC LIMIT 10;"
 
     echo
     echo "== most row reads =="
-    "${psql[@]}" -c "SELECT schemaname || '.' || relname AS table_name, (seq_tup_read + idx_tup_fetch) AS total_rows_read, seq_scan, seq_tup_read, idx_scan, idx_tup_fetch FROM pg_catalog.pg_stat_user_tables ORDER BY (seq_tup_read + idx_tup_fetch) DESC LIMIT 10;"
+    run_query "SELECT schemaname || '.' || relname AS table_name, (seq_tup_read + idx_tup_fetch) AS total_rows_read, seq_scan, seq_tup_read, idx_scan, idx_tup_fetch FROM pg_catalog.pg_stat_user_tables ORDER BY (seq_tup_read + idx_tup_fetch) DESC LIMIT 10;"
 
     echo
     echo "== most read cache misses =="
-    "${psql[@]}" -c "SELECT schemaname || '.' || relname AS table_name, (heap_blks_read + idx_blks_read) AS total_disk_blocks_read FROM pg_catalog.pg_statio_user_tables ORDER BY (heap_blks_read + idx_blks_read) DESC LIMIT 10;"
+    run_query "SELECT schemaname || '.' || relname AS table_name, (heap_blks_read + idx_blks_read) AS total_disk_blocks_read FROM pg_catalog.pg_statio_user_tables ORDER BY (heap_blks_read + idx_blks_read) DESC LIMIT 10;"
 
     echo
     echo "== most INSERT/UPDATE/DELETE ops =="
-    "${psql[@]}" -c "SELECT schemaname || '.' || relname AS table_name, (n_tup_ins + n_tup_upd + n_tup_del) AS total_writes, n_tup_ins AS inserts, n_tup_upd AS updates, n_tup_del AS deletes FROM pg_catalog.pg_stat_user_tables ORDER BY (n_tup_ins + n_tup_upd + n_tup_del) DESC LIMIT 10;"
+    run_query "SELECT schemaname || '.' || relname AS table_name, (n_tup_ins + n_tup_upd + n_tup_del) AS total_writes, n_tup_ins AS inserts, n_tup_upd AS updates, n_tup_del AS deletes FROM pg_catalog.pg_stat_user_tables ORDER BY (n_tup_ins + n_tup_upd + n_tup_del) DESC LIMIT 10;"
 } >"$stats_file" 2>&1

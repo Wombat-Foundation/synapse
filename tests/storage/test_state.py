@@ -959,8 +959,8 @@ class StateStoreTestCase(HomeserverTestCase):
         finally:
             self.state_datastore.tikv_pd_endpoints = []
 
-    def test_tikv_write_failure_aborts_sql_visibility(self) -> None:
-        """A node-write failure aborts SQL visibility of the state group."""
+    def test_tikv_write_failure_keeps_sql_fallback(self) -> None:
+        """A node-write failure leaves the committed SQL HAMT mirror usable."""
         from unittest.mock import patch
 
         self._enable_mock_tikv()
@@ -983,8 +983,9 @@ class StateStoreTestCase(HomeserverTestCase):
                     RuntimeError,
                 )
 
-            # The SQL transaction must have rolled back: no state_groups
-            # row for this event should exist.
+            # TiKV publication runs after the SQL transaction, so the state
+            # group remains available through the SQL fallback until TiKV can
+            # be reached again.
             row = self.get_success(
                 self.store.db_pool.simple_select_one_onecol(
                     table="state_groups",
@@ -993,12 +994,22 @@ class StateStoreTestCase(HomeserverTestCase):
                     allow_none=True,
                 )
             )
-            self.assertIsNone(row)
+            self.assertIsNotNone(row)
+            state_group = cast(int, row)
+            with patch("synapse.synapse_rust.tikv_engine.get", return_value=None):
+                state = self.get_success(
+                    self.state_datastore._get_state_groups_from_groups(
+                        [state_group], StateFilter.all()
+                    )
+                )
+            self.assertEqual(
+                state[state_group], {(EventTypes.Create, ""): "$fake:event"}
+            )
         finally:
             self.state_datastore.tikv_pd_endpoints = []
 
-    def test_tikv_root_write_failure_aborts_sql_visibility(self) -> None:
-        """A root-write failure rolls back SQL after nodes were published."""
+    def test_tikv_root_write_failure_keeps_sql_fallback(self) -> None:
+        """A root-write failure leaves the committed SQL HAMT mirror usable."""
         from unittest.mock import patch
 
         self._enable_mock_tikv()
@@ -1039,7 +1050,7 @@ class StateStoreTestCase(HomeserverTestCase):
                     allow_none=True,
                 )
             )
-            self.assertIsNone(row)
+            self.assertIsNotNone(row)
         finally:
             self.state_datastore.tikv_pd_endpoints = []
 
