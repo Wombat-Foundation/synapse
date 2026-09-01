@@ -112,12 +112,12 @@ def _decode_state_hamt_root(
     )[0]
     room_id_start = room_id_len_offset + 2
     root_start = room_id_start + room_id_len
-    if len(value) < root_start + 16:
+    if len(value) < root_start + 32:
         raise RuntimeError("truncated HAMT root record")
     room_prefix = value[3:room_id_len_offset]
     room_id = value[room_id_start:root_start].decode("utf-8")
-    root_hash = value[root_start : root_start + 16]
-    lattice = value[root_start + 16 :]
+    root_hash = value[root_start : root_start + 32]
+    lattice = value[root_start + 32 :]
     return room_prefix, root_hash, lattice, room_id
 
 
