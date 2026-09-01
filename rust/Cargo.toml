@@ -70,7 +70,7 @@ once_cell = "1.18.0"
 lru = "0.12"
 itertools = "0.14.0"
 tikv-client = { version = "0.4.0", default-features = false }
-rezzy = { git = "https://github.com/gamesguru/rezzy.git", rev = "aba6b5c431e2846db7236dfc714a7d5ac0fec9d6" }
+rezzy = { git = "https://github.com/gamesguru/rezzy.git", rev = "82c9078f69297fe81cecf12516af71236e398712" }
 
 [build-dependencies]
 blake2 = "0.10.4"
