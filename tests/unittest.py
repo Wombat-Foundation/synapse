@@ -483,7 +483,14 @@ class HomeserverTestCase(TestCase):
         if hasattr(self, "hs") and self.hs is not None:
             namespace = self.hs.config.database.tikv_namespace
             if namespace:
-                cleanup_tikv_namespace(namespace)
+                try:
+                    cleanup_tikv_namespace(namespace)
+                except Exception:
+                    # This is best-effort cleanup of test-only data. Do not let a
+                    # TiKV outage mask the result of the test which just ran.
+                    logger.warning(
+                        "Failed to clean up TiKV namespace %s", namespace, exc_info=True
+                    )
 
         # Reset to not use frozen dicts.
         events.USE_FROZEN_DICTS = False

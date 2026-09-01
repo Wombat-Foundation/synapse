@@ -1217,36 +1217,30 @@ class Porter:
         copied from SQLite into PostgreSQL's ``background_updates`` table, so
         Synapse would never re-run it.
 
-        Detect this condition (state_groups present but state_hamt_roots empty)
+        Detect missing roots (including a partially completed source backfill)
         and reset the background update so Synapse executes it on startup.
         """
-        has_groups = (
-            await self.postgres_store.db_pool.simple_select_one_onecol(
-                table="state_groups",
-                keyvalues={},
-                retcol="1",
-                allow_none=True,
+
+        def has_missing_root_txn(txn: LoggingTransaction) -> bool:
+            txn.execute(
+                """
+                SELECT 1
+                FROM state_groups AS sg
+                LEFT JOIN state_hamt_roots AS hr ON hr.state_group = sg.id
+                WHERE hr.state_group IS NULL
+                LIMIT 1
+                """
             )
-            is not None
-        )
-        if not has_groups:
+            return txn.fetchone() is not None
+
+        if not await self.postgres_store.db_pool.runInteraction(
+            "find_missing_state_hamt_roots", has_missing_root_txn
+        ):
             return
 
-        has_roots = (
-            await self.postgres_store.db_pool.simple_select_one_onecol(
-                table="state_hamt_roots",
-                keyvalues={},
-                retcol="1",
-                allow_none=True,
-            )
-            is not None
-        )
-        if has_roots:
-            return
-
-        # state_groups present but state_hamt_roots empty -- the source was
-        # TiKV-backed.  Delete the completed entry copied from SQLite and
-        # re-insert it as pending so Synapse runs the backfill on startup.
+        # Some source roots are absent (for example, because the source was
+        # TiKV-backed). Delete the completed entry copied from SQLite and
+        # re-insert it as pending so Synapse backfills every missing root.
         await self.postgres_store.db_pool.simple_delete(
             table="background_updates",
             keyvalues={"update_name": "state_hamt_backfill_roots"},

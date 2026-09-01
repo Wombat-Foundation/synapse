@@ -11,8 +11,8 @@ It's only after enough repeated Ctrl+Cs that the interrupt finally escapes
 uncaught, printing a raw Python traceback and skipping the summary
 (`IReporter.done()`) entirely.
 
-This wrapper installs its own SIGINT handler and iterates the individual
-tests itself: the first Ctrl+C lets whatever test is currently running
+This wrapper installs its own SIGINT handler and runs the decorated suite: the
+first Ctrl+C lets whatever test is currently running
 finish, then stops before starting the next one and prints the summary for
 everything that ran. A second Ctrl+C (while nothing is catching it) falls
 back to the normal hard-interrupt behaviour.
@@ -26,14 +26,10 @@ import sys
 from twisted.python import usage
 from twisted.scripts.trial import Options, _getSuite, _initialDebugSetup, _makeRunner
 from twisted.trial import itrial, unittest
-from twisted.trial._asyncrunner import _iterateTests
 from twisted.trial.runner import TrialRunner, _logFile, _testDirectory
 
 
 def run() -> None:
-    if len(sys.argv) == 1:
-        sys.argv.append("--help")
-
     config = Options()
     try:
         config.parseOptions()
@@ -41,8 +37,9 @@ def run() -> None:
         raise SystemExit(f"{sys.argv[0]}: {ue}")
 
     _initialDebugSetup(config)
-    # `_makeRunner` always returns a `TrialRunner` here since we don't pass
-    # `--jobs` (which would make it a `DistTrialRunner`, unsupported below).
+    if config["jobs"] is not None:
+        raise SystemExit(f"{sys.argv[0]}: --jobs is not supported by this wrapper")
+
     trialRunner = _makeRunner(config)
     assert isinstance(trialRunner, TrialRunner)
     suite = _getSuite(config)
@@ -59,6 +56,7 @@ def run() -> None:
             signal.signal(signal.SIGINT, signal.default_int_handler)
             raise KeyboardInterrupt()
         interrupted = True
+        result.shouldStop = True
         sys.stderr.write(
             "\nInterrupted -- finishing the current test, then printing "
             "results so far (Ctrl+C again to abort immediately)...\n"
@@ -70,10 +68,10 @@ def run() -> None:
             _testDirectory(trialRunner.workingDirectory),
             _logFile(trialRunner.logfile),
         ):
-            for single in _iterateTests(test):
-                if interrupted:
-                    break
-                single.run(result)
+            # Running the decorated suite preserves Trial's class/module fixtures
+            # and reactor cleanup. `result.shouldStop` makes the suite stop after
+            # the current test when Ctrl+C is received, and also honours --exitfirst.
+            test.run(result)
     except KeyboardInterrupt:
         interrupted = True
     finally:

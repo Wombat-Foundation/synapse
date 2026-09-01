@@ -131,7 +131,7 @@ class KeyStore(CacheInvalidationWorkerStore):
                     """,
                     (server_name, key_id),
                 )
-                row = cast(tuple[bytes | memoryview, int, str], txn.fetchone())
+                row = cast(tuple[bytes | memoryview, int | None, str], txn.fetchone())
                 assert row is not None
                 stored_key_raw, stored_ts, stored_from_server = row
                 stored_key_bytes = bytes(stored_key_raw)
@@ -196,7 +196,7 @@ class KeyStore(CacheInvalidationWorkerStore):
                     )
                     final_keys[key_id] = FetchKeyResult(
                         verify_key=decode_verify_key_bytes(key_id, stored_key_bytes),
-                        valid_until_ts=stored_ts,
+                        valid_until_ts=stored_ts if stored_ts is not None else 0,
                     )
                     keys_to_persist.pop(key_id, None)
 

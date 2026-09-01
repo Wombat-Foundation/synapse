@@ -21,6 +21,20 @@ DELETE FROM background_updates WHERE update_name = 'delayed_events_idx';
 -- without ever maintaining two identical unique indexes.
 DO $$
 BEGIN
+    -- A cancelled CREATE INDEX CONCURRENTLY leaves an invalid index behind.
+    -- It is visible in pg_indexes but cannot be promoted with USING INDEX.
+    IF EXISTS (
+        SELECT 1
+        FROM pg_index AS i
+        JOIN pg_class AS c ON c.oid = i.indexrelid
+        JOIN pg_namespace AS n ON n.oid = c.relnamespace
+        WHERE n.nspname = current_schema()
+          AND c.relname = 'delayed_events_idx'
+          AND NOT i.indisvalid
+    ) THEN
+        DROP INDEX delayed_events_idx;
+    END IF;
+
     IF EXISTS (
         SELECT 1 FROM pg_indexes
         WHERE schemaname = current_schema() AND indexname = 'delayed_events_idx'

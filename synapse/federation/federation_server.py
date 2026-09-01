@@ -1469,6 +1469,15 @@ class FederationServer(FederationBase):
                                 staged_origin, staged_event.event_id
                             )
                     staged_events = nonspam_events
+                    if staged_events:
+                        origin, event = staged_events[0]
+                    else:
+                        next = await self._get_next_nonspam_staged_event_for_room(
+                            room_id, room_version
+                        )
+                        if not next:
+                            return
+                        origin, event = next
 
                 if (
                     len(staged_events) > 1

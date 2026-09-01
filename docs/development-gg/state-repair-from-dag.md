@@ -158,7 +158,7 @@ Useful safety flags:
 
 ## First Implementation Milestone
 
-Build a read-only `synapse_state_repair --dry-run` that:
+Build the read-only `synapse_state_repair check-room` command that:
 
 - loads target rooms;
 - refuses partial-state rooms;

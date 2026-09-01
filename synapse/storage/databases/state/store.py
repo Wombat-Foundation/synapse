@@ -1698,7 +1698,20 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             self._purge_room_state_txn,
             room_id,
         )
-        if self.tikv_pd_endpoints and deleted_state_groups:
+        if self.tikv_pd_endpoints:
+            # The transaction recorded these IDs before removing their SQL state
+            # groups. Include previously failed deletions so a later purge retries
+            # them too.
+            queued_state_groups = await self.db_pool.simple_select_list(
+                table="state_hamt_root_deletion_queue",
+                keyvalues={},
+                retcols=("state_group",),
+                desc="get_tikv_state_hamt_root_deletion_queue",
+            )
+            state_groups_to_clean = {int(row[0]) for row in queued_state_groups}
+            state_groups_to_clean.update(deleted_state_groups)
+            if not state_groups_to_clean:
+                return
             from synapse.synapse_rust import tikv_engine
 
             try:
@@ -1707,25 +1720,25 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     tikv_engine.batch_delete,
                     [
                         _state_hamt_root_tikv_key(self.tikv_namespace, sg)
-                        for sg in deleted_state_groups
+                        for sg in state_groups_to_clean
                     ],
                 )
+                await self.db_pool.simple_delete_many(
+                    table="state_hamt_root_deletion_queue",
+                    column="state_group",
+                    iterable=state_groups_to_clean,
+                    keyvalues={},
+                    desc="remove_tikv_state_hamt_root_deletion_queue",
+                )
             except Exception:
-                # If TiKV cleanup fails after the SQL purge has committed,
-                # the deleted state group IDs are gone from SQL and cannot
-                # be recovered for a retry.  Log the failure at warning
-                # level with the full key list so an operator can
-                # manually retry or the deletion can be picked up by a
-                # future GC sweep.  The orphaned TiKV objects are
-                # harmless (they occupy space but are never reachable via
-                # live state).
+                # The IDs remain durably queued, so a later room purge can retry
+                # deleting roots which otherwise remain directly readable in TiKV.
                 logger.warning(
-                    "[purge] Failed to clean up TiKV HAMT roots for room %s "
-                    "(%d state groups). Orphaned TiKV objects are safe to "
-                    "retain; manual cleanup or a future GC sweep may "
-                    "reclaim them. Error: %s",
+                    "[purge] Failed to clean up queued TiKV HAMT roots for room %s "
+                    "(%d state groups); they will be retried on a later purge. "
+                    "Error: %s",
                     room_id,
-                    len(deleted_state_groups),
+                    len(state_groups_to_clean),
                     traceback.format_exc(),
                 )
 
@@ -1753,6 +1766,18 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
 
         if not deleted_state_groups:
             return []
+
+        if self.tikv_pd_endpoints:
+            # Persist a retry record in the same transaction as the SQL purge.
+            # If TiKV is unavailable after commit, its root keys can still be
+            # removed on a later retry instead of being lost with these IDs.
+            txn.execute_batch(
+                """
+                INSERT INTO state_hamt_root_deletion_queue (state_group)
+                VALUES (?) ON CONFLICT (state_group) DO NOTHING
+                """,
+                [(state_group,) for state_group in deleted_state_groups],
+            )
 
         # 2. Delete all dependent child rows using strictly the returned IDs.
         logger.info("[purge] removing %s from state_group_edges", room_id)

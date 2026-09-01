@@ -626,35 +626,20 @@ class PaginationHandler:
             # for.
             #
             # A page of one event is not enough to establish that the timeline is
-            # continuous via depth comparison (there is no second event whose depth
-            # we can compare). In particular, after a partial-state join, returning
-            # such a page and backfilling asynchronously can give the client a token
-            # on the far side of a gap. Events fetched by the background backfill
-            # then fall after the token and are permanently skipped by that
+            # continuous: direct predecessors alone do not cover concurrent branches
+            # or other missing events in the topological range. Returning its token
+            # before foreground backfill could make those events unreachable to this
             # pagination run.
-            #
-            # However, we can still check whether the single event's prev_events
-            # are all present in the timeline. If they are, the timeline is
-            # continuous up to that event and it is safe to backfill in the
-            # background. Only if any prev_event is missing (indicating a real
-            # discontinuity) do we need to block on foreground backfill.
             missing_too_many_events = (
                 number_of_gaps > BACKFILL_BECAUSE_TOO_MANY_GAPS_THRESHOLD
             )
             not_enough_events_to_fill_response = len(events) < pagin_config.limit
 
-            single_event_has_missing_prevs = False
-            if pagin_config.limit == 1 and len(events) == 1:
-                prev_ids = set(events[0].prev_event_ids())
-                if prev_ids:
-                    seen = await self.store.have_events_in_timeline(prev_ids)
-                    single_event_has_missing_prevs = bool(prev_ids - seen)
-
             if (
                 found_big_gap
                 or missing_too_many_events
                 or not_enough_events_to_fill_response
-                or single_event_has_missing_prevs
+                or pagin_config.limit == 1
             ):
                 did_backfill = await self.hs.get_federation_handler().maybe_backfill(
                     room_id,

@@ -411,13 +411,6 @@ class FederationEventHandler:
         ):
             return False
 
-        # Encrypted events require per-event device-cache validation to detect
-        # unknown or mismatched device keys and trigger resync.  The batch path
-        # skips that, so exclude encrypted events to avoid silently dropping
-        # device-cache invalidation.
-        if any(event.type == EventTypes.Encrypted for _, event in pdus):
-            return False
-
         if room_id in self.room_queues:
             return False
 
@@ -502,6 +495,9 @@ class FederationEventHandler:
                 for event, _ in event_and_contexts:
                     await self._store.remove_push_actions_from_staging(event.event_id)
                 raise
+
+            for event, _ in event_and_contexts:
+                await self._handle_encrypted_event(event)
 
             return True
 
@@ -1658,6 +1654,10 @@ class FederationEventHandler:
 
         await self._maybe_kick_guest_users(event)
 
+        await self._handle_encrypted_event(event)
+
+    async def _handle_encrypted_event(self, event: EventBase) -> None:
+        """Validate the sending device of a newly-persisted encrypted event."""
         # For encrypted messages we check that we know about the sending device,
         # if we don't then we mark the device cache for that user as stale.
         if event.type == EventTypes.Encrypted:

@@ -172,6 +172,7 @@ class KeyFetchBackoffCache:
         self._ceiling_ms = ceiling_ms
         # server_name -> (retry_at_ms, current_interval_ms)
         self._backoff: dict[str, tuple[int, int]] = {}
+        self._next_prune_ms = 0
 
     def should_attempt(self, server_name: str) -> bool:
         """Whether we should make an outbound fetch attempt for this server
@@ -215,6 +216,14 @@ class KeyFetchBackoffCache:
         given up retrying long ago.
         """
         now = self._clock.time_msec()
+        if now < self._next_prune_ms:
+            return
+
+        # Sweeping is deliberately infrequent: this sits on the failed-fetch hot
+        # path, where rebuilding the whole cache on every failure is needlessly
+        # expensive. Entries may remain for at most one extra maximum-backoff
+        # interval, which does not affect correctness.
+        self._next_prune_ms = now + self._ceiling_ms
         max_backoff_ms = self._ceiling_ms
         stale_threshold_ms = now - max_backoff_ms * 2
         self._backoff = {

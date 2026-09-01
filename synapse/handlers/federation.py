@@ -1975,13 +1975,18 @@ class FederationHandler:
                         self._partial_state_sync_failure_counts.get(room_id, 0) + 1
                     )
                     self._partial_state_sync_failure_counts[room_id] = failure_count
-                    if failure_count > _PARTIAL_STATE_SYNC_MAX_CONSECUTIVE_FAILURES:
+                    if failure_count >= _PARTIAL_STATE_SYNC_MAX_CONSECUTIVE_FAILURES:
                         logger.warning(
                             "Giving up on resynchronising partial-state room %s "
                             "after %d consecutive failures",
                             room_id,
                             failure_count,
                         )
+                        # A later join may give us usable remote destinations again.
+                        # Give that fresh attempt a full retry budget.
+                        self._partial_state_sync_failure_counts.pop(room_id, None)
+                        if restart_params is not None:
+                            retry_delay = _PARTIAL_STATE_SYNC_INITIAL_BACKOFF
                     else:
                         retry_delay = min(
                             _PARTIAL_STATE_SYNC_INITIAL_BACKOFF
