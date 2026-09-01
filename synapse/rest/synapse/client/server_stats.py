@@ -40,12 +40,21 @@ class ServerStatsResource(DirectServeJsonResource):
         requester = await self._auth.get_user_by_req(request)
         if not await self._auth.is_server_admin(requester):
             raise AuthError(403, "Server admin access required")
-        total_users = await self.store.count_all_users()
-        public_rooms = await self.store.count_public_rooms(
-            network_tuple=None,
-            ignore_non_federatable=False,
-            search_filter=None,
-        )
+        try:
+            total_users = await self.store.count_all_users()
+        except Exception:
+            logger.exception("Failed to count users for server statistics")
+            total_users = None
+
+        try:
+            public_rooms = await self.store.count_public_rooms(
+                network_tuple=None,
+                ignore_non_federatable=False,
+                search_filter=None,
+            )
+        except Exception:
+            logger.exception("Failed to count public rooms for server statistics")
+            public_rooms = None
         try:
             total_rooms = await self.store.get_room_count()
         except Exception:

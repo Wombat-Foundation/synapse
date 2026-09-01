@@ -560,10 +560,11 @@ async fn materialize_state_hamt_async(
         }
 
         for chunk in still_missing.chunks(NODE_FETCH_BATCH_SIZE) {
-            let keys: Vec<Vec<u8>> = chunk
+            let key_to_hash: HashMap<Vec<u8>, StructuralHash> = chunk
                 .iter()
-                .map(|hash| node_tikv_key(namespace, room_prefix, hash))
+                .map(|hash| (node_tikv_key(namespace, room_prefix, hash), *hash))
                 .collect();
+            let keys: Vec<Vec<u8>> = key_to_hash.keys().cloned().collect();
             let rows = client.batch_get(keys).await.map_err(|e| e.to_string())?;
 
             if rows.len() != chunk.len() {
@@ -577,11 +578,14 @@ async fn materialize_state_hamt_async(
             for pair in rows {
                 let (key, node_bytes): (tikv_client::Key, tikv_client::Value) = pair.into();
                 let key: Vec<u8> = key.into();
-                // We fetched by exact key per hash, so re-derive which hash this
-                // row belongs to by decoding the node itself rather than trusting
-                // key-order (TiKV batch_get does not guarantee response order).
+                let expected_hash = key_to_hash
+                    .get(&key)
+                    .copied()
+                    .ok_or_else(|| "TiKV returned an unexpected HAMT node key".to_owned())?;
                 let node = decode_persisted_node(&node_bytes)?;
-                let hash = node.structural_hash;
+                if node.structural_hash != expected_hash {
+                    return Err("HAMT node hash does not match its TiKV key".to_owned());
+                }
 
                 for child in &node.children {
                     let child_hash = child.structural_hash();
@@ -591,7 +595,7 @@ async fn materialize_state_hamt_async(
                 }
 
                 node_cache().lock().unwrap().put(key, node.clone());
-                node_map.insert(hash, node);
+                node_map.insert(expected_hash, node);
             }
         }
     }

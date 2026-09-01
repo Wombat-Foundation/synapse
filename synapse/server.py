@@ -508,6 +508,8 @@ class HomeServer(metaclass=abc.ABCMeta):
             except Exception:
                 pass
 
+        shutdown_handler_deferreds: list[defer.Deferred[Any | None]] = []
+
         for shutdown_handler in self._async_shutdown_handlers:
             try:
                 self.get_reactor().removeSystemEventTrigger(shutdown_handler.trigger_id)
@@ -519,7 +521,10 @@ class HomeServer(metaclass=abc.ABCMeta):
                 logger.exception("Error removing shutdown async handler")
 
             try:
-                defer.ensureDeferred(shutdown_handler.func(**shutdown_handler.kwargs))
+                d = defer.ensureDeferred(
+                    shutdown_handler.func(**shutdown_handler.kwargs)
+                )
+                shutdown_handler_deferreds.append(d)
             except Exception:
                 logger.exception("Error starting shutdown async handler")
         self._async_shutdown_handlers.clear()
@@ -539,9 +544,13 @@ class HomeServer(metaclass=abc.ABCMeta):
                 logger.exception("Error calling shutdown sync handler")
         self._sync_shutdown_handlers.clear()
 
-        # Registered shutdown handlers commonly use @wrap_as_background_process.
-        # Keep the homeserver able to start those teardown processes until they
-        # have been invoked, then prevent any new normal background work.
+        # Registered shutdown handlers commonly use @wrap_as_background_process,
+        # which adds their Deferreds to _background_processes. Exclude those
+        # shutdown-handler Deferreds from the normal cancellation loop so their
+        # teardown work can complete, then prevent any new normal background work.
+        for d in shutdown_handler_deferreds:
+            self._background_processes.discard(d)
+
         self._is_shutdown = True
 
         self.get_clock().shutdown()

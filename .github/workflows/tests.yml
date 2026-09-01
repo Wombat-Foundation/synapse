@@ -508,7 +508,7 @@ jobs:
           SYNAPSE_TEST_TIKV_PD_ENDPOINTS: ${{ matrix.job.database == 'tikv' && '172.17.0.1:2379' || '' }}
       - name: Dump PostgreSQL statistics
         if: ${{ always() && matrix.job.database == 'postgres' }}
-        run: .ci/scripts/dump_postgres_stats.sh /tmp/postgres-stats.txt
+        run: .ci/scripts/dump_postgres_stats.sh /tmp/postgres-stats.txt || true
         env:
           SYNAPSE_POSTGRES_HOST: /var/run/postgresql
           SYNAPSE_POSTGRES_USER: postgres

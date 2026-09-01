@@ -22,7 +22,3 @@ def resolve_v2_via_lattice_fold(
     conflicted_event_ids: Iterable[str],
     event_map: dict[str, Any],
 ) -> dict[tuple[str, str], str]: ...
-def resolve_v2_batch_via_lattice_fold(
-    requests: Iterable[tuple[dict[tuple[str, str], str], Iterable[str]]],
-    event_map: dict[str, Any],
-) -> list[dict[tuple[str, str], str]]: ...

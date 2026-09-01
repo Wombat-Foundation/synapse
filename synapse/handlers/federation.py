@@ -84,7 +84,16 @@ logger = logging.getLogger(__name__)
 # A partial-state room must eventually be resynchronised. In particular, a
 # transient database error late in the resync must not leave the room partial
 # forever, since several client endpoints wait for that flag to clear.
-_PARTIAL_STATE_SYNC_RETRY_DELAY = Duration(seconds=1)
+#
+# Retry scheduling uses exponential backoff: the delay doubles after each
+# consecutive failure, starting at _PARTIAL_STATE_SYNC_INITIAL_BACKOFF and
+# capped at _PARTIAL_STATE_SYNC_MAX_BACKOFF. After
+# _PARTIAL_STATE_SYNC_MAX_CONSECUTIVE_FAILURES consecutive failures we stop
+# retrying entirely, logging a warning and leaving the room partial until a
+# restart or a new join triggers another sync attempt.
+_PARTIAL_STATE_SYNC_INITIAL_BACKOFF = Duration(seconds=1)
+_PARTIAL_STATE_SYNC_MAX_BACKOFF = Duration(hours=1)
+_PARTIAL_STATE_SYNC_MAX_CONSECUTIVE_FAILURES = 10
 
 # Added to debug performance and track progress on optimizations
 backfill_processing_before_timer = Histogram(
@@ -181,6 +190,9 @@ class FederationHandler:
         self._partial_state_syncs_maybe_needing_restart: dict[
             str, tuple[str | None, AbstractSet[str]]
         ] = {}
+        # Tracks consecutive failure counts per room for exponential backoff on
+        # partial state sync retries. Reset to 0 on success.
+        self._partial_state_sync_failure_counts: dict[str, int] = {}
         # A lock guarding the partial state flag for rooms.
         # When the lock is held for a given room, no other concurrent code may
         # partial state or un-partial state the room.
@@ -1953,35 +1965,64 @@ class FederationHandler:
                     room_id, None
                 )
 
-                if restart_params is not None:
+                # Determine whether to schedule a retry and with what delay.
+                # On success, reset the failure counter. On failure, compute an
+                # exponential backoff delay and cap retries at
+                # _PARTIAL_STATE_SYNC_MAX_CONSECUTIVE_FAILURES.
+                retry_delay: Duration | None = None
+                if sync_failed and is_still_partial_state_room:
+                    failure_count = (
+                        self._partial_state_sync_failure_counts.get(room_id, 0) + 1
+                    )
+                    self._partial_state_sync_failure_counts[room_id] = failure_count
+                    if failure_count > _PARTIAL_STATE_SYNC_MAX_CONSECUTIVE_FAILURES:
+                        logger.warning(
+                            "Giving up on resynchronising partial-state room %s "
+                            "after %d consecutive failures",
+                            room_id,
+                            failure_count,
+                        )
+                    else:
+                        retry_delay = min(
+                            _PARTIAL_STATE_SYNC_INITIAL_BACKOFF
+                            * (2 ** (failure_count - 1)),
+                            _PARTIAL_STATE_SYNC_MAX_BACKOFF,
+                        )
+                else:
+                    self._partial_state_sync_failure_counts.pop(room_id, None)
+
+                if retry_delay is not None:
+                    if restart_params is not None:
+                        (
+                            restart_initial_destination,
+                            restart_other_destinations,
+                        ) = restart_params
+                        self.clock.call_later(
+                            retry_delay,
+                            self._start_partial_state_room_sync,
+                            restart_initial_destination,
+                            restart_other_destinations,
+                            room_id,
+                        )
+                    else:
+                        self.clock.call_later(
+                            retry_delay,
+                            self._start_partial_state_room_sync,
+                            initial_destination,
+                            other_destinations,
+                            room_id,
+                        )
+                elif restart_params is not None and not sync_failed:
                     (
                         restart_initial_destination,
                         restart_other_destinations,
                     ) = restart_params
-
                     if is_still_partial_state_room:
-                        if sync_failed:
-                            self.clock.call_later(
-                                _PARTIAL_STATE_SYNC_RETRY_DELAY,
-                                self._start_partial_state_room_sync,
-                                restart_initial_destination,
-                                restart_other_destinations,
-                                room_id,
-                            )
-                        else:
-                            self._start_partial_state_room_sync(
-                                initial_destination=restart_initial_destination,
-                                other_destinations=restart_other_destinations,
-                                room_id=room_id,
-                            )
-                elif sync_failed and is_still_partial_state_room:
-                    self.clock.call_later(
-                        _PARTIAL_STATE_SYNC_RETRY_DELAY,
-                        self._start_partial_state_room_sync,
-                        initial_destination,
-                        other_destinations,
-                        room_id,
-                    )
+                        self._start_partial_state_room_sync(
+                            initial_destination=restart_initial_destination,
+                            other_destinations=restart_other_destinations,
+                            room_id=room_id,
+                        )
 
         self.hs.run_as_background_process(
             desc="sync_partial_state_room",

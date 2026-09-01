@@ -26,7 +26,11 @@ import attr
 import canonicaljson
 import signedjson.key
 import signedjson.sign
-from signedjson.key import encode_verify_key_base64, get_verify_key
+from signedjson.key import (
+    decode_verify_key_bytes,
+    encode_verify_key_base64,
+    get_verify_key,
+)
 from signedjson.types import SigningKey, VerifyKey
 
 from twisted.internet import defer
@@ -652,16 +656,19 @@ class ServerKeyFetcherTestCase(unittest.HomeserverTestCase):
             keys2[KEY_ID].verify_key.encode(), original_verify_key.encode()
         )
 
-        # And the persisted record must likewise still be the original: a
-        # fresh notary-style read from the store returns the original body.
-        stored = self.get_success(
-            self.hs.get_datastores().main.get_existing_verify_keys(
-                SERVER_NAME, [KEY_ID]
+        # And the persisted record must likewise still be the original.
+        store = self.hs.get_datastores().main
+        stored_row = self.get_success(
+            store.db_pool.simple_select_one(
+                table="server_signature_keys",
+                keyvalues={"server_name": SERVER_NAME, "key_id": KEY_ID},
+                retcols=("verify_key",),
+                desc="get_stored_verify_key",
             )
         )
-        self.assertEqual(
-            stored[KEY_ID].verify_key.encode(), original_verify_key.encode()
-        )
+        assert stored_row is not None
+        stored_key = decode_verify_key_bytes(KEY_ID, bytes(stored_row[0]))
+        self.assertEqual(stored_key.encode(), original_verify_key.encode())
 
     def test_old_verify_key_readable_from_db_cache(self) -> None:
         """MSC4499 historical event verification: an expired key that is only

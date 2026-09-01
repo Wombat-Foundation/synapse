@@ -43,8 +43,8 @@ For other configurations, try:
   option implies the use of Postgres.
   - If setting `WORKERS=1`, optionally set `WORKER_TYPES=` to declare which worker types
     you wish to test. A simple comma-delimited string containing the worker types
-    defined from the `WORKERS_CONFIG` template in
-    [here](https://github.com/gamesguru/sithnapse/blob/develop/docker/configure_workers_and_start.py#L54).
+    defined from the [`WORKERS_CONFIG` template](https://github.com/element-hq/synapse/blob/develop/docker/configure_workers_and_start.py#L54)
+    in `configure_workers_and_start.py`.
     A safe example would be `WORKER_TYPES="federation_inbound, federation_sender,
     synchrotron"`. See the [worker documentation](../workers.md) for additional
     information on workers.

@@ -88,7 +88,12 @@ def _discover_room_txn(txn: LoggingTransaction, room_id: str) -> dict[str, Any]:
     forward_extremities = sorted(row[0] for row in txn.fetchall())
 
     txn.execute(
-        "SELECT COUNT(*) FROM event_edges WHERE room_id = ? AND is_state",
+        """
+        SELECT COUNT(*) FROM event_edges AS edge
+        JOIN events AS prev ON prev.event_id = edge.prev_event_id
+        JOIN state_events AS se ON se.event_id = edge.prev_event_id
+        WHERE prev.room_id = ?
+        """,
         (room_id,),
     )
     state_edge_count = _count_from_row(txn.fetchone())
@@ -309,7 +314,13 @@ def main() -> None:
             "--publish is not implemented; this command is currently read-only"
         )
 
-    command = cast(Command, args.command or "check-room")
+    if not args.command:
+        parser.print_help()
+        parser.error(
+            "a subcommand is required (check-room, list-rejected, list-outliers)"
+        )
+
+    command = cast(Command, args.command)
     room_ids = _load_room_ids(args.room, args.room_file)
     if not room_ids:
         parser.error("at least one --room or --room-file entry is required")
@@ -323,7 +334,10 @@ def main() -> None:
     hs = RepairHomeserver(config)
     hs.setup()
 
+    exit_code = 0
+
     async def run() -> None:
+        nonlocal exit_code
         try:
             report = await _run_command(hs, command, room_ids, limit, reverse)
             report_json = json.dumps(report, indent=2, sort_keys=True)
@@ -333,15 +347,16 @@ def main() -> None:
                     f.write("\n")
             else:
                 print(report_json)
+        except Exception:
+            logger.exception("State repair command failed")
+            exit_code = 1
         finally:
             reactor.stop()
 
-    hs.get_clock().call_when_running(
-        lambda: defer.ensureDeferred(
-            hs.run_as_background_process("synapse_state_repair", run)
-        )
-    )
+    hs.get_clock().call_when_running(lambda: defer.ensureDeferred(run()))
     reactor.run()
+    if exit_code:
+        raise SystemExit(exit_code)
 
 
 if __name__ == "__main__":

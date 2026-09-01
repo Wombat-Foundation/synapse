@@ -200,10 +200,28 @@ class KeyFetchBackoffCache:
             self._clock.time_msec() + interval_ms,
             interval_ms,
         )
+        self._prune()
 
     def record_success(self, server_name: str) -> None:
         """Clear any backoff state after a successful, authenticated fetch."""
         self._backoff.pop(server_name, None)
+
+    def _prune(self) -> None:
+        """Remove entries whose retry window has long elapsed.
+
+        Servers that have been permanently unreachable accumulate stale
+        entries.  Evict any entry whose ``retry_at_ms`` is more than
+        twice the maximum backoff interval in the past, i.e. we have
+        given up retrying long ago.
+        """
+        now = self._clock.time_msec()
+        max_backoff_ms = self._ceiling_ms
+        stale_threshold_ms = now - max_backoff_ms * 2
+        self._backoff = {
+            name: entry
+            for name, entry in self._backoff.items()
+            if entry[0] >= stale_threshold_ms
+        }
 
 
 @attr.s(slots=True, frozen=True, auto_attribs=True)

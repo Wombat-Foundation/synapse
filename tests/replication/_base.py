@@ -82,7 +82,12 @@ class BaseStreamTestCase(unittest.HomeserverTestCase):
             # This worker is wired to the main process's database pool below,
             # so it must use the same TiKV namespace for the shared state-group
             # IDs. Other test homeservers keep their unique namespace.
-            worker_config["tikv"]["namespace"] = self.hs.config.database.tikv_namespace
+            if self.hs.config.database.tikv_namespace is not None and isinstance(
+                worker_config.get("tikv"), dict
+            ):
+                worker_config["tikv"]["namespace"] = (
+                    self.hs.config.database.tikv_namespace
+                )
         self.worker_hs = self.setup_test_homeserver(
             homeserver_to_use=GenericWorkerServer,
             config=worker_config,

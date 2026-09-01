@@ -153,6 +153,10 @@ class KeyConfig(Config):
         self.key_fetch_backoff_ceiling_ms = self.parse_duration(
             config.get("key_fetch_backoff_ceiling", "1h")
         )
+        if self.key_fetch_backoff_floor_ms > self.key_fetch_backoff_ceiling_ms:
+            raise ConfigError(
+                "key_fetch_backoff_floor must be <= key_fetch_backoff_ceiling"
+            )
 
         suppress_key_server_warning = config.get("suppress_key_server_warning", False)
         key_server_signing_keys_path = config.get("key_server_signing_keys_path")

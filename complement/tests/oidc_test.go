@@ -46,7 +46,7 @@ oidc_providers:
 //
 // This is a regression test: Synapse previously would fail to start up
 // at all if the OIDC provider was down on startup.
-// https://github.com/gamesguru/sithnapse/issues/8088
+// https://github.com/element-hq/synapse/issues/8088
 //
 // Now instead of failing to start, Synapse will produce a 503 response on the
 // `/_matrix/client/v3/login/sso/redirect/oidc-test_provider` endpoint.
@@ -55,7 +55,7 @@ func TestOIDCProviderUnavailable(t *testing.T) {
 	//
 	// FIXME: Since we're modifying the homeserver config, this should be using a clean
 	// deploy that won't affect subsequent tests because Complement will re-use the
-	// deployment, see https://github.com/gamesguru/sithnapse/issues/19937
+	// deployment, see https://github.com/element-hq/synapse/issues/19937
 	deployment := complement.Deploy(t, 1)
 	defer deployment.Destroy(t)
 

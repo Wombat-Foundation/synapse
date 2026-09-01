@@ -465,6 +465,13 @@ fn apply_flat_state_updates_impl(
     for (hash_bytes, node_bytes) in nodes {
         let hash = structural_hash_from_slice(&hash_bytes)?;
         let node = decode_persisted_node(&node_bytes)?;
+        if node.structural_hash != hash {
+            return Err(format!(
+                "HAMT node structural hash does not match its key: \
+                 expected {hash:?}, got {:?}",
+                node.structural_hash
+            ));
+        }
         node_map.insert(hash, node);
     }
     // Everything supplied by the caller is, by definition, already durable —
@@ -591,6 +598,24 @@ fn apply_typed_state_updates_impl(
     let mut lattice = lattice_from_bytes(lattice_bytes)?;
 
     let typed_root = TypedRoot::decode_v1(typed_root_bytes)?;
+
+    let expected_hash = typed_root_hash(&room_key, &typed_root.directory);
+    if typed_root.structural_hash != expected_hash {
+        return Err(format!(
+            "Typed root structural hash is corrupt: stored {:?}, \
+             recomputed {expected_hash:?}",
+            typed_root.structural_hash
+        ));
+    }
+    let expected_sg_id = rezzy::hamt::state_group_id_from_lthash(&lattice);
+    if typed_root.state_group_id != expected_sg_id {
+        return Err(format!(
+            "Typed root state_group_id is corrupt: stored {:?}, \
+             recomputed from lattice {expected_sg_id:?}",
+            typed_root.state_group_id
+        ));
+    }
+
     let mut directory: std::collections::BTreeMap<String, StructuralHash> =
         typed_root.directory.into_iter().collect();
 
@@ -598,6 +623,13 @@ fn apply_typed_state_updates_impl(
     for (hash_bytes, node_bytes) in nodes {
         let hash = structural_hash_from_slice(&hash_bytes)?;
         let node = decode_persisted_node(&node_bytes)?;
+        if node.structural_hash != hash {
+            return Err(format!(
+                "HAMT node structural hash does not match its key: \
+                 expected {hash:?}, got {:?}",
+                node.structural_hash
+            ));
+        }
         node_map.insert(hash, node);
     }
     let known: HashSet<StructuralHash> = node_map.keys().copied().collect();

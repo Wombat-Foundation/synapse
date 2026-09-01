@@ -177,9 +177,8 @@ fn main() {
 
 type Zip3Item<'a, A, B, C> = (&'a (usize, A), &'a (usize, B), &'a (usize, C));
 
-/// Zips three slices of `(usize, T)` checkpoint pairs together. `itertools`
-/// isn't a dependency of this bench target; this is just `Iterator::zip`
-/// twice, named for readability at the call site.
+/// Zips three slices of `(usize, T)` checkpoint pairs together.  This is
+/// just `Iterator::zip` twice, named for readability at the call site.
 fn itertools_zip3<'a, A, B, C>(
     a: &'a [(usize, A)],
     b: &'a [(usize, B)],

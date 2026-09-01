@@ -162,7 +162,7 @@ main() {
     echo "COMPLEMENT_DIR not set. Fetching Complement checkout from ${COMPLEMENT_REF}..."
 
     # Download the Complement checkout at the specified ref.
-    wget -q https://github.com/gamesguru/complement/archive/${COMPLEMENT_REF}.tar.gz
+    wget -q -O ${COMPLEMENT_REF}.tar.gz https://github.com/gamesguru/complement/archive/${COMPLEMENT_REF}.tar.gz
 
     # Delete the existing complement checkout. Otherwise we'll end up with stale
     # test files after they're deleted server-side, and `tar` will not delete

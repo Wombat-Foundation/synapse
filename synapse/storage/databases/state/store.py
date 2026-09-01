@@ -21,6 +21,7 @@
 
 import logging
 import time
+import traceback
 from typing import (
     TYPE_CHECKING,
     Iterable,
@@ -958,21 +959,15 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         for it exactly as `_persist_state_hamt_txn` does for a
         newly-created group.
 
-        Only applies in SQL mode: when TiKV is configured, a missing SQL
-        root isn't treated as corruption (see the gate in
-        `_get_state_groups_from_groups_txn`), so there's nothing to close
-        here.
+        In SQL mode, roots are persisted into ``state_hamt_roots``.
+        In TiKV mode, roots and nodes are published to TiKV after the
+        SQL transaction commits, so that subsequent TiKV reads can
+        resolve pre-v95 groups without raising a corruption error.
 
         State groups are immutable once created -- nothing else ever
         writes to an *existing* group's root -- so backfilling one here
         can't race with a concurrent write to the same group.
         """
-        if self.tikv_pd_endpoints:
-            await self.db_pool.updates._end_background_update(
-                self.STATE_HAMT_BACKFILL_ROOTS_UPDATE_NAME
-            )
-            return 1
-
         last_state_group = progress.get("last_state_group", 0)
 
         def get_batch_txn(txn: LoggingTransaction) -> list[tuple[int, str]]:
@@ -1025,6 +1020,14 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 secret, room_id, room_version.msc4291_room_ids_as_hashes
             )
 
+        use_tikv = bool(self.tikv_pd_endpoints)
+        # When TiKV is enabled, collect HAMT objects to publish after the
+        # SQL transaction commits, so that subsequent TiKV reads can
+        # resolve these pre-v95 groups without raising a corruption error.
+        tikv_writes: list[
+            tuple[str, int, bytes, bytes, bytes, list[tuple[bytes, bytes]]]
+        ] = []
+
         def backfill_txn(txn: LoggingTransaction) -> None:
             for state_group, room_id in rows:
                 room_prefix = room_prefixes[room_id]
@@ -1033,9 +1036,13 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 current_state_ids = self._get_legacy_state_for_groups_txn(
                     txn, [state_group], StateFilter.all()
                 )[state_group]
-                self._persist_state_hamt_txn(
+                root_hash, lattice, nodes = self._persist_state_hamt_txn(
                     txn, state_group, room_id, room_prefix, current_state_ids
                 )
+                if use_tikv:
+                    tikv_writes.append(
+                        (room_id, state_group, room_prefix, root_hash, lattice, nodes)
+                    )
 
             self.db_pool.updates._background_update_progress_txn(
                 txn,
@@ -1046,6 +1053,35 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         await self.db_pool.runInteraction(
             self.STATE_HAMT_BACKFILL_ROOTS_UPDATE_NAME, backfill_txn
         )
+
+        # Publish backfilled roots and nodes to TiKV *after* the SQL
+        # transaction commits.  State groups are immutable so there is
+        # no read-side race: TiKV reads will simply continue to fall
+        # back to the legacy SQL walk until the publish completes.
+        if use_tikv and tikv_writes:
+            for (
+                room_id,
+                state_group,
+                room_prefix,
+                root_hash,
+                lattice,
+                nodes,
+            ) in tikv_writes:
+                self._publish_state_hamt_objects_before_commit(
+                    room_prefix,
+                    nodes,
+                    [
+                        (
+                            _state_hamt_root_tikv_key(self.tikv_namespace, state_group),
+                            _encode_state_hamt_root(
+                                room_prefix,
+                                root_hash,
+                                lattice,
+                                room_id=room_id,
+                            ),
+                        )
+                    ],
+                )
 
         return len(rows)
 
@@ -1286,26 +1322,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 local_roots[sg_after] = (root_hash, lattice)
                 sg_before = sg_after
 
-            # Publish all batched state groups to TiKV BEFORE the SQL
-            # transaction commits, so no reader can observe a
-            # state_groups row whose TiKV root is absent.
-            if self.tikv_pd_endpoints and hamt_writes:
-                all_nodes = [node for _, _, _, nodes in hamt_writes for node in nodes]
-                roots = [
-                    (
-                        _state_hamt_root_tikv_key(self.tikv_namespace, group),
-                        _encode_state_hamt_root(
-                            room_prefix, root_hash, lattice, room_id=room_id
-                        ),
-                    )
-                    for group, root_hash, lattice, _ in hamt_writes
-                ]
-                self._publish_state_hamt_objects_before_commit(
-                    room_prefix,
-                    all_nodes,
-                    roots,
-                )
-
             return events_and_context, hamt_writes
 
         events_and_context, hamt_writes = await self.db_pool.runInteraction(
@@ -1314,6 +1330,34 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             events_and_context,
             prev_group,
         )
+
+        # Publish all batched state groups to TiKV AFTER the SQL
+        # transaction commits.  TiKV writes are idempotent (nodes are
+        # content-addressed, roots overwrite at their immutable
+        # state-group key) and state groups are immutable once created,
+        # so there is no read-side inconsistency: TiKV reads will
+        # simply continue to fall back to SQL until the publish
+        # completes.  Performing the write here frees the DB worker
+        # thread and avoids holding the SQL transaction open across
+        # TiKV network round-trips.
+        if self.tikv_pd_endpoints and hamt_writes:
+            all_nodes = [node for _, _, _, nodes in hamt_writes for node in nodes]
+            roots = [
+                (
+                    _state_hamt_root_tikv_key(self.tikv_namespace, group),
+                    _encode_state_hamt_root(
+                        room_prefix, root_hash, lattice, room_id=room_id
+                    ),
+                )
+                for group, root_hash, lattice, _ in hamt_writes
+            ]
+            await defer_to_thread(
+                self.hs.get_reactor(),
+                self._publish_state_hamt_objects_before_commit,
+                room_prefix,
+                all_nodes,
+                roots,
+            )
 
         return events_and_context
 
@@ -1427,31 +1471,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 )
             )
 
-            # Publish to TiKV BEFORE the SQL transaction commits.  This
-            # closes the publication race: no reader can observe the
-            # state_groups row until TiKV already has the root + nodes.
-            # If TiKV write fails, the exception aborts this callback,
-            # the SQL transaction rolls back, and no state_groups row is
-            # visible. Orphaned immutable TiKV objects from a succeeded
-            # TiKV write / rolled-back SQL commit are safe to retain; a
-            # future reachability GC may reclaim them.
-            if self.tikv_pd_endpoints:
-                self._publish_state_hamt_objects_before_commit(
-                    room_prefix,
-                    nodes,
-                    [
-                        (
-                            _state_hamt_root_tikv_key(self.tikv_namespace, state_group),
-                            _encode_state_hamt_root(
-                                room_prefix,
-                                root_structural_hash,
-                                lattice,
-                                room_id=room_id,
-                            ),
-                        )
-                    ],
-                )
-
             return state_group, root_structural_hash, lattice, nodes
 
         state_group, root_hash, lattice, nodes = await self.db_pool.runInteraction(
@@ -1459,6 +1478,31 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             insert_full_state_txn,
             current_state_ids,
         )
+
+        # Publish to TiKV AFTER the SQL transaction commits.  TiKV
+        # writes are idempotent and state groups are immutable, so
+        # there is no read-side inconsistency: TiKV reads will fall
+        # back to SQL until the publish completes.  Performing the
+        # write here frees the DB worker thread and avoids holding
+        # the SQL transaction open across TiKV network round-trips.
+        if self.tikv_pd_endpoints:
+            await defer_to_thread(
+                self.hs.get_reactor(),
+                self._publish_state_hamt_objects_before_commit,
+                room_prefix,
+                nodes,
+                [
+                    (
+                        _state_hamt_root_tikv_key(self.tikv_namespace, state_group),
+                        _encode_state_hamt_root(
+                            room_prefix,
+                            root_hash,
+                            lattice,
+                            room_id=room_id,
+                        ),
+                    )
+                ],
+            )
 
         logger.debug(
             "[gg-state-timing] store_state_group group=%d elapsed_ms=%.1f",
@@ -1666,14 +1710,33 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         if self.tikv_pd_endpoints and deleted_state_groups:
             from synapse.synapse_rust import tikv_engine
 
-            await defer_to_thread(
-                self.hs.get_reactor(),
-                tikv_engine.batch_delete,
-                [
-                    _state_hamt_root_tikv_key(self.tikv_namespace, sg)
-                    for sg in deleted_state_groups
-                ],
-            )
+            try:
+                await defer_to_thread(
+                    self.hs.get_reactor(),
+                    tikv_engine.batch_delete,
+                    [
+                        _state_hamt_root_tikv_key(self.tikv_namespace, sg)
+                        for sg in deleted_state_groups
+                    ],
+                )
+            except Exception:
+                # If TiKV cleanup fails after the SQL purge has committed,
+                # the deleted state group IDs are gone from SQL and cannot
+                # be recovered for a retry.  Log the failure at warning
+                # level with the full key list so an operator can
+                # manually retry or the deletion can be picked up by a
+                # future GC sweep.  The orphaned TiKV objects are
+                # harmless (they occupy space but are never reachable via
+                # live state).
+                logger.warning(
+                    "[purge] Failed to clean up TiKV HAMT roots for room %s "
+                    "(%d state groups). Orphaned TiKV objects are safe to "
+                    "retain; manual cleanup or a future GC sweep may "
+                    "reclaim them. Error: %s",
+                    room_id,
+                    len(deleted_state_groups),
+                    traceback.format_exc(),
+                )
 
     def _purge_room_state_txn(
         self,

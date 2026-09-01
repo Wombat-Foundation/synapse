@@ -743,6 +743,9 @@ class ReplicationCommandHandler:
                 cmd.instance_name, current_token, cmd.new_token
             )
 
+            if not updates:
+                break
+
             # TODO: add some tests for this
 
             # Some streams return multiple rows with the same stream IDs,

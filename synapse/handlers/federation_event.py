@@ -411,6 +411,13 @@ class FederationEventHandler:
         ):
             return False
 
+        # Encrypted events require per-event device-cache validation to detect
+        # unknown or mismatched device keys and trigger resync.  The batch path
+        # skips that, so exclude encrypted events to avoid silently dropping
+        # device-cache invalidation.
+        if any(event.type == EventTypes.Encrypted for _, event in pdus):
+            return False
+
         if room_id in self.room_queues:
             return False
 
@@ -510,6 +517,17 @@ class FederationEventHandler:
                 room_id,
             )
             processed = await process_batch()
+        except Exception:
+            # A generic exception (e.g. a DB error from persist_events_and_notify,
+            # or a NotFoundError from compute_event_context) should not abort the
+            # entire room drain.  Log it and fall back to the one-at-a-time path.
+            logger.warning(
+                "Unexpected error processing PDU batch in room %s, falling back "
+                "to single-event processing",
+                room_id,
+                exc_info=True,
+            )
+            return False
         return processed
 
     async def on_send_membership_event(

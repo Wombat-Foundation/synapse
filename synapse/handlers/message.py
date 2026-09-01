@@ -22,7 +22,7 @@
 import logging
 import random
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any, Mapping, Optional, Sequence, cast
+from typing import TYPE_CHECKING, Any, Mapping, Optional, Sequence
 
 from canonicaljson import encode_canonical_json
 
@@ -1465,10 +1465,15 @@ class EventCreationHandler:
             state_group_before_event=current_state_group,
         )
 
-        return cast(
-            tuple[EventBase, UnpersistedEventContext],
-            await self._post_build_validate_client_event(event, context, requester),
+        event, ctx = await self._post_build_validate_client_event(
+            event, context, requester
         )
+        assert isinstance(ctx, UnpersistedEventContext), (
+            f"Expected UnpersistedEventContext for batch path, got {type(ctx).__name__}. "
+            "Third-party rules may have rewritten an outlier event; "
+            "outlier events cannot be batch-persisted."
+        )
+        return event, ctx
 
     async def _post_build_validate_client_event(
         self,

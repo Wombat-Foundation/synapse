@@ -1394,9 +1394,11 @@ def setup_test_homeserver(
 
     # Cleanups run in reverse registration order. Register this after
     # `start_test_homeserver`, which registers the PostgreSQL pool cleanup, so
-    # teardown is: homeserver shutdown, pool close, database drop. Shutting down
-    # after closing the pool can leave a live PostgreSQL session behind and make
-    # DROP DATABASE fail.
+    # teardown is: homeserver shutdown, pool close, database drop. The pool is
+    # closed by `shutdown()` rather than by a separate cleanup registered in
+    # `start_test_homeserver`, so the ordering matters: shutting down after the
+    # pool has already been closed can leave a live PostgreSQL session behind
+    # and make DROP DATABASE fail.
     cleanup_func(shutdown_hs_on_cleanup)
 
     return hs

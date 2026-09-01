@@ -1,9 +1,13 @@
 from unittest.mock import Mock
 
+from twisted.internet import defer
 from twisted.trial import unittest
 
 from synapse.logging.context import ContextResourceUsage, LoggingContext
-from synapse.metrics.background_process_metrics import _BackgroundProcess
+from synapse.metrics.background_process_metrics import (
+    _BackgroundProcess,
+    run_as_background_process,
+)
 
 
 class TestBackgroundProcessMetrics(unittest.TestCase):
@@ -20,3 +24,17 @@ class TestBackgroundProcessMetrics(unittest.TestCase):
         )
         # Should not raise
         process.update_metrics()
+
+    def test_run_as_background_process_cancellation(self) -> None:
+        """Cancellation should return None without raising."""
+
+        async def _cancellable() -> None:
+            raise defer.CancelledError()
+
+        d = run_as_background_process(  # type: ignore[untracked-background-process]
+            "test cancellation",
+            "test_server",
+            _cancellable,
+        )
+        self.successResultOf(d)
+        self.assertIsNone(d.result)

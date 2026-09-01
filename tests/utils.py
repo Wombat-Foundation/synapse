@@ -20,6 +20,8 @@
 #
 
 import atexit
+import hashlib
+import logging
 import os
 import signal
 import uuid
@@ -45,6 +47,8 @@ try:
     HAS_AUTHLIB = True
 except ImportError:
     HAS_AUTHLIB = False
+
+logger = logging.getLogger(__name__)
 
 # set this to True to run the tests against postgres instead of sqlite.
 #
@@ -76,6 +80,38 @@ TIKV_PD_ENDPOINTS = [
     for endpoint in os.environ.get("SYNAPSE_TEST_TIKV_PD_ENDPOINTS", "").split(",")
     if endpoint.strip()
 ] or None
+
+
+def cleanup_tikv_namespace(namespace: str) -> None:
+    """Delete all TiKV keys written under *namespace* (HAMT roots + nodes).
+
+    Every ``default_config()`` call that doesn't receive an explicit
+    ``tikv_namespace`` mints a fresh random one.  If we never clean up,
+    orphaned per-test namespaces accumulate on the shared TiKV cluster.
+    """
+    if not TIKV_PD_ENDPOINTS:
+        return
+
+    try:
+        from synapse.synapse_rust import tikv_engine
+    except ImportError:
+        return
+
+    namespace_hash = hashlib.sha256(namespace.encode("utf-8")).digest()[:16]
+    ns_hex = namespace_hash.hex().encode("ascii")
+
+    deleted = 0
+    for prefix in (b"hamt:root:" + ns_hex, b"hamt:node:" + ns_hex):
+        while True:
+            pairs = tikv_engine.scan_prefix(prefix, 1000)
+            if not pairs:
+                break
+            tikv_engine.batch_delete([k for k, _ in pairs])
+            deleted += len(pairs)
+
+    if deleted:
+        logger.info("Cleaned up %d TiKV keys for namespace %s", deleted, namespace)
+
 
 # the dbname we will connect to in order to create the base database.
 POSTGRES_DBNAME_FOR_INITIAL_CREATE = "postgres"

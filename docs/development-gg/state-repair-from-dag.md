@@ -141,9 +141,10 @@ metadata after all replacement data verifies.
 Initial interface:
 
 ```
-synapse_state_repair --config homeserver.yaml --room '!room:id' --dry-run
-synapse_state_repair --config homeserver.yaml --room '!room:id' --from '$event' --dry-run
-synapse_state_repair --config homeserver.yaml --room-file rooms.txt --publish
+synapse_state_repair --config homeserver.yaml check-room --room '!room:id'
+synapse_state_repair --config homeserver.yaml check-room --room-file rooms.txt
+synapse_state_repair --config homeserver.yaml list-rejected
+synapse_state_repair --config homeserver.yaml list-outliers
 ```
 
 Useful safety flags:
@@ -153,7 +154,6 @@ Useful safety flags:
 --refuse-local-membership-loss
 --max-events N
 --write-report report.json
---publish
 ```
 
 ## First Implementation Milestone

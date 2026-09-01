@@ -46,40 +46,6 @@ db_binary_type = memoryview
 class KeyStore(CacheInvalidationWorkerStore):
     """Persistence for signature verification keys"""
 
-    async def get_existing_verify_keys(
-        self, server_name: str, key_ids: Iterable[str]
-    ) -> dict[str, FetchKeyResult]:
-        """Look up the key bodies we already have stored for the given
-        (server_name, key_id) pairs, for MSC4499 First Seen Wins collision
-        detection: the caller compares a freshly-fetched key body against
-        what's returned here before persisting it, so a colliding key ID
-        can be rejected without ever touching the already-stored binding.
-
-        Returns:
-            Map of key_id -> the already-stored FetchKeyResult, only for key
-            IDs we actually have a permanent binding for.
-        """
-        rows = cast(
-            list[tuple[str, bytes | memoryview, int]],
-            await self.db_pool.simple_select_many_batch(
-                table="server_signature_keys",
-                column="key_id",
-                iterable=key_ids,
-                keyvalues={"server_name": server_name},
-                retcols=("key_id", "verify_key", "ts_valid_until_ms"),
-                desc="get_existing_verify_keys",
-            ),
-        )
-        return {
-            key_id: FetchKeyResult(
-                verify_key=decode_verify_key_bytes(key_id, bytes(verify_key)),
-                valid_until_ts=ts_valid_until_ms
-                if ts_valid_until_ms is not None
-                else 0,
-            )
-            for key_id, verify_key, ts_valid_until_ms in rows
-        }
-
     async def store_server_keys_response(
         self,
         server_name: str,
@@ -173,6 +139,7 @@ class KeyStore(CacheInvalidationWorkerStore):
                 # Step 3: Compare stored key body against candidate.
                 if stored_key_bytes == fetch_result.verify_key.encode():
                     # Same key body (refresh) -- preserve original from_server.
+                    stored_ts = stored_ts if stored_ts is not None else 0
                     if stored_ts < fetch_result.valid_until_ts:
                         txn.execute(
                             """

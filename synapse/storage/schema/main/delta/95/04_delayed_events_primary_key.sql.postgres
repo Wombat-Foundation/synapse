@@ -12,4 +12,10 @@ DELETE FROM delayed_events WHERE ctid IN (
     ) duplicates
     WHERE rn > 1
 );
+-- Remove the background-update entry that would try to recreate this index.
+DELETE FROM background_updates WHERE update_name = 'delayed_events_idx';
+
+-- Drop the unique index on delay_id, now redundant with the primary key.
+DROP INDEX IF EXISTS delayed_events_idx;
+
 ALTER TABLE delayed_events ADD PRIMARY KEY (delay_id);

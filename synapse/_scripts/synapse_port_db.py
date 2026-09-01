@@ -248,8 +248,19 @@ IGNORED_BACKGROUND_UPDATES = {
     # rerun here -- this script's composed `Store` mixes in `StateBackgroundUpdateStore`
     # directly rather than the full `StateGroupDataStore`, so it has no
     # `_persist_state_hamt_txn`/`_background_backfill_state_hamt_roots` to run it with.
+    # NOTE: when the source was TiKV-backed, the backfill completed without writing
+    # SQL roots; `_maybe_requeue_state_hamt_backfill` re-inserts the pending update
+    # into PostgreSQL so Synapse runs it on startup.
     "state_hamt_backfill_roots",
 }
+
+# If the SQLite source was TiKV-backed the backfill marked itself complete
+# without populating the SQL `state_hamt_roots` table (roots lived only in
+# TiKV).  After copying, PostgreSQL therefore has state_groups rows but no
+# HAMT root rows -- and the completed background-update entry (copied from
+# SQLite) means Synapse will never re-run the backfill.  We detect this
+# condition and reset the background update so Synapse executes it on
+# startup.
 
 
 # Error returned by the run function. Used at the top-level part of the script to
@@ -1025,6 +1036,8 @@ class Porter:
 
                 tables_ported.update(tables_to_port)
 
+            await self._maybe_requeue_state_hamt_backfill()
+
             self.progress.done()
         except Exception as e:
             global end_error_exec_info
@@ -1197,6 +1210,57 @@ class Porter:
         done = int(done) if done else 0
 
         return done, remaining + done
+
+    async def _maybe_requeue_state_hamt_backfill(self) -> None:
+        """If the source SQLite database was TiKV-backed the backfill completed
+        without writing SQL ``state_hamt_roots`` rows.  The completed entry was
+        copied from SQLite into PostgreSQL's ``background_updates`` table, so
+        Synapse would never re-run it.
+
+        Detect this condition (state_groups present but state_hamt_roots empty)
+        and reset the background update so Synapse executes it on startup.
+        """
+        has_groups = (
+            await self.postgres_store.db_pool.simple_select_one_onecol(
+                table="state_groups",
+                keyvalues={},
+                retcol="1",
+                allow_none=True,
+            )
+            is not None
+        )
+        if not has_groups:
+            return
+
+        has_roots = (
+            await self.postgres_store.db_pool.simple_select_one_onecol(
+                table="state_hamt_roots",
+                keyvalues={},
+                retcol="1",
+                allow_none=True,
+            )
+            is not None
+        )
+        if has_roots:
+            return
+
+        # state_groups present but state_hamt_roots empty -- the source was
+        # TiKV-backed.  Delete the completed entry copied from SQLite and
+        # re-insert it as pending so Synapse runs the backfill on startup.
+        await self.postgres_store.db_pool.simple_delete(
+            table="background_updates",
+            keyvalues={"update_name": "state_hamt_backfill_roots"},
+            desc="requeue_state_hamt_backfill",
+        )
+        await self.postgres_store.db_pool.simple_insert(
+            table="background_updates",
+            values={
+                "update_name": "state_hamt_backfill_roots",
+                "progress_json": "{}",
+                "ordering": 100,
+            },
+            desc="requeue_state_hamt_backfill",
+        )
 
     async def _setup_state_group_id_seq(self) -> None:
         curr_id: int | None = await self.sqlite_store.db_pool.simple_select_one_onecol(

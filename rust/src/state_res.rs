@@ -15,7 +15,7 @@
 use std::collections::{HashMap, HashSet};
 
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict, PyList, PySet, PyTuple};
+use pyo3::types::{PyAny, PyDict, PySet, PyTuple};
 use pythonize::depythonize;
 use rezzy::{
     auth::roaring::AuthGraph, basespec::event_types::EventType, resolve_lattice_fold, LeanEvent,
@@ -173,38 +173,6 @@ pub fn resolve_v2_via_lattice_fold<'py>(
     resolve_v2_from_parsed_events(py, unconflicted_state, conflicted_event_ids, &parsed_events)
 }
 
-/// Resolve several state graphs which share an event graph.
-///
-/// Python currently invokes the resolver once per event context. The callers which
-/// process an ordered PDU queue therefore repeatedly convert the same event graph
-/// into Rust objects. This is the native batching primitive: it performs that
-/// conversion once, then resolves every `(unconflicted_state, conflicted_event_ids)`
-/// pair against it.
-#[pyfunction]
-#[pyo3(text_signature = "(requests, event_map, /)")]
-pub fn resolve_v2_batch_via_lattice_fold<'py>(
-    py: Python<'py>,
-    requests: Bound<'py, PyAny>,
-    event_map: Bound<'py, PyDict>,
-) -> PyResult<Bound<'py, PyList>> {
-    let parsed_events = parse_event_map(event_map)?;
-    let resolved_states = PyList::empty(py);
-
-    for request in requests.try_iter()? {
-        let request = request?;
-        let (unconflicted_state, conflicted_event_ids): (Bound<'py, PyDict>, Bound<'py, PyAny>) =
-            request.extract()?;
-        resolved_states.append(resolve_v2_from_parsed_events(
-            py,
-            unconflicted_state,
-            conflicted_event_ids,
-            &parsed_events,
-        )?)?;
-    }
-
-    Ok(resolved_states)
-}
-
 fn parse_event_map(
     event_map: Bound<'_, PyDict>,
 ) -> PyResult<HashMap<String, LeanEvent<String, Value>>> {
@@ -266,10 +234,6 @@ pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     )?)?;
     child_module.add_function(wrap_pyfunction!(
         resolve_v2_via_lattice_fold,
-        &child_module
-    )?)?;
-    child_module.add_function(wrap_pyfunction!(
-        resolve_v2_batch_via_lattice_fold,
         &child_module
     )?)?;
     m.add_submodule(&child_module)?;

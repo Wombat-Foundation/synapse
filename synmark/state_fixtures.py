@@ -13,7 +13,6 @@ class StateFixture:
     room_id: str
     state: StateMap[str]
     auth_keys: tuple[StateKey, ...]
-    selected_member_keys: tuple[StateKey, ...]
     mutations: tuple[tuple[StateKey, str], ...]
 
 
@@ -48,10 +47,6 @@ def make_state_fixture(
         (EventTypes.Member, "@user-0:benchmark"),
         (EventTypes.Member, "@user-1:benchmark"),
     )
-    selected_member_keys = tuple(
-        (EventTypes.Member, f"@user-{i}:benchmark")
-        for i in range(min(member_count, 50))
-    )
     mutations = tuple(
         (
             (EventTypes.Member, f"@user-{i % member_count}:benchmark"),
@@ -63,6 +58,5 @@ def make_state_fixture(
         room_id="!state-hamt-benchmark:test",
         state=state,
         auth_keys=auth_keys,
-        selected_member_keys=selected_member_keys,
         mutations=mutations,
     )

@@ -92,7 +92,7 @@ from tests.server import (
 )
 from tests.test_utils import event_injection, setup_awaitable_errors
 from tests.test_utils.logging_setup import setup_logging
-from tests.utils import checked_cast, default_config, setupdb
+from tests.utils import checked_cast, cleanup_tikv_namespace, default_config, setupdb
 
 setupdb()
 setup_logging()
@@ -478,6 +478,13 @@ class HomeserverTestCase(TestCase):
             self.prepare(self.reactor, self.clock, self.hs)
 
     def tearDown(self) -> None:
+        # Clean up any TiKV HAMT data written under this test's namespace
+        # so orphaned keys don't accumulate on a shared cluster.
+        if hasattr(self, "hs") and self.hs is not None:
+            namespace = self.hs.config.database.tikv_namespace
+            if namespace:
+                cleanup_tikv_namespace(namespace)
+
         # Reset to not use frozen dicts.
         events.USE_FROZEN_DICTS = False
 

@@ -320,7 +320,10 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
             if use_tikv is not None
             else bool(getattr(self, "tikv_pd_endpoints", None))
         )
-        if resolved_use_tikv or not getattr(self, "tikv_pd_endpoints", None):
+        if resolved_use_tikv:
+            # In TiKV mode, every state group must have a HAMT root in SQL
+            # (roots are published before the creating transaction commits).
+            # A missing root here is genuine corruption.
             existing_rows = self.db_pool.simple_select_many_txn(
                 txn,
                 table="state_groups",
@@ -1176,9 +1179,12 @@ class StateBackgroundUpdateStore(StateGroupBackgroundUpdateStore):
         # `_background_backfill_state_hamt_roots` (or `_persist_state_hamt_txn`)
         # to call. `update_synapse_database` has already fully migrated the
         # source database, including this backfill, before `synapse_port_db`
-        # runs, so there is nothing for the port script to do here -- guard
-        # the registration so constructing that composed `Store` doesn't
-        # crash on the missing attribute.
+        # runs, so the port script cannot execute it directly -- it instead
+        # re-inserts a pending entry into PostgreSQL's `background_updates`
+        # (see `_maybe_requeue_state_hamt_backfill`) when the source was
+        # TiKV-backed and no SQL roots were created.  Guard the registration
+        # so constructing that composed `Store` doesn't crash on the missing
+        # attribute.
         if hasattr(self, "_background_backfill_state_hamt_roots"):
             self.db_pool.updates.register_background_update_handler(
                 self.STATE_HAMT_BACKFILL_ROOTS_UPDATE_NAME,
