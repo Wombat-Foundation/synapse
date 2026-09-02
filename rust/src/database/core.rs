@@ -19,7 +19,9 @@ use lru::LruCache;
 use rezzy::hamt::{HamtNode, StructuralHash};
 use sha2::{Digest, Sha256};
 
-use crate::state_hamt::{decode_persisted_node_verified, lookup_from_node_map, materialize_from_node_map};
+use crate::state_hamt::{
+    decode_persisted_node_verified, lookup_from_node_map, materialize_from_node_map,
+};
 
 /// Minimal point-lookup/write surface every embedded HAMT KV backend must
 /// provide. Prefix scan / open / register-module stay backend-specific

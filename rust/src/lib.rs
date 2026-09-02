@@ -7,18 +7,17 @@ use pyo3_log::ResetHandle;
 pub mod acl;
 pub mod canonical_json;
 pub mod config;
+pub mod database;
 pub mod deferred;
 pub mod duration;
 pub mod errors;
 pub mod events;
-pub mod fjall_engine;
 pub mod handlers;
 pub mod http;
 pub mod http_client;
 pub mod identifier;
 pub mod json;
 pub mod matrix_const;
-pub mod mdbx_engine;
 pub mod msc4388_rendezvous;
 pub mod push;
 pub mod rendezvous;
@@ -88,8 +87,7 @@ fn synapse_rust(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     state_res::register_module(py, m)?;
     types::register_module(py, m)?;
     tikv_engine::register_module(py, m)?;
-    fjall_engine::register_module(py, m)?;
-    mdbx_engine::register_module(py, m)?;
+    database::register_module(py, m)?;
 
     Ok(())
 }
