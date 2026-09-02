@@ -268,11 +268,11 @@ bulk-load rows/s      n/a              192,129                 58,531       3.3x
 ```
 
 (p50 latencies; see the script for p99 and full methodology. mdbx and postgres
-are reproducible: `eval "$(scripts-dev/start_test_postgres.sh)"; python3
-scripts-dev/benchmark_hamt_mdbx_vs_postgres.py`. Includes both fixes below:
-sorted `batch_put` and a single explicit transaction for the postgres
-bulk-load, so mdbx and postgres each pay exactly one commit for the whole
-corpus -- the postgres bulk-load number barely moved from the earlier,
+are reproducible:
+`eval "$(scripts-dev/start_test_postgres.sh)"; python3 scripts-dev/benchmark_hamt_mdbx_vs_postgres.py`.
+Includes both fixes below: sorted `batch_put` and a single explicit transaction
+for the postgres bulk-load, so mdbx and postgres each pay exactly one commit for
+the whole corpus -- the postgres bulk-load number barely moved from the earlier,
 per-page-autocommit measurement (58,202 -> 58,531 rows/s) because
 `start_test_postgres.sh` already disables fsync/synchronous_commit on this
 RAM-disk cluster, so per-page commit overhead was already near-zero here; the
@@ -283,48 +283,47 @@ now-deleted `benchmark_hamt_storage_engines.py`, allegedly run before
 `ab59dd8ba6` removed the crate/bindings, but no raw output survives to confirm
 it. If true, they'd already put fjall slower than mdbx in-process, before
 accounting for the bridge a multi-process deployment would have additionally
-required (never built, see above) -- but don't cite these two figures as
-solid. Its bulk-load throughput and commit latency were never recorded anywhere
-in this repo's history (checked
-commit messages and every doc revision) and can no longer be measured now that
-the crate is gone -- marked `n/a` rather than guessed.
+required (never built, see above) -- but don't cite these two figures as solid.
+Its bulk-load throughput and commit latency were never recorded anywhere in this
+repo's history (checked commit messages and every doc revision) and can no
+longer be measured now that the crate is gone -- marked `n/a` rather than
+guessed.
 
 ### Two methodology fixes behind these numbers
 
 **Bulk-load throughput (`73283299ed`)**: the one leg mdbx originally _lost_.
 `batch_put` inserted content-addressed keys (structural hashes / event ids) in
-whatever random order they arrived, costing a B-tree search/possible
-page-split per row with no locality. Sorting each batch by key before
-insertion (the standard mdbx/LMDB bulk-load pattern, safe against a
-non-empty table -- unlike `WriteFlags::APPEND`, not used here since it
-additionally requires every key to sort above the table's current max, a
-guarantee a reused database doesn't give us) took mdbx from 43,612 to
-~185,000-192,000 rows/s across repeated runs, at the cost of a small,
-reproducible rise in point-read p50 at batch=1 (2.1us -> ~6.5-6.6us; still
-comfortably faster than postgres either way). That read-latency shift isn't
-fully root-caused -- current best guess is a benchmark-sampling artifact (the
-read benchmark's `keys_pool` is drawn in pre-sort key-generation order, not a
-random cross-section of the post-sort tree), not a real regression, but it
-hasn't been isolated further.
+whatever random order they arrived, costing a B-tree search/possible page-split
+per row with no locality. Sorting each batch by key before insertion (the
+standard mdbx/LMDB bulk-load pattern, safe against a non-empty table -- unlike
+`WriteFlags::APPEND`, not used here since it additionally requires every key to
+sort above the table's current max, a guarantee a reused database doesn't give
+us) took mdbx from 43,612 to ~185,000-192,000 rows/s across repeated runs, at
+the cost of a small, reproducible rise in point-read p50 at batch=1 (2.1us ->
+~6.5-6.6us; still comfortably faster than postgres either way). That
+read-latency shift isn't fully root-caused -- current best guess is a
+benchmark-sampling artifact (the read benchmark's `keys_pool` is drawn in
+pre-sort key-generation order, not a random cross-section of the post-sort
+tree), not a real regression, but it hasn't been isolated further.
 
 **Postgres bulk-load commit granularity**: `execute_values(..., page_size=1000)`
-issues a separate `cur.execute()` per 1000-row page; under `conn.autocommit =
-True` each page was its own implicit transaction/commit -- 2,000 commits for
-the 2M-row corpus, vs. mdbx's `batch_put` doing the whole corpus in one
-transaction. Fixed by wrapping the postgres bulk-load in one explicit
-transaction (`conn.autocommit = False` around the load, single `conn.commit()`
-after) so both sides pay one commit for one corpus. As noted above, this
-particular test cluster already disables fsync/synchronous_commit, so the
-measured effect was within noise here -- but the asymmetry was real and would
-matter on a durable (non-RAM-disk) postgres instance, so it's fixed in the
+issues a separate `cur.execute()` per 1000-row page; under
+`conn.autocommit = True` each page was its own implicit transaction/commit --
+2,000 commits for the 2M-row corpus, vs. mdbx's `batch_put` doing the whole
+corpus in one transaction. Fixed by wrapping the postgres bulk-load in one
+explicit transaction (`conn.autocommit = False` around the load, single
+`conn.commit()` after) so both sides pay one commit for one corpus. As noted
+above, this particular test cluster already disables fsync/synchronous_commit,
+so the measured effect was within noise here -- but the asymmetry was real and
+would matter on a durable (non-RAM-disk) postgres instance, so it's fixed in the
 script regardless of whether it moved these specific numbers.
 
 ### `event_json` benchmark (mixed-size payloads, realistic event ids)
 
 Same conclusion, separately validated against the actual `event_json` access
 pattern (event-id keys, 65/25/10% small/medium/large JSON size mix, not the HAMT
-node bench's uniform 512B) via `scripts-dev/benchmark_event_json_storage.py`
--- carries both fixes above (sorted `batch_put`, single-transaction postgres
+node bench's uniform 512B) via `scripts-dev/benchmark_event_json_storage.py` --
+carries both fixes above (sorted `batch_put`, single-transaction postgres
 bulk-load) -- re-run at n=2,000,000 (steady state, after the 200k warm-up leg):
 
 ```text
@@ -343,6 +342,47 @@ mdbx's bulk-load jumped from 24,158 to 99,100 rows/s on this workload from the
 same sort-before-insert fix as the HAMT-node bench, going from postgres's
 biggest lead to another mdbx win; postgres's own bulk-load number moved
 negligibly, 54,316 -> 54,684, for the same reason noted above.)
+
+### Cold-read status
+
+The tables above are **warm-cache / steady-state** measurements. They must not
+be used to claim that MDBX delivers microsecond reads when the required pages
+are absent from memory. MDBX reads through the kernel's file-backed page cache;
+an absent B-tree page causes storage I/O just as it does for other disk-backed
+engines.
+
+`scripts-dev/benchmark_mdbx_cold_reads.py` measures independent MDBX point
+lookups after a fresh process opens the environment and `POSIX_FADV_DONTNEED`
+has been issued for only the temporary MDBX files. Its temporary database
+defaults to the current working directory rather than `/tmp`, since `/tmp` is
+often tmpfs and would invalidate an I/O-cold test.
+
+A small, illustrative run on this development host's on-disk ext4 filesystem
+(10,000 512-byte values; 5 samples) reported:
+
+```text
+p50=22,686.3 us  p95=40,778.1 us  p99=40,778.1 us  max=40,778.1 us
+```
+
+This is an **evicted-page** result, not a perfectly device-cold guarantee:
+`POSIX_FADV_DONTNEED` is advisory, and the result depends strongly on the
+storage device, filesystem, background I/O, data size, and B-tree locality. For
+a stricter device-cold run, use a controlled host or a corpus larger than RAM. A
+representative command is:
+
+```sh
+python3 scripts-dev/benchmark_mdbx_cold_reads.py \
+  --rows 2000000 --samples 200 --value-size 512 --workdir /path/on/target-disk
+```
+
+There is currently **no apples-to-apples cold PostgreSQL number**. The
+`start_test_postgres.sh` instance used by the warm comparison stores `PGDATA` on
+tmpfs and disables durability, so it cannot measure storage misses. A fair
+PostgreSQL comparison needs a disk-backed cluster, a restart (or equivalent) to
+clear PostgreSQL `shared_buffers`, and eviction of the benchmark relation and
+its indexes from the OS cache before each measured lookup. Until that benchmark
+exists, do not infer an MDBX-vs-Postgres cold-read winner from the warm tables
+or the MDBX-only result above.
 
 ### Key Architectural Advantages of `libmdbx`:
 
