@@ -686,9 +686,14 @@ if [ -f "$staged_log_file" ]; then
   echo "refreshed $main_log_file from staged log"
 fi
 
-_pass=$(grep -c '"pass"' "$staged_results_file" 2>/dev/null || echo 0)
-_fail=$(grep -c '"fail"' "$staged_results_file" 2>/dev/null || echo 0)
-_skip=$(grep -c '"skip"' "$staged_results_file" 2>/dev/null || echo 0)
+_pass=$(grep -c '"pass"' "$staged_results_file" 2>/dev/null || true)
+_fail=$(grep -c '"fail"' "$staged_results_file" 2>/dev/null || true)
+_skip=$(grep -c '"skip"' "$staged_results_file" 2>/dev/null || true)
+_pass=${_pass:-0}
+_fail=${_fail:-0}
+_skip=${_skip:-0}
+
+test_duration_seconds=$((SECONDS - test_start_seconds))
 
 echo ""
 echo "RESULTS: ${_pass} pass / ${_fail} fail / ${_skip} skip"
@@ -698,8 +703,6 @@ echo "complement logs saved at $staged_log_file"
 echo "complement results staged at $staged_results_file"
 echo "complement results merged into $main_results_file"
 echo ""
-
-test_duration_seconds=$((SECONDS - test_start_seconds))
 
 if [ -z "${GITHUB_ACTIONS:-}" ]; then
   echo "COMPLEMENT_DURATION_SECONDS=${test_duration_seconds}"
