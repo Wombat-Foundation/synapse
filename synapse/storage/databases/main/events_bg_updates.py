@@ -1155,14 +1155,14 @@ class EventsBackgroundUpdatesStore(
 
         sql = """
             SELECT
-                event_id, state_events.type, state_events.state_key,
+                event_id, events.type, events.state_key,
                 topological_ordering, stream_ordering,
                 events.room_id
             FROM events
-            INNER JOIN state_events USING (event_id)
             LEFT JOIN event_auth_chains USING (event_id)
             LEFT JOIN event_auth_chain_to_calculate USING (event_id)
-            WHERE event_auth_chains.event_id IS NULL
+            WHERE events.state_key IS NOT NULL
+                AND event_auth_chains.event_id IS NULL
                 AND event_auth_chain_to_calculate.event_id IS NULL
                 AND %(tuple_cmp)s
                 %(extra)s
