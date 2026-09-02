@@ -437,6 +437,14 @@ main() {
     export PASS_SYNAPSE_EMBEDDED_HAMT_PATH="$SYNAPSE_EMBEDDED_HAMT_PATH"
   fi
 
+  # Fail fast: engine without path means every container will crash at
+  # startup with ConfigError, but complement waits 2 min per test anyway.
+  if [[ -n "$SYNAPSE_EMBEDDED_HAMT_ENGINE" && -z "$SYNAPSE_EMBEDDED_HAMT_PATH" ]]; then
+    echo "ERROR: SYNAPSE_EMBEDDED_HAMT_ENGINE=$SYNAPSE_EMBEDDED_HAMT_ENGINE is set but SYNAPSE_EMBEDDED_HAMT_PATH is not." >&2
+    echo "Set SYNAPSE_EMBEDDED_HAMT_PATH or unset SYNAPSE_EMBEDDED_HAMT_ENGINE." >&2
+    exit 1
+  fi
+
   # ── Run-filter and extra-tags from remaining args ───────────────────────────
   # RUN_TESTS=. means "run everything" (the default).
   # -run PATTERN and -run=PATTERN are extracted for package narrowing + anchoring.
