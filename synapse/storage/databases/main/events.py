@@ -1352,14 +1352,10 @@ class PersistEventsStore:
         # We loop here in case we find an out of band membership and need to
         # fetch their auth event info.
         while missing_auth_chains:
-            # Auth events are always state events (create/join-rules/power-
-            # levels/membership), so events.state_key is always non-NULL
-            # here -- no need for the state_events join or an explicit
-            # `state_key IS NOT NULL` filter to match the old INNER JOIN's
-            # semantics.
             sql = """
-                SELECT event_id, events.type, events.state_key, chain_id, sequence_number
+                SELECT event_id, events.type, se.state_key, chain_id, sequence_number
                 FROM events
+                INNER JOIN state_events AS se USING (event_id)
                 LEFT JOIN event_auth_chains USING (event_id)
                 WHERE
             """
