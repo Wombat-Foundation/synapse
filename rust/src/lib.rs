@@ -18,6 +18,7 @@ pub mod http_client;
 pub mod identifier;
 pub mod json;
 pub mod matrix_const;
+pub mod mdbx_engine;
 pub mod msc4388_rendezvous;
 pub mod push;
 pub mod rendezvous;
@@ -88,6 +89,7 @@ fn synapse_rust(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     types::register_module(py, m)?;
     tikv_engine::register_module(py, m)?;
     fjall_engine::register_module(py, m)?;
+    mdbx_engine::register_module(py, m)?;
 
     Ok(())
 }
