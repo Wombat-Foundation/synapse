@@ -23,11 +23,22 @@ beat Postgres 23x at batch=1, 3.8x at batch=100).
 Reuses the same `embedded_hamt_engine`/`embedded_hamt_path` config and mdbx
 keyspace the state store already opens (one flat keyspace, prefixed keys --
 `hamt:node:...`, `hamt:root:...`, `event_json:...` -- rather than a second
-mdbx directory/config knob), and the same "SQL is the durability boundary,
-mdbx is a self-healing mirror" pattern: `event_json` (Postgres) stays
-authoritative and is always written; the embedded engine is consulted
-first on reads and any event_id it's missing falls back to a normal SQL
-`event_json` fetch.
+mdbx directory/config knob). `event_json` (Postgres) stays authoritative
+and is always written; the embedded engine is consulted first on reads and
+any event_id it's missing falls back to a normal SQL `event_json` fetch.
+
+Unlike the HAMT nodes/roots this mirrors, `event_json` rows are NOT
+write-once/immutable in practice: censoring and expiry both replace a
+row's `json` in place (see `censor_events.py`'s `_censor_event_txn`,
+called by both). Both of those paths explicitly re-mirror the new value
+into mdbx as part of the same transaction that updates SQL. The read-path
+SQL fallback in `events_worker.py`, however, deliberately does NOT write
+back into mdbx on a miss -- doing so racing a concurrent censor/expiry
+could land a stale pre-censor value in mdbx after the pruned one, quietly
+undoing it, and there's no version/CAS scheme here to prevent that. So a
+mirror gap (e.g. an id that predates this feature) stays a permanent SQL
+fallback rather than self-healing; closing that gap needs an explicit,
+serialized backfill job, not a read-path write.
 """
 
 from __future__ import annotations
