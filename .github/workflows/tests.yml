@@ -744,6 +744,11 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
+      - name: Install clang (for mdbx-sys bindgen)
+        run: |
+          apt-get update
+          apt-get install -y clang libclang-dev
+
       - name: Install dependencies using uv
         run: |
           /venv/bin/pip install uv
