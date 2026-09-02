@@ -523,117 +523,116 @@ main() {
   export COMPLEMENT_WRAPPER_TOKEN="${COMPLEMENT_WRAPPER_TOKEN:-"complement-$$-$(date +%s%N)"}"
   export PASS_COMPLEMENT_WRAPPER_TOKEN="$COMPLEMENT_WRAPPER_TOKEN"
   export COMPLEMENT_SHARE_ENV_PREFIX=PASS_
-
-  cleanup_complement_containers() {
-    local containers container ours=()
-    if command -v docker &>/dev/null; then
-      mapfile -t containers < <(docker ps -aq --filter "name=complement" 2>/dev/null || true)
-      for container in "${containers[@]:-}"; do
-        if docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container" 2>/dev/null \
-            | grep -Fxq "COMPLEMENT_WRAPPER_TOKEN=$COMPLEMENT_WRAPPER_TOKEN"; then
-          ours+=("$container")
-        fi
-      done
-      if [ "${#ours[@]}" -gt 0 ]; then
-        echo "Cleaning up Complement containers spawned by this run..."
-        printf '%s\n' "${ours[@]}" | xargs -r docker rm -f
-      fi
-    fi
-  }
+  export COMPLEMENT_SPAWN_HS_TIMEOUT_SECS=${COMPLEMENT_SPAWN_HS_TIMEOUT_SECS:-120}
   trap cleanup_complement_containers EXIT
 
-  # Ensure default container spawn timeout is generous under load
-  export COMPLEMENT_SPAWN_HS_TIMEOUT_SECS=${COMPLEMENT_SPAWN_HS_TIMEOUT_SECS:-120}
-
-  # ── record_result: one summary line + append to staged results ───────────────
-  record_result() {
-    local action="$1" test_name="$2" elapsed="$3"
-    jq -nc --arg Action "$action" --arg Test "$test_name" \
-      '{Action: $Action, Test: $Test}' >>"$staged_results_file"
-    printf '%s\t%s\t%s\n' "${action^^}" "$test_name" "$elapsed"
-  }
-
-  # ── run_one_pattern: one go test invocation per -run alternative ─────────────
-  run_one_pattern() {
-    local pattern="$1"
-
-    # Narrow packages to where the requested test lives.
-    local -a packages
-    if [ -n "$use_in_repo_tests" ]; then
-      packages=("${default_in_repo_complement_test_packages[@]}")
-    else
-      packages=("${available_complement_test_packages[@]}")
-    fi
-
-    if [[ "$pattern" != "." ]] && [[ "$pattern" =~ ^\^?(Test[[:alnum:]_]+)(/.*)?$ ]]; then
-      local _test_name="${BASH_REMATCH[1]}"
-      local _base_dir="$COMPLEMENT_DIR"
-      if [ -n "$use_in_repo_tests" ]; then _base_dir="${repo_root}/complement"; fi
-      if command -v rg &>/dev/null; then
-        local -a matched_pkgs=()
-        mapfile -t matched_pkgs < <(
-          cd "$_base_dir" \
-            && rg -l --glob '*_test.go' "^func[[:space:]]+${_test_name}" tests 2>/dev/null \
-            | xargs -r -n1 dirname | sed 's#^#./#' | sort -u || true
-        )
-        if [ "${#matched_pkgs[@]}" -gt 0 ]; then
-          packages=("${matched_pkgs[@]}")
-          echo "Selected package(s) for $pattern: ${packages[*]}"
-        fi
-      fi
-    fi
-
-    local -a flags=(
-      -tags "$test_tags"
-      -v
-      -count=1
-      -timeout "$test_timeout"
-      -p "$test_parallel"
-      -parallel "$test_parallel"
-      "${extra_args[@]}"
-    )
-    if [[ "$pattern" != "." ]]; then flags+=(-run "$pattern"); fi
-
-    local _events_dir
-    _events_dir="$(mktemp -d "${staged_results_file}.events.XXXXXX")"
-    local _events_fifo="${_events_dir}/events"
-    mkfifo "$_events_fifo"
-
-    local _go_exit=0
-    set +e
-    (
-      set -o pipefail
-      if [ -n "$use_in_repo_tests" ]; then
-        cd "${repo_root}/complement"
-      else
-        cd "$COMPLEMENT_DIR"
-      fi
-      go test -json "${flags[@]}" "${packages[@]}" \
-        | tee -a "$staged_log_file" \
-        | jq --unbuffered -r \
-          'select((.Action == "pass" or .Action == "fail" or .Action == "skip") and .Test != null)
-           | (.Elapsed // 0) as $e
-           | [.Action, .Test,
-              (if $e == 0 then "0s"
-               else ((($e * 100 | round) / 100) | tostring) + "s" end)
-             ] | @tsv' \
-        >"$_events_fifo"
-    ) &
-    local _producer=$!
-
-    while IFS=$'\t' read -r _action _tname _elapsed; do
-      [ -n "$_action" ] || continue
-      record_result "$_action" "$_tname" "$_elapsed"
-    done <"$_events_fifo"
-
-    wait "$_producer"
-    _go_exit=$?
-    set -e
-    rm -rf "$_events_dir"
-    return "$_go_exit"
-  }
-
   return 0
+}
+
+cleanup_complement_containers() {
+  local container_label="COMPLEMENT_WRAPPER_TOKEN=$COMPLEMENT_WRAPPER_TOKEN"
+  local containers container ours=()
+  if command -v docker &>/dev/null; then
+    mapfile -t containers < <(docker ps -aq --filter "name=complement" 2>/dev/null || true)
+    for container in "${containers[@]:-}"; do
+      if docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container" 2>/dev/null \
+          | grep -Fxq "$container_label"; then
+        ours+=("$container")
+      fi
+    done
+    if [ "${#ours[@]}" -gt 0 ]; then
+      echo "Cleaning up Complement containers spawned by this run..."
+      printf '%s\n' "${ours[@]}" | xargs -r docker rm -f
+    fi
+  fi
+}
+
+# ── record_result: one summary line + append to staged results ───────────────
+record_result() {
+  local action="$1" test_name="$2" elapsed="$3"
+  jq -nc --arg Action "$action" --arg Test "$test_name" \
+    '{Action: $Action, Test: $Test}' >>"$staged_results_file"
+  printf '%s\t%s\t%s\n' "${action^^}" "$test_name" "$elapsed"
+}
+
+# ── run_one_pattern: one go test invocation per -run alternative ─────────────
+run_one_pattern() {
+  local pattern="$1"
+
+  # Narrow packages to where the requested test lives.
+  local -a packages
+  if [ -n "$use_in_repo_tests" ]; then
+    packages=("${default_in_repo_complement_test_packages[@]}")
+  else
+    packages=("${available_complement_test_packages[@]}")
+  fi
+
+  if [[ "$pattern" != "." ]] && [[ "$pattern" =~ ^\^?(Test[[:alnum:]_]+)(/.*)?$ ]]; then
+    local _test_name="${BASH_REMATCH[1]}"
+    local _base_dir="$COMPLEMENT_DIR"
+    if [ -n "$use_in_repo_tests" ]; then _base_dir="${repo_root}/complement"; fi
+    if command -v rg &>/dev/null; then
+      local -a matched_pkgs=()
+      mapfile -t matched_pkgs < <(
+        cd "$_base_dir" \
+          && rg -l --glob '*_test.go' "^func[[:space:]]+${_test_name}" tests 2>/dev/null \
+          | xargs -r -n1 dirname | sed 's#^#./#' | sort -u || true
+      )
+      if [ "${#matched_pkgs[@]}" -gt 0 ]; then
+        packages=("${matched_pkgs[@]}")
+        echo "Selected package(s) for $pattern: ${packages[*]}"
+      fi
+    fi
+  fi
+
+  local -a flags=(
+    -tags "$test_tags"
+    -v
+    -count=1
+    -timeout "$test_timeout"
+    -p "$test_parallel"
+    -parallel "$test_parallel"
+    "${extra_args[@]}"
+  )
+  if [[ "$pattern" != "." ]]; then flags+=(-run "$pattern"); fi
+
+  local _events_dir
+  _events_dir="$(mktemp -d "${staged_results_file}.events.XXXXXX")"
+  local _events_fifo="${_events_dir}/events"
+  mkfifo "$_events_fifo"
+
+  local _go_exit=0
+  set +e
+  (
+    set -o pipefail
+    if [ -n "$use_in_repo_tests" ]; then
+      cd "${repo_root}/complement"
+    else
+      cd "$COMPLEMENT_DIR"
+    fi
+    go test -json "${flags[@]}" "${packages[@]}" \
+      | tee -a "$staged_log_file" \
+      | jq --unbuffered -r \
+        'select((.Action == "pass" or .Action == "fail" or .Action == "skip") and .Test != null)
+         | (.Elapsed // 0) as $e
+         | [.Action, .Test,
+            (if $e == 0 then "0s"
+             else ((($e * 100 | round) / 100) | tostring) + "s" end)
+           ] | @tsv' \
+      >"$_events_fifo"
+  ) &
+  local _producer=$!
+
+  while IFS=$'\t' read -r _action _tname _elapsed; do
+    [ -n "$_action" ] || continue
+    record_result "$_action" "$_tname" "$_elapsed"
+  done <"$_events_fifo"
+
+  wait "$_producer"
+  _go_exit=$?
+  set -e
+  rm -rf "$_events_dir"
+  return "$_go_exit"
 }
 
 main "$@"
