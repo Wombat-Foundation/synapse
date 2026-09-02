@@ -228,25 +228,31 @@ ownership/repair semantics are specified.
 
 ## Storage Engine Selection & libmdbx Embedded Architecture
 
-Following extensive empirical benchmarking on a 2,000,000-node HAMT dataset (512 Bytes per node), **`libmdbx`** was selected as Synapse's high-performance embedded storage engine alongside PostgreSQL:
+`libmdbx` was selected as Synapse's embedded storage engine alongside PostgreSQL. `fjall` was evaluated first and dropped -- see `git log` for `ab59dd8ba6` ("storage(embedded): drop fjall, commit to mdbx as the embedded engine") -- both on measured latency and architecturally: mdbx supports native multi-process `mmap` access on a shared filesystem, while fjall's LSM tree can only be opened by one OS process, which would require a separate RPC/socket bridge for every non-owning worker. **No such bridge was ever built or benchmarked** -- an earlier draft of this doc quoted a "fjall + UDS Bridge" figure as if it were measured; it wasn't (there is no bridge implementation anywhere in this repo's history, reachable or not). That figure has been removed rather than re-estimated.
 
-### Empirical Benchmark Summary (2,000,000 Nodes)
+### Benchmark Summary (2,000,000 nodes, 512 bytes/node)
+
+Re-run from scratch on `scripts-dev/benchmark_hamt_mdbx_vs_postgres.py` (mdbx and postgres are both still live in the tree and directly reproducible; fjall's crate/bindings were fully removed in `ab59dd8ba6`, so it can no longer be benchmarked and is omitted below rather than left stale):
 
 ```text
-==========================================================================================
-Batch Size    fjall (in-process)    fjall + UDS Bridge    libmdbx (direct mmap)    postgres
-------------------------------------------------------------------------------------------
-batch = 1         14.2 us                ~22.6 us            2.1 us (10.7x WINNER)  63.4 us
-batch = 5         79.0 us                 --                 9.1 us ( 7.6x WINNER) 127.2 us
-batch = 10        77.5 us                 --                14.8 us ( 4.6x WINNER) 161.7 us
-==========================================================================================
+============================================================
+Batch Size    libmdbx (direct mmap)    postgres    speedup
+------------------------------------------------------------
+batch = 1          2.1 us                65.7 us     30.9x
+batch = 5         10.2 us               134.9 us     13.2x
+batch = 10        18.9 us               186.0 us      9.8x
+commit (batch=5)  70.1 us               141.6 us      2.0x
+============================================================
 ```
+(p50 latencies; see the script for p99 and full methodology. Reproduce with: `eval "$(scripts-dev/start_test_postgres.sh)"; python3 scripts-dev/benchmark_hamt_mdbx_vs_postgres.py`.)
+
+For reference, fjall's own numbers before removal (from the now-deleted `benchmark_hamt_storage_engines.py`, not reproducible today): batch=1 14.2us, batch=5 79.0us, batch=10 77.5us -- already slower than mdbx in-process, before accounting for the bridge a multi-process deployment would have additionally required.
 
 ### Key Architectural Advantages of `libmdbx`:
-1. **Direct Zero-Copy `mmap` Read Latency ($2.1\,\mu\text{s}$)**:
+1. **Direct Zero-Copy `mmap` Read Latency (~2.1us at batch=1)**:
    - Values are returned directly as borrowed `&[u8]` pointers in OS page cache without memory allocations, deserialization wrappers, or IPC overhead.
-2. **Zero RPC Daemon / Zero UDS Bridge Complexity**:
-   - All Synapse worker processes (`sync`, `federation`, `state_res`, `api`) open the `libmdbx` environment files directly via kernel `mmap`. Eliminates the operational overhead of running or maintaining a Unix Domain Socket (UDS) RPC bridge server.
+2. **Zero RPC Daemon / Zero Bridge Complexity**:
+   - All Synapse worker processes (`sync`, `federation`, `state_res`, `api`) open the `libmdbx` environment files directly via kernel `mmap`. This avoids the operational overhead a single-process engine like fjall would have required (a daemon or socket bridge for non-owning workers) -- but note that overhead was never built, so it's an architectural argument, not a measured one.
 
 ### Dual-Store Crash-Consistency Protocol
 
