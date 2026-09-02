@@ -57,6 +57,14 @@ class EventsTestCase(HomeserverTestCase):
         `event_json` row entirely and still fetching the event correctly
         proves the embedded-engine fast path is actually taken, not a
         silent SQL fallback.
+
+        Note: `mdbx_engine.open_client` is backed by a process-global
+        `OnceCell` on the Rust side (one mdbx handle per process, matching
+        how Synapse itself only ever opens one), so this call is a no-op
+        if any earlier test in this process already opened a client --
+        this test then exercises whatever database is already open, not
+        necessarily `tmpdir`. That's fine here since event_ids are random
+        per test run, but don't rely on this call for real isolation.
         """
         import shutil
         import tempfile

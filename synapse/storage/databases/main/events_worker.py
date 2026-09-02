@@ -81,6 +81,7 @@ from synapse.storage.database import (
 from synapse.storage.databases.main.embedded_event_json import (
     get_event_json_batch,
     open_embedded_event_json_engine,
+    put_event_json_batch,
 )
 from synapse.storage.types import Cursor
 from synapse.storage.util.id_generators import (
@@ -1628,8 +1629,19 @@ class EventsWorkerStore(SQLBaseStore):
                 "FROM event_json WHERE " + clause,
                 args,
             )
+            backfill_rows = []
             for event_id, internal_metadata, json_str, format_version in txn:
                 found[event_id] = (internal_metadata, json_str, format_version)
+                backfill_rows.append(
+                    (event_id, internal_metadata, json_str, format_version)
+                )
+
+            # Populate the embedded mirror for rows it was missing (pre-dates
+            # the feature being enabled, or was never mirrored for some other
+            # reason) so it's actually self-healing rather than missing
+            # forever -- see embedded_event_json.py.
+            if self._embedded_event_json_enabled and backfill_rows:
+                put_event_json_batch(backfill_rows)
 
         return found
 

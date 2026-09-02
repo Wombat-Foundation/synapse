@@ -25,6 +25,7 @@ from typing import Any, cast
 from synapse.api.errors import SynapseError
 from synapse.storage.database import LoggingTransaction
 from synapse.storage.databases.main import CacheInvalidationWorkerStore
+from synapse.storage.databases.main.embedded_event_json import delete_event_json_batch
 from synapse.storage.databases.main.state import StateGroupWorkerStore
 from synapse.storage.engines import PostgresEngine
 from synapse.storage.engines._base import IsolationLevel
@@ -326,6 +327,15 @@ class PurgeEventsStore(StateGroupWorkerStore, CacheInvalidationWorkerStore):
                 ")" % (table,)
             )
 
+        # The `event_json` DELETE above only removed the SQL rows; the
+        # embedded mirror (if any) has its own copy under `event_json:<id>`
+        # keys that must be removed too, or purged events keep serving their
+        # pre-purge content forever from mdbx -- see embedded_event_json.py.
+        if getattr(self, "_embedded_event_json_enabled", False):
+            delete_event_json_batch(
+                [event_id for event_id, should_delete in event_rows if should_delete]
+            )
+
         # Some of the `event_push_actions` we're about to delete may have already
         # been rotated into the aggregate `event_push_summary` counts. Deleting
         # the rows without adjusting those counts would leave the summary
@@ -529,6 +539,11 @@ class PurgeEventsStore(StateGroupWorkerStore, CacheInvalidationWorkerStore):
         )
         referenced_chain_id_tuples = list(txn)
 
+        room_event_ids: list[str] = []
+        if getattr(self, "_embedded_event_json_enabled", False):
+            txn.execute("SELECT event_id FROM events WHERE room_id=?", (room_id,))
+            room_event_ids = [event_id for (event_id,) in txn]
+
         logger.info("[purge] removing from event_auth_chain_links")
         txn.executemany(
             """
@@ -557,6 +572,11 @@ class PurgeEventsStore(StateGroupWorkerStore, CacheInvalidationWorkerStore):
         for table in purge_room_tables_with_room_id_column:
             logger.info("[purge] removing from %s", table)
             txn.execute("DELETE FROM %s WHERE room_id=?" % (table,), (room_id,))
+
+        # As in _purge_history_txn: the event_json DELETE above only cleared
+        # SQL, the embedded mirror needs its own delete pass.
+        if room_event_ids:
+            delete_event_json_batch(room_event_ids)
 
         # Other tables we do NOT need to clear out:
         #

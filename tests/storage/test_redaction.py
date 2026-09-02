@@ -387,6 +387,54 @@ class RedactionTestCase(unittest.HomeserverTestCase):
 
         self.assert_dict({"content": {}}, json.loads(event_json))
 
+    def test_redact_censor_updates_embedded_mirror(self) -> None:
+        """Censoring an event must update the embedded mdbx mirror, not just
+        SQL -- otherwise `get_event` keeps serving the pre-censor JSON from
+        mdbx forever, since (unlike ordinary redactions) there's no
+        redaction row to dynamically re-apply on read.
+        """
+        import shutil
+        import tempfile
+
+        from synapse.synapse_rust import mdbx_engine
+
+        tmpdir = tempfile.mkdtemp(prefix="test-censor-embedded-")
+        self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
+        mdbx_engine.open_client(tmpdir)
+        self.store._embedded_event_json_enabled = True
+        persist_store = self.hs.get_datastores().persist_events
+        assert persist_store is not None
+        persist_store._embedded_event_json_enabled = True
+
+        self.inject_room_member(self.room1, self.u_alice, Membership.JOIN)
+        msg_event = self.inject_message(self.room1, self.u_alice, "t")
+
+        # Prime the mirror with the pre-censor content.
+        self.store._get_event_cache.clear()
+        event = self.get_success(self.store.get_event(msg_event.event_id))
+        self.assertEqual(event.content.get("body"), "t")
+
+        self.inject_redaction(
+            self.room1, msg_event.event_id, self.u_alice, "Because I said so"
+        )
+
+        # Advance past the retention period so the redaction gets censored.
+        self.reactor.advance(60 * 60 * 24 * 31)
+        self.reactor.advance(60 * 60 * 2)
+
+        # Force a read via the embedded engine alone by wiping the SQL row.
+        self.store._get_event_cache.clear()
+        self.get_success(
+            self.store.db_pool.simple_delete(
+                table="event_json",
+                keyvalues={"event_id": msg_event.event_id},
+                desc="test_redact_censor_updates_embedded_mirror",
+            )
+        )
+
+        event = self.get_success(self.store.get_event(msg_event.event_id))
+        self.assertEqual(event.content, {})
+
     def test_redact_redaction(self) -> None:
         """Tests that we can redact a redaction and can fetch it again."""
 

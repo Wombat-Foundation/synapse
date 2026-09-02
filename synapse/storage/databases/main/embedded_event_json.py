@@ -137,3 +137,18 @@ def get_event_json_batch(
         key_to_event_id[bytes(key)]: _decode_event_json_record(bytes(value))
         for key, value in found
     }
+
+
+def delete_event_json_batch(event_ids: list[str]) -> None:
+    """Removes `event_id`s from the embedded mirror. Must be called wherever
+    `event_json` rows are deleted from SQL (purge_events.py) so the mirror
+    doesn't retain data the user asked to be purged -- see also
+    `put_event_json_batch`, which is called wherever `event_json` is
+    replaced in place (censor_events.py) rather than deleted.
+    """
+    if not event_ids:
+        return
+    from synapse.synapse_rust import mdbx_engine
+
+    keys = [_event_json_key(event_id) for event_id in event_ids]
+    mdbx_engine.batch_delete(keys)
