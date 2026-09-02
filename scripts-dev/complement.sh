@@ -188,9 +188,9 @@ main() {
   # branch below is skipped.
   pkg_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml | head -n1)"
   git_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-  [ -n "$git_branch" ] && git_branch="b=$git_branch"
+  if [ -n "$git_branch" ]; then git_branch="b=$git_branch"; fi
   git_tag="$(git describe --exact-match 2>/dev/null || true)"
-  [ -n "$git_tag" ] && git_tag="t=$git_tag"
+  if [ -n "$git_tag" ]; then git_tag="t=$git_tag"; fi
   git_commit="$(git rev-parse --short HEAD 2>/dev/null || true)"
   git_dirty=""
   if git describe --dirty=-this_is_a_dirty_checkout 2>/dev/null | grep -q -- '-this_is_a_dirty_checkout$'; then
@@ -571,7 +571,7 @@ main() {
     if [[ "$pattern" != "." ]] && [[ "$pattern" =~ ^\^?(Test[[:alnum:]_]+)(/.*)?$ ]]; then
       local _test_name="${BASH_REMATCH[1]}"
       local _base_dir="$COMPLEMENT_DIR"
-      [ -n "$use_in_repo_tests" ] && _base_dir="${repo_root}/complement"
+      if [ -n "$use_in_repo_tests" ]; then _base_dir="${repo_root}/complement"; fi
       if command -v rg &>/dev/null; then
         local -a matched_pkgs=()
         mapfile -t matched_pkgs < <(
@@ -595,7 +595,7 @@ main() {
       -parallel "$test_parallel"
       "${extra_args[@]}"
     )
-    [[ "$pattern" != "." ]] && flags+=(-run "$pattern")
+    if [[ "$pattern" != "." ]]; then flags+=(-run "$pattern"); fi
 
     local _events_dir
     _events_dir="$(mktemp -d "${staged_results_file}.events.XXXXXX")"
@@ -672,12 +672,16 @@ main() {
         rm -f "$tmp_merge"
       fi
     fi
+  elif [ -f "$staged_results_file" ]; then
+    echo "Warning: $staged_results_file exists but is empty" >&2
   else
-    echo "Warning: no results in $staged_results_file" >&2
+    echo "Warning: $staged_results_file is missing" >&2
   fi
 
   # Log: point-in-time snapshot, straight copy (not merge).
-  [ -f "$staged_log_file" ] && cp "$staged_log_file" "$main_log_file"
+  if [ -f "$staged_log_file" ]; then
+    cp "$staged_log_file" "$main_log_file"
+  fi
 
   local test_duration_seconds=$((SECONDS - test_start_seconds))
 
