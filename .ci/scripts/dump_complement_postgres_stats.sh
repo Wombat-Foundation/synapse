@@ -8,17 +8,26 @@ container_id=$1
 test_name=$2
 stats_dir=${COMPLEMENT_POSTGRES_STATS_DIR:-/tmp/complement-postgres-stats}
 stats_file="$stats_dir/$container_id.txt"
-psql=(docker exec -e PGPASSWORD=somesecret "$container_id" psql -h localhost -U postgres -d synapse -v ON_ERROR_STOP=1)
+target_db="synapse"
+psql=(docker exec -e PGPASSWORD=somesecret "$container_id" psql -h localhost -U postgres -v ON_ERROR_STOP=1)
 
 mkdir -p "$stats_dir"
 
-if ! "${psql[@]}" -c "SELECT 1;" >/dev/null 2>&1; then
-    echo "PostgreSQL unavailable; stats skipped" >"$stats_file"
-    exit 0
+if ! "${psql[@]}" -d "$target_db" -c "SELECT 1;" >/dev/null 2>&1; then
+    if "${psql[@]}" -d postgres -c "SELECT 1;" >/dev/null 2>&1; then
+        target_db="postgres"
+    else
+        {
+            echo "PostgreSQL unavailable for container $container_id (test: $test_name)"
+            echo "Connection output:"
+            "${psql[@]}" -d "$target_db" -c "SELECT 1;" 2>&1 || true
+        } >"$stats_file"
+        exit 0
+    fi
 fi
 
 run_query() {
-    "${psql[@]}" -c "$1" || true
+    "${psql[@]}" -d "$target_db" -c "$1" || true
 }
 
 {
