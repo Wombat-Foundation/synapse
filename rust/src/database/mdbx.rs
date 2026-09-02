@@ -192,6 +192,39 @@ pub fn scan_prefix(
     })
 }
 
+type PyRootRecord = (i64, Vec<u8>, Vec<u8>, String);
+
+/// Batched HAMT root lookup: one FFI call instead of an N-iteration Python
+/// `for` loop each paying its own round trip. Returns one entry per input
+/// group, `None` where this engine has no root record for it.
+#[pyfunction]
+#[pyo3(text_signature = "(namespace, groups, /)")]
+pub fn batch_get_state_hamt_roots(
+    py: Python<'_>,
+    namespace: String,
+    groups: Vec<i64>,
+) -> PyResult<Vec<Option<PyRootRecord>>> {
+    py.detach(|| {
+        let database = db().map_err(|e| e.to_string())?;
+        let txn = database.begin_ro_txn().map_err(|e| e.to_string())?;
+        let table: Table = txn.open_table(None).map_err(|e| e.to_string())?;
+        let store = MdbxStore {
+            txn: &txn,
+            table: &table,
+        };
+        core::batch_get_state_hamt_roots(&store, &namespace, &groups).map(|records| {
+            records
+                .into_iter()
+                .zip(groups)
+                .map(|(record, group)| {
+                    record.map(|r| (group, r.room_prefix, r.root_hash.to_vec(), r.room_id))
+                })
+                .collect()
+        })
+    })
+    .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+}
+
 /// Persists a batch of `(structural_hash, node_bytes)` pairs under their
 /// namespaced, room-prefixed keys (`core::node_key`) -- the only correct
 /// way to write nodes this engine's materialize/lookup walk can later
@@ -358,6 +391,7 @@ pub fn register_module(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult
     child.add_function(wrap_pyfunction!(batch_delete, &child)?)?;
     child.add_function(wrap_pyfunction!(scan_prefix, &child)?)?;
     child.add_function(wrap_pyfunction!(put_state_hamt_nodes, &child)?)?;
+    child.add_function(wrap_pyfunction!(batch_get_state_hamt_roots, &child)?)?;
     child.add_function(wrap_pyfunction!(materialize_state_hamt, &child)?)?;
     child.add_function(wrap_pyfunction!(materialize_state_hamts, &child)?)?;
     child.add_function(wrap_pyfunction!(lookup_state_hamts, &child)?)?;

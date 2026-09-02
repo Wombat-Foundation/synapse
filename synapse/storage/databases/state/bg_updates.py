@@ -1164,15 +1164,16 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         namespace = self.tikv_namespace
         found: dict[int, tuple[bytes, bytes, str]] = {}
         still_missing: list[int] = []
-        for group in groups:
-            root_value = engine.get(_state_hamt_root_tikv_key(namespace, group))
-            if root_value is None:
+        # One batched Rust call instead of an N-iteration Python for loop
+        # each paying its own FFI round trip.
+        for group, record in zip(
+            groups, engine.batch_get_state_hamt_roots(namespace, groups)
+        ):
+            if record is None:
                 still_missing.append(group)
                 continue
-            room_prefix, root_hash, _lattice, room_id = _decode_state_hamt_root(
-                bytes(root_value)
-            )
-            found[group] = (room_prefix, root_hash, room_id)
+            _group, room_prefix, root_hash, room_id = record
+            found[group] = (bytes(room_prefix), bytes(root_hash), room_id)
 
         if not still_missing:
             return found

@@ -191,6 +191,32 @@ pub fn scan_prefix(
     })
 }
 
+type PyRootRecord = (i64, Vec<u8>, Vec<u8>, String);
+
+/// Batched HAMT root lookup: one FFI call instead of an N-iteration Python
+/// `for` loop each paying its own round trip. Returns one entry per input
+/// group, `None` where this engine has no root record for it.
+#[pyfunction]
+#[pyo3(text_signature = "(namespace, groups, /)")]
+pub fn batch_get_state_hamt_roots(
+    py: Python<'_>,
+    namespace: String,
+    groups: Vec<i64>,
+) -> PyResult<Vec<Option<PyRootRecord>>> {
+    let part = partition()?;
+    py.detach(|| core::batch_get_state_hamt_roots(&FjallStore(part), &namespace, &groups))
+        .map(|records| {
+            records
+                .into_iter()
+                .zip(groups)
+                .map(|(record, group)| {
+                    record.map(|r| (group, r.room_prefix, r.root_hash.to_vec(), r.room_id))
+                })
+                .collect()
+        })
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)
+}
+
 /// Persists a batch of `(structural_hash, node_bytes)` pairs under their
 /// namespaced, room-prefixed keys (`core::node_key`) -- the only correct
 /// way to write nodes this engine's materialize/lookup walk can later
@@ -337,6 +363,7 @@ pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     child_module.add_function(wrap_pyfunction!(batch_delete, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(scan_prefix, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(put_state_hamt_nodes, &child_module)?)?;
+    child_module.add_function(wrap_pyfunction!(batch_get_state_hamt_roots, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(materialize_state_hamt, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(materialize_state_hamts, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(lookup_state_hamts, &child_module)?)?;

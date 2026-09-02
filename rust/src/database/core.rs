@@ -78,6 +78,80 @@ pub fn node_key(
     key
 }
 
+/// Per-namespace HAMT root key: `hamt:root:<namespace_hash_hex[..16]><state_group>`.
+/// Must match `_state_hamt_root_tikv_key` in `synapse/storage/databases/
+/// state/bg_updates.py` byte-for-byte -- this is the same key scheme TiKV
+/// uses, reused as-is for the embedded engines rather than inventing a
+/// second one.
+pub fn root_key(namespace: &str, state_group: i64) -> Vec<u8> {
+    let namespace_hash = Sha256::digest(namespace.as_bytes());
+    let mut key = Vec::with_capacity(10 + 32 + 20);
+    key.extend_from_slice(b"hamt:root:");
+    key.extend_from_slice(hex::encode(&namespace_hash[..16]).as_bytes());
+    key.extend_from_slice(state_group.to_string().as_bytes());
+    key
+}
+
+/// One decoded HAMT root record: `(room_prefix, root_structural_hash,
+/// lattice, room_id)`. Mirrors `_decode_state_hamt_root`
+/// (bg_updates.py) byte-for-byte -- same v1 root record format
+/// `_encode_state_hamt_root` writes for TiKV, reused unchanged.
+pub struct RootRecord {
+    pub room_prefix: Vec<u8>,
+    pub root_hash: StructuralHash,
+    pub lattice: Vec<u8>,
+    pub room_id: String,
+}
+
+pub fn decode_root_value(value: &[u8]) -> Result<RootRecord, String> {
+    if value.len() < 5 || value[0] != 1 {
+        return Err("invalid or unsupported HAMT root record version".to_owned());
+    }
+    let prefix_len = u16::from_be_bytes([value[1], value[2]]) as usize;
+    let room_id_len_offset = 3 + prefix_len;
+    if value.len() < room_id_len_offset + 2 {
+        return Err("truncated HAMT root record".to_owned());
+    }
+    let room_id_len =
+        u16::from_be_bytes([value[room_id_len_offset], value[room_id_len_offset + 1]]) as usize;
+    let room_id_start = room_id_len_offset + 2;
+    let root_start = room_id_start + room_id_len;
+    if value.len() < root_start + 32 {
+        return Err("truncated HAMT root record".to_owned());
+    }
+    let room_prefix = value[3..room_id_len_offset].to_vec();
+    let room_id =
+        String::from_utf8(value[room_id_start..root_start].to_vec()).map_err(|e| e.to_string())?;
+    let root_hash: StructuralHash = value[root_start..root_start + 32]
+        .try_into()
+        .expect("slice is exactly 32 bytes");
+    let lattice = value[root_start + 32..].to_vec();
+    Ok(RootRecord {
+        room_prefix,
+        root_hash,
+        lattice,
+        room_id,
+    })
+}
+
+/// Batched root lookup: one call in from Python instead of an N-iteration
+/// `for` loop each doing its own FFI round trip. Returns `None` per group
+/// that has no root record in this engine (the caller falls back to SQL
+/// for those, same self-healing shape as node reads).
+pub fn batch_get_state_hamt_roots(
+    store: &dyn NodeStore,
+    namespace: &str,
+    groups: &[i64],
+) -> Result<Vec<Option<RootRecord>>, String> {
+    groups
+        .iter()
+        .map(|&group| match store.get_raw(&root_key(namespace, group))? {
+            Some(value) => Ok(Some(decode_root_value(&value)?)),
+            None => Ok(None),
+        })
+        .collect()
+}
+
 /// Encodes a batch of `(structural_hash, node_bytes)` pairs (the shape
 /// `state_hamt.build_root_handle_with_lattice`/`apply_flat_state_updates`
 /// return) into `(node_key, node_bytes)` pairs ready for `batch_put` --

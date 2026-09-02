@@ -14,6 +14,10 @@ def put_state_hamt_nodes(
     room_prefix: bytes,
     nodes: Iterable[tuple[bytes, bytes]],
 ) -> None: ...
+def batch_get_state_hamt_roots(
+    namespace: str,
+    groups: list[int],
+) -> list[tuple[int, bytes, bytes, str] | None]: ...
 def materialize_state_hamt(
     namespace: str,
     room_prefix: bytes,
