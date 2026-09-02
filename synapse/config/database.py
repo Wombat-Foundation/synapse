@@ -139,7 +139,7 @@ class DatabaseConfig(Config):
                     "SYNAPSE_MDBX requires SYNAPSE_MDBX_PATH or embedded_hamt.path"
                 )
 
-        # Validate that engine and path are either both set or both empty.
+        # Validate embedded_hamt engine/path consistency.
         # A half-set config (engine without path) boots fine but crashes on
         # first state write with "RuntimeError: mdbx not opened".
         if self.embedded_hamt_engine and not self.embedded_hamt_path:
@@ -148,6 +148,17 @@ class DatabaseConfig(Config):
                 "but embedded_hamt.path is not set. "
                 "Set embedded_hamt.path (or SYNAPSE_EMBEDDED_HAMT_PATH) to "
                 "a file path, or remove the engine setting."
+            )
+        if self.embedded_hamt_path and not self.embedded_hamt_engine:
+            raise ConfigError(
+                "embedded_hamt.path is set but embedded_hamt.engine is not. "
+                "Set embedded_hamt.engine (or SYNAPSE_EMBEDDED_HAMT_ENGINE) to "
+                "'mdbx', or remove the path setting."
+            )
+        if self.embedded_hamt_engine and self.embedded_hamt_engine != "mdbx":
+            raise ConfigError(
+                f"embedded_hamt.engine is {self.embedded_hamt_engine!r}, "
+                "but only 'mdbx' is supported."
             )
 
         if multi_database_config and database_config:
