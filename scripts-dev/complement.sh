@@ -350,18 +350,12 @@ main() {
   # (The prefix is stripped off before reaching the container.)
   export COMPLEMENT_SHARE_ENV_PREFIX=PASS_
 
-  # * -count=1: Only run tests once, and disable caching for tests.
-  # * -v: Output test logs, even if those tests pass.
   # * -tags=synapse_blacklist: Enable the `synapse_blacklist` build tag, which is
   #   necessary for `runtime.Synapse` checks/skips to work in the tests
-  test_args=(
-    -v
-    -tags="synapse_blacklist"
-    -count=1
-  )
+  test_tags="synapse_blacklist"
 
   # It takes longer than 10m to run the whole suite.
-  test_args+=("-timeout=60m")
+  test_timeout="60m"
 
   if [[ -n "$WORKERS" ]]; then
     # Use workers.
@@ -417,89 +411,109 @@ main() {
     export PASS_SYNAPSE_TIKV_PD_ENDPOINTS="$SYNAPSE_TIKV_PD_ENDPOINTS"
   fi
 
-  # Restrict test package sweep if user specified a specific -run TestPattern
-  local target_run=""
-  for ((i=1; i<=$#; i++)); do
-    if [[ "${!i}" == "-run" ]]; then
-      next_idx=$((i+1))
-      target_run="${!next_idx}"
-      break
-    elif [[ "${!i}" =~ ^-run=(.+) ]]; then
-      target_run="${BASH_REMATCH[1]}"
-      break
+  # ── Run-filter and extra-tags from remaining args ───────────────────────────
+  # RUN_TESTS=. means "run everything" (the default).
+  # -run PATTERN and -run=PATTERN are extracted for package narrowing + anchoring.
+  # -tags TAG and -tags=TAG are merged into test_tags (never forwarded as a
+  # second -tags flag which go test would silently clobber the first with).
+  # Everything else goes into extra_args and is forwarded verbatim.
+  RUN_TESTS="${COMPLEMENT_RUN:-.}"
+  local -a extra_args=()
+  local _i=1
+  while [ $_i -le $# ]; do
+    local _arg="${!_i}"
+    if [[ "$_arg" == "-run" ]]; then
+      local _next=$((_i+1))
+      RUN_TESTS="${!_next}"
+      _i=$((_i+2))
+    elif [[ "$_arg" =~ ^-run=(.+) ]]; then
+      RUN_TESTS="${BASH_REMATCH[1]}"
+      _i=$((_i+1))
+    elif [[ "$_arg" == "-tags" ]]; then
+      local _next=$((_i+1))
+      test_tags="${test_tags},${!_next}"
+      _i=$((_i+2))
+    elif [[ "$_arg" =~ ^-tags=(.+) ]]; then
+      test_tags="${test_tags},${BASH_REMATCH[1]}"
+      _i=$((_i+1))
+    else
+      extra_args+=("$_arg")
+      _i=$((_i+1))
     fi
   done
 
-  if [ -n "$target_run" ] && [ "$target_run" != "." ]; then
-    local test_name_clean
-    test_name_clean="$(echo "$target_run" | sed -E 's/^\^//; s/\$$//; s/\/.*$//')"
-    if [[ "$test_name_clean" =~ ^Test[[:alnum:]_]+$ ]]; then
-      local base_dir="./complement"
-      if [ -z "$use_in_repo_tests" ]; then
-        base_dir="$COMPLEMENT_DIR"
+  # ── Staged result / log files (timestamped, never overwrite) ────────────────
+  local repo_root
+  repo_root="$(realpath "$(dirname "$0")/..")"
+  local results_dir="${RESULTS_DIR:-tests/complement}"
+  local main_results_file="${repo_root}/${results_dir}/results.jsonl"
+  local main_log_file="${repo_root}/${results_dir}/logs.jsonl"
+  mkdir -p "$(dirname "$main_results_file")"
+  touch "$main_results_file" "$main_log_file"
+
+  local run_suffix
+  if [ "$RUN_TESTS" = "." ]; then
+    run_suffix="all"
+  else
+    run_suffix="$(echo "$RUN_TESTS" | sed 's/[^a-zA-Z0-9]/_/g' | cut -c1-32)"
+    run_suffix="${run_suffix:-all}"
+  fi
+  local run_stamp
+  run_stamp="$(date +%s%N)"
+  local staging_dir="${repo_root}/.tmp/complement"
+  mkdir -p "$staging_dir"
+  local staged_log_file="${staging_dir}/logs.${run_suffix}.${run_stamp}.jsonl"
+  local staged_results_file="${staging_dir}/test_results.${run_suffix}.${run_stamp}.jsonl"
+  : >"$staged_log_file"
+  : >"$staged_results_file"
+
+  if [ "$RUN_TESTS" = "." ]; then
+    echo "Full run: results will replace $main_results_file"
+  else
+    echo "Partial run ($RUN_TESTS): results will merge into $main_results_file"
+  fi
+
+  # ── anchor_one: per-segment ^ anchoring so -run TestFoo doesn't match TestFooBar ──
+  anchor_one() {
+    local pattern="$1"
+    local -a anchored=()
+    local -a segments
+    IFS='/' read -r -a segments <<<"$pattern"
+    local last=$(( ${#segments[@]} - 1 ))
+    local idx=0
+    for segment in "${segments[@]}"; do
+      if [[ "$segment" =~ ^\^ || "$segment" =~ .*[][()?.+*|$] ]]; then
+        anchored+=("$segment")
+      elif [ "$idx" -eq "$last" ]; then
+        anchored+=("^${segment}")
+      else
+        anchored+=("^${segment}\$")
       fi
-      if command -v rg &>/dev/null; then
-        local matched_pkg
-        matched_pkg="$(cd "$base_dir" && rg -l --glob '*_test.go' "^func[[:space:]]+${test_name_clean}" tests 2>/dev/null | xargs -r -n1 dirname | sed 's#^#./#' | sort -u | head -n1 || true)"
-        if [ -n "$matched_pkg" ]; then
-          echo "Auto-discovered test package for '$target_run': $matched_pkg"
-          if [ -n "$use_in_repo_tests" ]; then
-            default_in_repo_complement_test_packages=("$matched_pkg")
-          else
-            available_complement_test_packages=("$matched_pkg")
-          fi
-          local pkg_tag
-          pkg_tag="$(basename "$matched_pkg")"
-          if [[ "$pkg_tag" =~ ^msc[0-9]+ ]]; then
-            echo "Auto-enabling build tag for $pkg_tag"
-            for idx in "${!test_args[@]}"; do
-              if [[ "${test_args[$idx]}" =~ ^-tags= ]]; then
-                test_args[$idx]="${test_args[$idx]},$pkg_tag"
-                break
-              fi
-            done
-          fi
-        fi
-      fi
+      idx=$((idx+1))
+    done
+    (IFS='/'; echo "${anchored[*]}")
+  }
+
+  # Split top-level | into separate go test invocations (go test's -run re-splits
+  # on every /, silently dropping one side of alternations with differing depth).
+  local -a ALT_PATTERNS=()
+  if [ "$RUN_TESTS" = "." ]; then
+    ALT_PATTERNS=(".")
+  else
+    local -a raw_alts
+    IFS='|' read -r -a raw_alts <<<"$RUN_TESTS"
+    for alt in "${raw_alts[@]}"; do
+      ALT_PATTERNS+=("$(anchor_one "$alt")")
+    done
+    if [ "${#ALT_PATTERNS[@]}" -gt 1 ]; then
+      echo "Anchored run regexes (one go test invocation each):"
+      for alt in "${ALT_PATTERNS[@]}"; do echo "  $alt"; done
+    else
+      echo "Anchored run regex: ${ALT_PATTERNS[0]}"
     fi
   fi
 
-  # Merge any user-supplied -tags flags from "$@" into test_args, then strip
-  # them from the forwarded args. Go uses the last -tags seen, so having both
-  # -tags=synapse_blacklist (ours) and -tags all (user's) means ours gets
-  # silently dropped. We collect all tag values into one canonical -tags= entry.
-  local -a filtered_args=()
-  local _i=1
-  while [ $_i -le $# ]; do
-    arg="${!_i}"
-    if [[ "$arg" == "-tags" ]]; then
-      _next=$((_i+1))
-      user_tags="${!_next}"
-      # Merge user tags into the existing -tags= entry in test_args
-      for idx in "${!test_args[@]}"; do
-        if [[ "${test_args[$idx]}" =~ ^-tags= ]]; then
-          test_args[$idx]="${test_args[$idx]},${user_tags}"
-          break
-        fi
-      done
-      _i=$((_i+2))  # skip both -tags and its value
-    elif [[ "$arg" =~ ^-tags=(.+) ]]; then
-      user_tags="${BASH_REMATCH[1]}"
-      for idx in "${!test_args[@]}"; do
-        if [[ "${test_args[$idx]}" =~ ^-tags= ]]; then
-          test_args[$idx]="${test_args[$idx]},${user_tags}"
-          break
-        fi
-      done
-      _i=$((_i+1))
-    else
-      filtered_args+=("$arg")
-      _i=$((_i+1))
-    fi
-  done
-  set -- "${filtered_args[@]}"
-
-  # Auto-cleanup containers spawned by Complement on exit
+  # ── Container token + cleanup trap ──────────────────────────────────────────
   export COMPLEMENT_WRAPPER_TOKEN="${COMPLEMENT_WRAPPER_TOKEN:-"complement-$$-$(date +%s%N)"}"
   export PASS_COMPLEMENT_WRAPPER_TOKEN="$COMPLEMENT_WRAPPER_TOKEN"
   export COMPLEMENT_SHARE_ENV_PREFIX=PASS_
@@ -508,8 +522,9 @@ main() {
     local containers container ours=()
     if command -v docker &>/dev/null; then
       mapfile -t containers < <(docker ps -aq --filter "name=complement" 2>/dev/null || true)
-      for container in "${containers[@]}"; do
-        if docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container" 2>/dev/null | grep -Fxq "COMPLEMENT_WRAPPER_TOKEN=$COMPLEMENT_WRAPPER_TOKEN"; then
+      for container in "${containers[@]:-}"; do
+        if docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container" 2>/dev/null \
+            | grep -Fxq "COMPLEMENT_WRAPPER_TOKEN=$COMPLEMENT_WRAPPER_TOKEN"; then
           ours+=("$container")
         fi
       done
@@ -524,97 +539,134 @@ main() {
   # Ensure default container spawn timeout is generous under load
   export COMPLEMENT_SPAWN_HS_TIMEOUT_SECS=${COMPLEMENT_SPAWN_HS_TIMEOUT_SECS:-120}
 
+  # ── record_result: one summary line + append to staged results ───────────────
+  record_result() {
+    local action="$1" test_name="$2" elapsed="$3"
+    jq -nc --arg Action "$action" --arg Test "$test_name" \
+      '{Action: $Action, Test: $Test}' >>"$staged_results_file"
+    printf '%s\t%s\t%s\n' "${action^^}" "$test_name" "$elapsed"
+  }
+
+  # ── run_one_pattern: one go test invocation per -run alternative ─────────────
+  run_one_pattern() {
+    local pattern="$1"
+
+    # Narrow packages to where the requested test lives.
+    local -a packages
+    if [ -n "$use_in_repo_tests" ]; then
+      packages=("${default_in_repo_complement_test_packages[@]}")
+    else
+      packages=("${available_complement_test_packages[@]}")
+    fi
+
+    if [[ "$pattern" != "." ]] && [[ "$pattern" =~ ^\^?(Test[[:alnum:]_]+)(/.*)?$ ]]; then
+      local _test_name="${BASH_REMATCH[1]}"
+      local _base_dir="$COMPLEMENT_DIR"
+      [ -n "$use_in_repo_tests" ] && _base_dir="${repo_root}/complement"
+      if command -v rg &>/dev/null; then
+        local -a matched_pkgs=()
+        mapfile -t matched_pkgs < <(
+          cd "$_base_dir" \
+            && rg -l --glob '*_test.go' "^func[[:space:]]+${_test_name}" tests 2>/dev/null \
+            | xargs -r -n1 dirname | sed 's#^#./#' | sort -u || true
+        )
+        if [ "${#matched_pkgs[@]}" -gt 0 ]; then
+          packages=("${matched_pkgs[@]}")
+          echo "Selected package(s) for $pattern: ${packages[*]}"
+        fi
+      fi
+    fi
+
+    local -a flags=(
+      -tags "$test_tags"
+      -v
+      -count=1
+      -timeout "$test_timeout"
+      "${extra_args[@]}"
+    )
+    [[ "$pattern" != "." ]] && flags+=(-run "$pattern")
+
+    local _events_dir
+    _events_dir="$(mktemp -d "${staged_results_file}.events.XXXXXX")"
+    local _events_fifo="${_events_dir}/events"
+    mkfifo "$_events_fifo"
+
+    local _go_exit=0
+    set +e
+    (
+      set -o pipefail
+      if [ -n "$use_in_repo_tests" ]; then
+        cd "${repo_root}/complement"
+      else
+        cd "$COMPLEMENT_DIR"
+      fi
+      go test -json "${flags[@]}" "${packages[@]}" \
+        | tee -a "$staged_log_file" \
+        | jq --unbuffered -r \
+          'select((.Action == "pass" or .Action == "fail" or .Action == "skip") and .Test != null)
+           | (.Elapsed // 0) as $e
+           | [.Action, .Test,
+              (if $e == 0 then "0s"
+               else ((($e * 100 | round) / 100) | tostring) + "s" end)
+             ] | @tsv' \
+        >"$_events_fifo"
+    ) &
+    local _producer=$!
+
+    while IFS=$'\t' read -r _action _tname _elapsed; do
+      [ -n "$_action" ] || continue
+      record_result "$_action" "$_tname" "$_elapsed"
+    done <"$_events_fifo"
+
+    wait "$_producer"
+    _go_exit=$?
+    set -e
+    rm -rf "$_events_dir"
+    return "$_go_exit"
+  }
+
+  # ── Run all patterns ──────────────────────────────────────────────────────────
   local test_start_seconds=$SECONDS
   local go_test_exit_code=0
 
-  # Print out the executed commands so it's more obvious what's happening at the end here.
-  # Things are slightly ambiguous with the in-repo vs Complement tests.
-  set -x
+  for _pattern in "${ALT_PATTERNS[@]}"; do
+    set +e
+    run_one_pattern "$_pattern"
+    local _pexit=$?
+    set -e
+    [ "$_pexit" -ne 0 ] && go_test_exit_code="$_pexit"
+  done
 
-  # Setup staged result ledger files
-  local repo_root
-  repo_root="$(realpath .)"
-  local results_dir="${RESULTS_DIR:-tests/complement}"
-  local main_results_file="$(realpath -m "$results_dir/results.jsonl")"
-  local main_log_file="$(realpath -m "$results_dir/logs.jsonl")"
-
-  mkdir -p "$(dirname "$main_results_file")"
-  touch "$main_results_file" "$main_log_file"
-
-  local run_stamp="$(date +%s%N)"
-  local staging_dir="$repo_root/.tmp/complement"
-  mkdir -p "$staging_dir"
-  local staged_log_file="$staging_dir/logs.${run_stamp}.jsonl"
-  local staged_results_file="$staging_dir/test_results.${run_stamp}.jsonl"
-  : >"$staged_log_file"
-  : >"$staged_results_file"
-
-  local -a run_pkgs=()
-  if [ -n "$use_in_repo_tests" ]; then
-    cd "./complement"
-    run_pkgs=("${default_in_repo_complement_test_packages[@]}")
-  else
-    cd "$COMPLEMENT_DIR"
-    run_pkgs=("${available_complement_test_packages[@]}")
-  fi
-
-  if [[ " $* " =~ " -json " ]]; then
-    stdbuf -oL go test -json "${test_args[@]}" "$@" "${run_pkgs[@]}" 2>&1 |
-      tee -a "$staged_log_file" |
-      stdbuf -oL jq -rR --unbuffered '
-        . as $raw
-        | (try fromjson catch $raw)
-        | if type != "object" then
-            $raw
-          elif (.Action == "pass" or .Action == "fail" or .Action == "skip") then
-            if .Test then
-              "\(.Action | ascii_upcase)\t\(.Test)\t\(.Elapsed // 0)s"
-            elif .Action == "fail" then
-              "FAIL PACKAGE \(.Package // "<unknown>") \(.Elapsed // 0)s"
-            else
-              empty
-            end
-          else
-            empty
-          end' || go_test_exit_code=$?
-  else
-    go test -json "${test_args[@]}" "$@" "${run_pkgs[@]}" 2>&1 |
-      tee -a "$staged_log_file" |
-      stdbuf -oL jq -rR --unbuffered '
-        . as $raw
-        | (try fromjson catch $raw)
-        | if type != "object" then
-            empty
-          elif (.Action == "pass" or .Action == "fail" or .Action == "skip") and .Test != null then
-            "\(.Action | ascii_upcase)\t\(.Test)\t\(.Elapsed // 0)s"
-          else
-            empty
-          end' || go_test_exit_code=$?
-  fi
-
-  # Extract pass/fail test records to staged_results_file
-  if [ -f "$staged_log_file" ]; then
-    jq -c 'select((.Action == "pass" or .Action == "fail" or .Action == "skip") and .Test != null) | {Action: .Action, Test: .Test}' "$staged_log_file" >>"$staged_results_file" 2>/dev/null || true
-  fi
-
-  # Merge staged results into main_results_file ledger
-  if [ -s "$staged_results_file" ] && [ -f "$repo_root/scripts-dev/merge_complement_results.py" ]; then
-    tmp_merge="$(mktemp "${main_results_file}.merge.XXXXXX")"
-    if python3 "$repo_root/scripts-dev/merge_complement_results.py" "$main_results_file" "$staged_results_file" "$tmp_merge"; then
-      mv "$tmp_merge" "$main_results_file"
-      echo "Merged staged test results into $main_results_file"
+  # ── Merge / refresh results ledger ────────────────────────────────────────────
+  local merge_script="${repo_root}/scripts-dev/merge_complement_results.py"
+  if [ -f "$staged_results_file" ] && [ -s "$staged_results_file" ]; then
+    if [ "$RUN_TESTS" = "." ]; then
+      # Full run: dedupe + sort staged, then replace main results outright.
+      python3 "$merge_script" --dedupe-in-place "$staged_results_file" \
+        || echo "WARN: dedupe failed; keeping raw rows" >&2
+      python3 "$merge_script" --sort-in-place "$staged_results_file" \
+        || echo "WARN: sort failed; keeping arrival order" >&2
+      cp "$staged_results_file" "$main_results_file"
+      echo "Refreshed $main_results_file from $(wc -l <"$staged_results_file" | tr -d ' ') results"
     else
-      cat "$staged_results_file" >>"$main_results_file"
-      rm -f "$tmp_merge"
+      # Partial run: merge new results into ledger.
+      local tmp_merge
+      tmp_merge="$(mktemp "${main_results_file}.merge.XXXXXX")"
+      if python3 "$merge_script" "$main_results_file" "$staged_results_file" "$tmp_merge"; then
+        mv "$tmp_merge" "$main_results_file"
+        echo "Merged $(wc -l <"$staged_results_file" | tr -d ' ') results into $main_results_file"
+      else
+        echo "WARN: merge failed; appending staged results" >&2
+        cat "$staged_results_file" >>"$main_results_file"
+        rm -f "$tmp_merge"
+      fi
     fi
-    cp "$staged_log_file" "$main_log_file"
+  else
+    echo "Warning: no results in $staged_results_file" >&2
   fi
 
-  # We don't need to print out executed commands anymore
-  #
-  # This is just `set +x` without printing `+ set +x` to the console (via
-  # https://stackoverflow.com/questions/13195655/bash-set-x-without-it-being-printed/19226038#19226038)
-  { set +x; } 2>/dev/null
+  # Log: point-in-time snapshot, straight copy (not merge).
+  [ -f "$staged_log_file" ] && cp "$staged_log_file" "$main_log_file"
 
   local test_duration_seconds=$((SECONDS - test_start_seconds))
 
