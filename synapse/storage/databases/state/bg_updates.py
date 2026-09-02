@@ -158,6 +158,11 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
             self.db_pool._hamt_namespace = value
 
     def _state_hamt_secret(self) -> bytes:
+        # TODO: Remove this entirely when migrating to 256-bit content-derived
+        # IDs for HAMT nodes/roots. The keyed structural-hash layer is redundant:
+        # it makes storage depend on macaroon_secret_key, complicates rotation,
+        # and prevents deterministic reuse. The MDBX key can be namespaced by
+        # room plus the 256-bit node ID without a server secret.
         return hashlib.sha256(self.hs.config.key.macaroon_secret_key).digest()
 
     @trace

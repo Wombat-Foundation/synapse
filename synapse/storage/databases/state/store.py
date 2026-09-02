@@ -792,8 +792,13 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 f"{prev_state_group}: {prev_root_hash.hex()}"
             )
         root_bytes = bytes(root_node_bytes)
-        nodes: dict[bytes, bytes] = dict(local_nodes)
-        nodes[prev_root_hash] = root_bytes
+        # Start with only the root node from the local cache (not all accumulated nodes).
+        # The retry loop below will fetch any missing child nodes via SQL/mdbx.
+        nodes: dict[bytes, bytes] = {prev_root_hash: root_bytes}
+        # Add any root nodes from the local cache (needed for the retry loop)
+        for node_hash, node_bytes in local_nodes.items():
+            if node_hash not in nodes:
+                nodes[node_hash] = node_bytes
 
         # Mirrors _lookup_state_hamt_from_postgres_txn's retry loop: each
         # round trip surfaces one more tree level's worth of missing
@@ -1316,7 +1321,14 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     local_roots=local_roots,
                 )
                 hamt_writes.append((sg_after, root_hash, lattice, nodes))
-                local_nodes.update(nodes)
+                # Only keep the root node in the local cache for the next iteration.
+                # Child nodes are fetched via SQL/mdbx in the retry loop if needed.
+                local_nodes.clear()
+                # nodes is a list of (hash, bytes) tuples; find the root node entry
+                for node_hash, node_bytes in nodes:
+                    if node_hash == root_hash:
+                        local_nodes[root_hash] = node_bytes
+                        break
                 local_roots[sg_after] = (root_hash, lattice)
                 sg_before = sg_after
 
