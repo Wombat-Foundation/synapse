@@ -153,8 +153,16 @@ main() {
     export CONTAINER_RUNTIME=docker
   fi
 
-  # Change to the repository root
+  # Change to the repository root. Resolve it once, here, to an absolute
+  # path and reuse that below -- $0 is never re-anchored after this cd, so
+  # re-deriving "$(dirname "$0")/.." again later (once CWD has already
+  # moved here) resolves relative to the new CWD instead of the original
+  # invocation directory, producing a doubled/invalid path (this is what
+  # broke `realpath: synapse/scripts-dev/..: No such file or directory` in
+  # CI, where complement.sh is invoked as `synapse/scripts-dev/complement.sh`
+  # from a parent directory).
   cd "$(dirname $0)/.."
+  repo_root="$(pwd)"
 
   # Check for a user-specified Complement checkout
   if [[ -z "$COMPLEMENT_DIR" ]]; then
@@ -448,7 +456,8 @@ main() {
   done
 
   # ── Staged result / log files (timestamped, never overwrite) ────────────────
-  repo_root="$(realpath "$(dirname "$0")/..")"
+  # repo_root was already resolved (once, correctly) right after the cd near
+  # the top of this function -- don't re-derive it from $0 here.
   results_dir="${RESULTS_DIR:-tests/complement}"
   main_results_file="${repo_root}/${results_dir}/results.jsonl"
   main_log_file="${repo_root}/${results_dir}/logs.jsonl"
