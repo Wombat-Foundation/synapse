@@ -33,7 +33,7 @@ import psycopg2.extras
 from synapse.synapse_rust import fjall_engine
 
 NODE_SIZE = 512
-CUMULATIVE_SIZES = (200_000, 2_000_000, 8_000_000)
+CUMULATIVE_SIZES = (200_000, 1_000_000, 1_500_000)
 READ_BATCH_SIZE = 100
 READ_ITERATIONS = 200
 COMMIT_BATCH_SIZE = 5  # typical single state-group publish
