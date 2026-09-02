@@ -126,11 +126,52 @@ def run_postgres() -> None:
     admin.close()
 
 
+def run_mdbx() -> None:
+    try:
+        import mdbx  # type: ignore[import-untyped]
+    except ImportError:
+        print("mdbx not installed; skipping mdbx benchmark")
+        return
+
+    tmpdir = tempfile.mkdtemp(prefix="hamt-mdbx-small-")
+    try:
+        env = mdbx.Env(
+            tmpdir, geometry=mdbx.Geometry(size_upper=10 * 1024 * 1024 * 1024)
+        )
+        rng = random.Random(0)
+        rows = rand_rows(rng, CORPUS_SIZE)
+
+        # Write rows in batch
+        txn = env.rw_transaction()
+        m = txn.open_map(None)
+        for h, v in rows:
+            m.put(txn, h, v)
+        txn.commit()
+
+        keys_pool = [h for h, _ in rows[:20000]]
+
+        def batch_fetch(keys: list[bytes]) -> None:
+            txn = env.ro_transaction()
+            m = txn.open_map(None)
+            for k in keys:
+                m.get(txn, k)
+            txn.abort()
+
+        for batch_size in BATCH_SIZES:
+            bench("mdbx", batch_size, batch_fetch, keys_pool)
+
+        env.close()
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def main() -> None:
     print(
         f"corpus: {CORPUS_SIZE:,} nodes x {NODE_SIZE}B, {ITERATIONS} iterations/case\n"
     )
     run_fjall()
+    print()
+    run_mdbx()
     print()
     run_postgres()
 
