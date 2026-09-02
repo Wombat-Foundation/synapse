@@ -639,6 +639,7 @@ main() {
 main "$@"
 
 # ── Run all patterns ──────────────────────────────────────────────────────────
+test_start_seconds=$SECONDS
 TEST_EXIT_CODE=0
 for _pattern in "${ALT_PATTERNS[@]}"; do
   set +e
@@ -686,13 +687,32 @@ if [ -f "$staged_log_file" ]; then
   echo "refreshed $main_log_file from staged log"
 fi
 
+_pass=$(grep -c '"pass"' "$staged_results_file" 2>/dev/null || echo 0)
+_fail=$(grep -c '"fail"' "$staged_results_file" 2>/dev/null || echo 0)
+_skip=$(grep -c '"skip"' "$staged_results_file" 2>/dev/null || echo 0)
+
 echo ""
+echo "RESULTS: ${_pass} pass / ${_fail} fail / ${_skip} skip"
+echo "TIME: $(printf '%d:%02d' $((test_duration_seconds / 60)) $((test_duration_seconds % 60))) min"
 echo ""
 echo "complement logs saved at $staged_log_file"
 echo "complement results staged at $staged_results_file"
 echo "complement results merged into $main_results_file"
 echo ""
-echo ""
+
+test_duration_seconds=$((SECONDS - test_start_seconds))
+
+if [ -z "${GITHUB_ACTIONS:-}" ]; then
+  echo "COMPLEMENT_DURATION_SECONDS=${test_duration_seconds}"
+fi
+if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+  {
+    echo "### Complement results"
+    echo "**${_pass}** pass / **${_fail}** fail / **${_skip}** skip"
+    echo ""
+    echo "Duration: \`${test_duration_seconds}s\` (in_repo=\`${use_in_repo_tests:-0}\`)"
+  } >> "$GITHUB_STEP_SUMMARY"
+fi
 
 if [ "$TEST_EXIT_CODE" -ne 0 ]; then
   exit "$TEST_EXIT_CODE"
