@@ -171,6 +171,31 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     Duration(minutes=5),
                 )
 
+        self.embedded_hamt_engine = hs.config.database.embedded_hamt_engine
+        self.embedded_hamt_path = hs.config.database.embedded_hamt_path
+        if self.embedded_hamt_engine and self.embedded_hamt_path:
+            try:
+                if self.embedded_hamt_engine == "mdbx":
+                    from synapse.synapse_rust import mdbx_engine
+
+                    mdbx_engine.open_client(self.embedded_hamt_path)
+                    logger.info(
+                        "Opened embedded mdbx engine at %s for state HAMT offload",
+                        self.embedded_hamt_path,
+                    )
+                elif self.embedded_hamt_engine == "fjall":
+                    from synapse.synapse_rust import fjall_engine
+
+                    fjall_engine.open_client(self.embedded_hamt_path)
+                    logger.info(
+                        "Opened embedded fjall engine at %s for state HAMT offload",
+                        self.embedded_hamt_path,
+                    )
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to open embedded {self.embedded_hamt_engine} engine at {self.embedded_hamt_path}"
+                ) from e
+
     @trace
     @tag_args
     @cancellable

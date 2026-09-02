@@ -86,6 +86,8 @@ class DatabaseConfig(Config):
         self.databases: list[DatabaseConnectionConfig] = []
         self.tikv_pd_endpoints: list[str] | None = None
         self.tikv_namespace: str | None = None
+        self.embedded_hamt_engine: str | None = None
+        self.embedded_hamt_path: str | None = None
 
     def read_config(self, config: JsonDict, **kwargs: Any) -> None:
         # We *experimentally* support specifying multiple databases via the
@@ -111,6 +113,18 @@ class DatabaseConfig(Config):
         if tikv_config:
             self.tikv_pd_endpoints = tikv_config.get("pd_endpoints")
             self.tikv_namespace = tikv_config.get("namespace")
+
+        embedded_config = config.get("embedded_hamt")
+        if embedded_config:
+            self.embedded_hamt_engine = embedded_config.get("engine")
+            self.embedded_hamt_path = embedded_config.get("path")
+
+        env_engine = os.environ.get("SYNAPSE_EMBEDDED_HAMT_ENGINE")
+        if env_engine:
+            self.embedded_hamt_engine = env_engine
+        env_path = os.environ.get("SYNAPSE_EMBEDDED_HAMT_PATH")
+        if env_path:
+            self.embedded_hamt_path = env_path
 
         if multi_database_config and database_config:
             raise ConfigError("Can't specify both 'database' and 'databases' in config")

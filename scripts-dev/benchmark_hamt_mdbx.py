@@ -17,7 +17,7 @@ import statistics
 import tempfile
 import time
 
-from synapse.synapse_rust import mdbx_engine  # type: ignore[attr-defined]
+from synapse.synapse_rust import mdbx_engine
 
 NODE_SIZE = 512
 CORPUS_SIZE = 2_000_000
