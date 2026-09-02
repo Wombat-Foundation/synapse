@@ -78,6 +78,7 @@ book/
 /complement-*
 /main.tar.gz
 tests/complement/*
+.cold-pg-bench/
 
 # rust
 /target/

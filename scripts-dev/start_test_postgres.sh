@@ -2,6 +2,10 @@
 #
 # Starts a throwaway PostgreSQL cluster tuned for Synapse's test suite
 # (`SYNAPSE_POSTGRES=1 trial ...`), running on RAM disk with durability disabled.
+# Set SYNAPSE_TEST_PG_STORAGE=disk and explicitly provide
+# SYNAPSE_TEST_PG_DATA=/path/to/a/throwaway/cluster for a disk-backed,
+# durable cluster (for example, a cold-read benchmark). The explicit path is
+# required because `stop` deletes the cluster directory.
 #
 # Every test method creates and drops its own database (see `tests/server.py`),
 # incurring thousands of `CREATE DATABASE ... WITH TEMPLATE ...` round-trips.
@@ -18,7 +22,16 @@
 
 set -euo pipefail
 
-PGDATA="${SYNAPSE_TEST_PG_DATA:-/dev/shm/synapse-test-postgres}"
+PG_STORAGE="${SYNAPSE_TEST_PG_STORAGE:-memory}"
+if [ "$PG_STORAGE" = "memory" ]; then
+	PGDATA="${SYNAPSE_TEST_PG_DATA:-/dev/shm/synapse-test-postgres}"
+elif [ "$PG_STORAGE" = "disk" ]; then
+	: "${SYNAPSE_TEST_PG_DATA:?SYNAPSE_TEST_PG_DATA must name a throwaway disk-backed cluster when SYNAPSE_TEST_PG_STORAGE=disk}"
+	PGDATA="$SYNAPSE_TEST_PG_DATA"
+else
+	echo "SYNAPSE_TEST_PG_STORAGE must be 'memory' or 'disk', got: $PG_STORAGE" >&2
+	exit 2
+fi
 PGPORT="${SYNAPSE_TEST_PG_PORT:-5433}"
 PGSOCKETDIR="/tmp/synapse-pgtest"
 LOGFILE="$PGDATA.log"
@@ -64,7 +77,7 @@ else
 	if [ -d "$PGDATA" ] && ! pg_ctl -D "$PGDATA" status >/dev/null 2>&1; then
 		rm -rf "$PGDATA"
 	fi
-	echo "# Initializing throwaway RAM-disk PostgreSQL cluster at $PGDATA..." >&2
+	echo "# Initializing throwaway $PG_STORAGE PostgreSQL cluster at $PGDATA..." >&2
 	mkdir -p "$PGDATA"
 	# -U postgres makes "postgres" the bootstrap superuser directly (matching
 	# what tests/server.py connects as) -- no separate `createuser` needed.
@@ -76,9 +89,17 @@ else
 	cat >>"$PGDATA/postgresql.conf" <<'EOF'
 
 # --- scripts-dev/start_test_postgres.sh: throwaway test cluster config ---
+EOF
+
+	if [ "$PG_STORAGE" = "memory" ]; then
+		cat >>"$PGDATA/postgresql.conf" <<'EOF'
 fsync = off
 synchronous_commit = off
 full_page_writes = off
+EOF
+	fi
+
+	cat >>"$PGDATA/postgresql.conf" <<'EOF'
 # Headroom for parallel trial workers (e.g. `trial --jobs=N`): each worker's
 # homeserver pool defaults to cp_max=5, plus setup/teardown connections
 # outside the pool.

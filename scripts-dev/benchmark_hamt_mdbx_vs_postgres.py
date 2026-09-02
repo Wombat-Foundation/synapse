@@ -28,6 +28,7 @@ import shutil
 import statistics
 import tempfile
 import time
+import uuid
 from typing import Callable
 
 import psycopg2
@@ -97,8 +98,8 @@ def run_mdbx() -> tuple[dict[int, tuple[float, float]], tuple[float, float]]:
         rng = random.Random(0)
         print(f"\n=== mdbx: corpus {CORPUS_SIZE:,} nodes x {NODE_SIZE}B ===")
 
-        start = time.perf_counter()
         rows = rand_rows(rng, CORPUS_SIZE)
+        start = time.perf_counter()
         mdbx_engine.batch_put(rows)
         elapsed = time.perf_counter() - start
         print(
@@ -121,70 +122,71 @@ def run_postgres() -> tuple[dict[int, tuple[float, float]], tuple[float, float]]
         )
     )
     user = os.environ.get("SYNAPSE_POSTGRES_USER", "postgres")
+    db_name = f"hamt_bench_{uuid.uuid4().hex[:8]}"
     admin = psycopg2.connect(host=host, port=port, user=user, dbname="postgres")
     admin.autocommit = True
-    admin.cursor().execute("DROP DATABASE IF EXISTS hamt_bench")
-    admin.cursor().execute("CREATE DATABASE hamt_bench")
+    admin.cursor().execute(f"CREATE DATABASE {db_name}")
     admin.close()
 
-    conn = psycopg2.connect(host=host, port=port, user=user, dbname="hamt_bench")
-    conn.autocommit = True
+    conn = psycopg2.connect(host=host, port=port, user=user, dbname=db_name)
     cur = conn.cursor()
-    cur.execute(
-        "CREATE TABLE state_hamt_nodes (structural_hash BYTEA PRIMARY KEY, node_bytes BYTEA NOT NULL)"
-    )
-
-    rng = random.Random(0)
-    print(f"\n=== postgres: corpus {CORPUS_SIZE:,} nodes x {NODE_SIZE}B ===")
-    rows = rand_rows(rng, CORPUS_SIZE)
-    start = time.perf_counter()
-    # execute_values pages internally (page_size=1000) via separate
-    # cur.execute() calls; under autocommit=True each of those pages is its
-    # own implicit transaction/commit -- 2,000 commits for a 2M-row corpus,
-    # vs. mdbx's batch_put doing the whole corpus in a single transaction.
-    # Wrap the whole bulk-load in one explicit transaction so the comparison
-    # is apples-to-apples (one commit each), not penalizing postgres with
-    # per-page commit overhead that mdbx's side doesn't pay either.
-    conn.autocommit = False
-    psycopg2.extras.execute_values(
-        cur,
-        "INSERT INTO state_hamt_nodes (structural_hash, node_bytes) VALUES %s",
-        [(psycopg2.Binary(h), psycopg2.Binary(v)) for h, v in rows],
-        page_size=1000,
-    )
-    conn.commit()
-    conn.autocommit = True
-    elapsed = time.perf_counter() - start
-    print(
-        f"postgres bulk-load {CORPUS_SIZE:,} rows in {elapsed:6.2f}s ({CORPUS_SIZE / elapsed:,.0f} rows/s)"
-    )
-
-    keys_pool = [h for h, _ in rows[:20000]]
-
-    def batch_fetch(keys: list[bytes]) -> None:
+    try:
+        conn.autocommit = True
         cur.execute(
-            "SELECT structural_hash, node_bytes FROM state_hamt_nodes WHERE structural_hash = ANY(%s)",
-            ([psycopg2.Binary(k) for k in keys],),
+            "CREATE TABLE state_hamt_nodes (structural_hash BYTEA PRIMARY KEY, node_bytes BYTEA NOT NULL)"
         )
-        cur.fetchall()
 
-    def commit_write(rows: list[tuple[bytes, bytes]]) -> None:
+        rng = random.Random(0)
+        print(f"\n=== postgres: corpus {CORPUS_SIZE:,} nodes x {NODE_SIZE}B ===")
+        rows = rand_rows(rng, CORPUS_SIZE)
+        start = time.perf_counter()
+        # execute_values pages internally (page_size=1000) via separate
+        # cur.execute() calls; under autocommit=True each of those pages is its
+        # own implicit transaction/commit -- 2,000 commits for a 2M-row corpus,
+        # vs. mdbx's batch_put doing the whole corpus in a single transaction.
+        # Wrap the whole bulk-load in one explicit transaction so the comparison
+        # is apples-to-apples (one commit each), not penalizing postgres with
+        # per-page commit overhead that mdbx's side doesn't pay either.
+        conn.autocommit = False
         psycopg2.extras.execute_values(
             cur,
             "INSERT INTO state_hamt_nodes (structural_hash, node_bytes) VALUES %s",
             [(psycopg2.Binary(h), psycopg2.Binary(v)) for h, v in rows],
+            page_size=1000,
+        )
+        conn.commit()
+        conn.autocommit = True
+        elapsed = time.perf_counter() - start
+        print(
+            f"postgres bulk-load {CORPUS_SIZE:,} rows in {elapsed:6.2f}s ({CORPUS_SIZE / elapsed:,.0f} rows/s)"
         )
 
-    reads = bench_reads("postgres", batch_fetch, keys_pool)
-    commit = bench_commit("postgres", commit_write, rng)
+        keys_pool = [h for h, _ in rows[:20000]]
 
-    cur.close()
-    conn.close()
-    admin = psycopg2.connect(host=host, port=port, user=user, dbname="postgres")
-    admin.autocommit = True
-    admin.cursor().execute("DROP DATABASE IF EXISTS hamt_bench")
-    admin.close()
-    return reads, commit
+        def batch_fetch(keys: list[bytes]) -> None:
+            cur.execute(
+                "SELECT structural_hash, node_bytes FROM state_hamt_nodes WHERE structural_hash = ANY(%s)",
+                ([psycopg2.Binary(k) for k in keys],),
+            )
+            cur.fetchall()
+
+        def commit_write(rows: list[tuple[bytes, bytes]]) -> None:
+            psycopg2.extras.execute_values(
+                cur,
+                "INSERT INTO state_hamt_nodes (structural_hash, node_bytes) VALUES %s",
+                [(psycopg2.Binary(h), psycopg2.Binary(v)) for h, v in rows],
+            )
+
+        reads = bench_reads("postgres", batch_fetch, keys_pool)
+        commit = bench_commit("postgres", commit_write, rng)
+        return reads, commit
+    finally:
+        cur.close()
+        conn.close()
+        admin = psycopg2.connect(host=host, port=port, user=user, dbname="postgres")
+        admin.autocommit = True
+        admin.cursor().execute(f"DROP DATABASE IF EXISTS {db_name}")
+        admin.close()
 
 
 def main() -> None:

@@ -240,12 +240,13 @@ figure as if it were measured; it wasn't (there is no bridge implementation
 anywhere in this repo's history, reachable or not). That figure has been removed
 rather than re-estimated.
 
-### Benchmark Summary (2,000,000 nodes, 512 bytes/node)
+### Warm-cache benchmark summary (2,000,000 nodes, 512 bytes/node)
 
 Re-run from scratch on `scripts-dev/benchmark_hamt_mdbx_vs_postgres.py` (mdbx
 and postgres are both still live in the tree and directly reproducible; fjall's
 crate/bindings were fully removed in `ab59dd8ba6`, so it can no longer be
-benchmarked and is omitted below rather than left stale):
+benchmarked -- its figures below are unverified historical data rather than
+newly measured results):
 
 ```text
 =====================================================================================
@@ -318,7 +319,7 @@ so the measured effect was within noise here -- but the asymmetry was real and
 would matter on a durable (non-RAM-disk) postgres instance, so it's fixed in the
 script regardless of whether it moved these specific numbers.
 
-### `event_json` benchmark (mixed-size payloads, realistic event ids)
+### Warm-cache `event_json` benchmark (mixed-size payloads, realistic event ids)
 
 Same conclusion, separately validated against the actual `event_json` access
 pattern (event-id keys, 65/25/10% small/medium/large JSON size mix, not the HAMT
@@ -360,9 +361,10 @@ often tmpfs and would invalidate an I/O-cold test.
 A small, illustrative run on this development host's on-disk ext4 filesystem
 (10,000 512-byte values; 5 samples) reported:
 
-```text
-p50=22,686.3 us  p95=40,778.1 us  p99=40,778.1 us  max=40,778.1 us
-```
+| Engine     | Corpus / value size |     p50 |     p95 |     p99 | Status                                                |
+| ---------- | ------------------- | ------: | ------: | ------: | ----------------------------------------------------- |
+| MDBX       | 10,000 / 512 bytes  | 22.7 ms | 40.8 ms | 40.8 ms | Evicted-page sample; not a strict device-cold result. |
+| PostgreSQL | 10,000 / 512 bytes  | 14.1 ms | 61.1 ms | 61.1 ms | Dedicated disk cluster restarted between samples.     |
 
 This is an **evicted-page** result, not a perfectly device-cold guarantee:
 `POSIX_FADV_DONTNEED` is advisory, and the result depends strongly on the
@@ -375,18 +377,45 @@ python3 scripts-dev/benchmark_mdbx_cold_reads.py \
   --rows 2000000 --samples 200 --value-size 512 --workdir /path/on/target-disk
 ```
 
-There is currently **no apples-to-apples cold PostgreSQL number**. The
-`start_test_postgres.sh` instance used by the warm comparison stores `PGDATA` on
-tmpfs and disables durability, so it cannot measure storage misses. A fair
-PostgreSQL comparison needs a disk-backed cluster, a restart (or equivalent) to
-clear PostgreSQL `shared_buffers`, and eviction of the benchmark relation and
-its indexes from the OS cache before each measured lookup. Until that benchmark
-exists, do not infer an MDBX-vs-Postgres cold-read winner from the warm tables
-or the MDBX-only result above.
+The two rows above are the first apples-to-apples cold sample, not a general
+winner declaration: the sample is too small to resolve tail latency and cold I/O
+varies sharply by storage device, filesystem, data size, and B-tree locality. On
+this host PostgreSQL had the lower p50, while MDBX had the lower p95. Re-run
+both harnesses with a larger corpus and sample count before making a product
+decision.
+
+The normal `start_test_postgres.sh` instance used by the warm comparison stores
+`PGDATA` on tmpfs and disables durability, so it cannot measure storage misses.
+A fair PostgreSQL comparison uses a disk-backed cluster, restarts it to clear
+PostgreSQL `shared_buffers`, and evicts its dedicated cluster files before each
+measured lookup. `scripts-dev/benchmark_postgres_cold_reads.py` implements that
+procedure; it stops and restarts the dedicated cluster between samples.
+
+`scripts-dev/start_test_postgres.sh` now supports the required cluster mode; the
+directory is deliberately mandatory because the `stop` action removes it:
+
+```sh
+SYNAPSE_TEST_PG_STORAGE=disk \
+SYNAPSE_TEST_PG_DATA=/path/on/target-disk/throwaway-postgres \
+scripts-dev/start_test_postgres.sh
+```
+
+This disables the launcher's tmpfs placement and its `fsync = off`,
+`synchronous_commit = off`, and `full_page_writes = off` test overrides. It does
+not by itself make an already-read relation cold; the restart and targeted
+page-cache eviction in `benchmark_postgres_cold_reads.py` remain part of the
+benchmark procedure. Run it with the matching cluster path and port, for
+example:
+
+```sh
+python3 scripts-dev/benchmark_postgres_cold_reads.py \
+  --pgdata /path/on/target-disk/throwaway-postgres --port 5443 \
+  --rows 2000000 --samples 200 --value-size 512
+```
 
 ### Key Architectural Advantages of `libmdbx`:
 
-1. **Direct Zero-Copy `mmap` Read Latency (~2.1us at batch=1)**:
+1. **Direct Zero-Copy `mmap` Read Latency (~6.5us at batch=1)**:
    - Values are returned directly as borrowed `&[u8]` pointers in OS page cache
      without memory allocations, deserialization wrappers, or IPC overhead.
 2. **Zero RPC Daemon / Zero Bridge Complexity**:
