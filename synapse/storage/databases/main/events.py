@@ -278,6 +278,8 @@ class PersistEventsStore:
         self._ephemeral_messages_enabled = hs.config.server.enable_ephemeral_messages
         self.is_mine_id = hs.is_mine_id
 
+        self._embedded_event_json_enabled = open_embedded_event_json_engine(hs)
+
         # This should only exist on instances that are configured to write
         assert hs.get_instance_name() in hs.config.worker.writers.events, (
             "Can only instantiate EventsStore on master"
@@ -2870,7 +2872,7 @@ class PersistEventsStore:
         # the highest-disk-usage, highest-cache-miss table in a busy
         # homeserver (see scripts-dev/benchmark_event_json_storage.py);
         # Postgres stays authoritative, this is a read fast path.
-        if open_embedded_event_json_engine(self.hs):
+        if self._embedded_event_json_enabled:
             put_event_json_batch(
                 [
                     (event_id, internal_metadata, json, format_version)
