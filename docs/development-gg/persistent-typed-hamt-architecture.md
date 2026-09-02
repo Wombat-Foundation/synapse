@@ -248,24 +248,30 @@ crate/bindings were fully removed in `ab59dd8ba6`, so it can no longer be
 benchmarked and is omitted below rather than left stale):
 
 ```text
-============================================================
-Batch Size    libmdbx (direct mmap)    postgres    speedup
-------------------------------------------------------------
-batch = 1          2.1 us                65.7 us     30.9x
-batch = 5         10.2 us               134.9 us     13.2x
-batch = 10        18.9 us               186.0 us      9.8x
-commit (batch=5)  70.1 us               141.6 us      2.0x
-============================================================
+=====================================================================================
+Batch Size    fjall (in-process)    libmdbx (direct mmap)    postgres    speedup*
+-------------------------------------------------------------------------------------
+batch = 1          14.2 us               2.1 us                65.7 us     30.9x
+batch = 5          79.0 us              10.2 us               134.9 us     13.2x
+batch = 10         77.5 us              18.9 us               186.0 us      9.8x
+commit (batch=5)      n/a               70.1 us               141.6 us      2.0x
+bulk-load rows/s      n/a             43,612 (see below)      58,202        --
+=====================================================================================
+* mdbx vs postgres, the two columns re-run together (see below); fjall's
+  numbers are historical only.
 ```
 
-(p50 latencies; see the script for p99 and full methodology. Reproduce with:
-`eval "$(scripts-dev/start_test_postgres.sh)"; python3 scripts-dev/benchmark_hamt_mdbx_vs_postgres.py`.)
+(p50 latencies; see the script for p99 and full methodology. mdbx and postgres
+are reproducible: `eval "$(scripts-dev/start_test_postgres.sh)"; python3
+scripts-dev/benchmark_hamt_mdbx_vs_postgres.py`.)
 
-For reference, fjall's own numbers before removal (from the now-deleted
-`benchmark_hamt_storage_engines.py`, not reproducible today): batch=1 14.2us,
-batch=5 79.0us, batch=10 77.5us -- already slower than mdbx in-process, before
-accounting for the bridge a multi-process deployment would have additionally
-required.
+fjall's read numbers are real (from the now-deleted `benchmark_hamt_storage_engines.py`,
+run before `ab59dd8ba6` removed the crate/bindings) -- already slower than mdbx
+in-process, before accounting for the bridge a multi-process deployment would
+have additionally required (never built, see above). Its bulk-load throughput
+and commit latency were never recorded anywhere in this repo's history (checked
+commit messages and every doc revision) and can no longer be measured now that
+the crate is gone -- marked `n/a` rather than guessed.
 
 ### Bulk-load throughput fix (`73283299ed`)
 
