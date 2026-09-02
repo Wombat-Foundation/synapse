@@ -70,6 +70,11 @@ from synapse.storage.databases.main.embedded_event_json import (
     open_embedded_event_json_engine,
     put_event_json_batch,
 )
+from synapse.storage.databases.main.embedded_event_to_state_group import (
+    get_state_group_for_events_batch,
+    increment_state_group_refcounts_batch,
+    put_event_to_state_group_batch,
+)
 from synapse.storage.databases.main.event_federation import EventFederationStore
 from synapse.storage.databases.main.events_worker import EventCacheEntry
 from synapse.storage.databases.main.search import SearchEntry
@@ -279,6 +284,9 @@ class PersistEventsStore:
         self.is_mine_id = hs.is_mine_id
 
         self._embedded_event_json_enabled = open_embedded_event_json_engine(hs)
+        self._embedded_hamt_namespace = (
+            hs.config.database.embedded_hamt_namespace or hs.hostname
+        )
 
         # This should only exist on instances that are configured to write
         assert hs.get_instance_name() in hs.config.worker.writers.events, (
@@ -3738,16 +3746,47 @@ class PersistEventsStore:
             )
             raise PartialStateConflictError()
 
-        self.db_pool.simple_upsert_many_txn(
-            txn,
-            table="event_to_state_groups",
-            key_names=["event_id"],
-            key_values=[[event_id] for event_id, _ in state_groups.items()],
-            value_names=["state_group"],
-            value_values=[
-                [state_group_id] for _, state_group_id in state_groups.items()
-            ],
-        )
+        if getattr(self, "_embedded_event_json_enabled", False):
+            # Exclusive by configured engine, not a dual-write -- see
+            # embedded_event_to_state_group.py. This is an upsert (a retried
+            # transaction can re-persist an event already in
+            # event_to_state_groups), so the refcount -- which must only
+            # count each event once -- needs to know which of these
+            # event_ids are genuinely new before deciding what to
+            # increment.
+            existing = get_state_group_for_events_batch(
+                self._embedded_hamt_namespace, list(state_groups.keys())
+            )
+            new_event_ids = [
+                event_id for event_id in state_groups if event_id not in existing
+            ]
+            non_null_state_groups: dict[str, int] = {
+                event_id: state_group_id
+                for event_id, state_group_id in state_groups.items()
+                if state_group_id is not None
+            }
+            put_event_to_state_group_batch(
+                self._embedded_hamt_namespace, list(non_null_state_groups.items())
+            )
+            increment_state_group_refcounts_batch(
+                self._embedded_hamt_namespace,
+                [
+                    non_null_state_groups[event_id]
+                    for event_id in new_event_ids
+                    if event_id in non_null_state_groups
+                ]
+            )
+        else:
+            self.db_pool.simple_upsert_many_txn(
+                txn,
+                table="event_to_state_groups",
+                key_names=["event_id"],
+                key_values=[[event_id] for event_id, _ in state_groups.items()],
+                value_names=["state_group"],
+                value_values=[
+                    [state_group_id] for _, state_group_id in state_groups.items()
+                ],
+            )
 
         for event_id, state_group_id in state_groups.items():
             txn.call_after(

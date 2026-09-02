@@ -47,6 +47,11 @@ from synapse.storage.database import (
 )
 from synapse.storage.databases.main.cache import CacheInvalidationWorkerStore
 from synapse.storage.databases.main.embedded_event_json import put_event_json_batch
+from synapse.storage.databases.main.embedded_event_to_state_group import (
+    get_state_group_for_events_batch,
+    increment_state_group_refcounts_batch,
+    put_event_to_state_group_batch,
+)
 from synapse.storage.databases.main.events import (
     SLIDING_SYNC_RELEVANT_STATE_SET,
     PersistEventsStore,
@@ -125,6 +130,10 @@ class _JoinedRoomStreamOrderingUpdate:
 class EventsBackgroundUpdatesStore(
     StreamWorkerStore, StateDeltasStore, CacheInvalidationWorkerStore, SQLBaseStore
 ):
+    EMBEDDED_EVENT_TO_STATE_GROUP_MIGRATION_UPDATE_NAME = (
+        "event_to_state_group_embedded_migration"
+    )
+
     def __init__(
         self,
         database: DatabasePool,
@@ -227,6 +236,17 @@ class EventsBackgroundUpdatesStore(
             "event_arbitrary_relations",
             self._event_arbitrary_relations,
         )
+
+        if hs.config.database.embedded_hamt_engine == "mdbx":
+            self.db_pool.updates.register_background_update_handler(
+                self.EMBEDDED_EVENT_TO_STATE_GROUP_MIGRATION_UPDATE_NAME,
+                self._background_migrate_event_to_state_groups_to_embedded,
+            )
+            if hs.config.worker.run_background_tasks:
+                hs.run_as_background_process(
+                    "enqueue_event_to_state_group_embedded_migration",
+                    self._enqueue_event_to_state_group_embedded_migration_if_needed,
+                )
 
         ################################################################################
 
@@ -374,6 +394,104 @@ class EventsBackgroundUpdatesStore(
             _resolve_stale_data_in_sliding_sync_tables(
                 txn=txn,
             )
+
+    async def _enqueue_event_to_state_group_embedded_migration_if_needed(
+        self,
+    ) -> None:
+        """Turning on the embedded engine doesn't retroactively move
+        existing `event_to_state_groups` SQL rows into it -- new writes go
+        exclusively to whichever engine is configured (see
+        `_store_event_state_mappings_txn` in events.py), but old data
+        written before the switch stays SQL-only until this migration
+        copies it over (and rebuilds the reference-count companion
+        `embedded_event_to_state_group.py` needs, since that never existed
+        in SQL at all).
+
+        See `_enqueue_embedded_hamt_migration_if_needed`
+        (storage/databases/state/store.py) for why this can't just check
+        `has_completed_background_update` -- the same `_all_done` fast-path
+        problem applies here.
+        """
+        await self.db_pool.simple_upsert(
+            table="background_updates",
+            keyvalues={
+                "update_name": self.EMBEDDED_EVENT_TO_STATE_GROUP_MIGRATION_UPDATE_NAME
+            },
+            values={},
+            insertion_values={"progress_json": "{}"},
+            desc="enqueue_event_to_state_group_embedded_migration",
+        )
+        self.db_pool.updates.start_doing_background_updates()
+
+    async def _background_migrate_event_to_state_groups_to_embedded(
+        self, progress: JsonDict, batch_size: int
+    ) -> int:
+        """Copy existing SQL `event_to_state_groups` rows into the embedded
+        engine, and rebuild the per-state-group reference count
+        (`embedded_event_to_state_group.py`'s
+        `increment_state_group_refcounts_batch`) that backs
+        `get_referenced_state_groups` once this table is embedded-exclusive
+        -- for data written before `embedded_hamt_engine` was turned on.
+        New writes never need this; they already go straight to the
+        configured engine exclusively.
+
+        Existing SQL rows are left in place rather than deleted: harmless
+        once migrated, and means turning the embedded engine back off
+        doesn't lose data (see the equivalent HAMT migration's docstring
+        for the same reasoning).
+        """
+        last_event_id = progress.get("last_event_id", "")
+
+        def get_batch_txn(txn: LoggingTransaction) -> list[tuple[str, int]]:
+            txn.execute(
+                """
+                SELECT event_id, state_group FROM event_to_state_groups
+                WHERE event_id > ?
+                ORDER BY event_id
+                LIMIT ?
+                """,
+                (last_event_id, batch_size),
+            )
+            return cast(list[tuple[str, int]], txn.fetchall())
+
+        rows = await self.db_pool.runInteraction(
+            f"{self.EMBEDDED_EVENT_TO_STATE_GROUP_MIGRATION_UPDATE_NAME}_select",
+            get_batch_txn,
+        )
+
+        if not rows:
+            await self.db_pool.updates._end_background_update(
+                self.EMBEDDED_EVENT_TO_STATE_GROUP_MIGRATION_UPDATE_NAME
+            )
+            return 0
+
+        # The mdbx put below is idempotent (an overwrite), but the refcount
+        # increment is not: if this batch is reprocessed after a crash
+        # between the writes here and the progress update below, an
+        # unguarded increment would double-count every event already
+        # migrated last time. Only increment for event_ids this batch
+        # hasn't already written to mdbx.
+        already_migrated = get_state_group_for_events_batch(
+            self._embedded_hamt_namespace,
+            [event_id for event_id, _state_group in rows],
+        )
+        new_rows = [
+            (event_id, state_group)
+            for event_id, state_group in rows
+            if event_id not in already_migrated
+        ]
+        put_event_to_state_group_batch(self._embedded_hamt_namespace, rows)
+        increment_state_group_refcounts_batch(
+            self._embedded_hamt_namespace,
+            [state_group for _event_id, state_group in new_rows],
+        )
+
+        await self.db_pool.updates._background_update_progress(
+            self.EMBEDDED_EVENT_TO_STATE_GROUP_MIGRATION_UPDATE_NAME,
+            {"last_event_id": rows[-1][0]},
+        )
+
+        return len(rows)
 
     async def _background_reindex_fields_sender(
         self, progress: JsonDict, batch_size: int

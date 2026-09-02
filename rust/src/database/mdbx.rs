@@ -151,6 +151,45 @@ pub fn batch_put(py: Python<'_>, mut pairs: Vec<(Vec<u8>, Vec<u8>)>) -> PyResult
     })
 }
 
+/// Atomically applies `delta` to each key's big-endian i64 counter value (a
+/// missing key starts from 0), all within one held write transaction, and
+/// returns the resulting values in the same order as `pairs`. Unlike
+/// `batch_put`, a plain read-then-write from Python would race a concurrent
+/// caller incrementing the same key between the read and the write and lose
+/// an update -- doing the read-modify-write here, inside the single rw_txn
+/// this module already serializes via `WRITE_LOCK`, is what makes this safe
+/// against that.
+#[pyfunction]
+pub fn increment_counters_batch(py: Python<'_>, pairs: Vec<(Vec<u8>, i64)>) -> PyResult<Vec<i64>> {
+    py.detach(|| {
+        let _guard = WRITE_LOCK.lock().unwrap();
+        let database = db()?;
+        let txn = database.begin_rw_txn().map_err(map_mdbx_err)?;
+        let table: Table = txn.open_table(None).map_err(map_mdbx_err)?;
+        let mut results = Vec::with_capacity(pairs.len());
+        for (key, delta) in &pairs {
+            let existing: Option<Vec<u8>> = txn.get(&table, key).map_err(map_mdbx_err)?;
+            let current = match existing {
+                Some(bytes) => {
+                    let arr: [u8; 8] = bytes.as_slice().try_into().map_err(|_| {
+                        pyo3::exceptions::PyRuntimeError::new_err(
+                            "invalid counter record (expected 8 bytes)",
+                        )
+                    })?;
+                    i64::from_be_bytes(arr)
+                }
+                None => 0,
+            };
+            let new_value = current + delta;
+            txn.put(&table, key, new_value.to_be_bytes(), WriteFlags::UPSERT)
+                .map_err(map_mdbx_err)?;
+            results.push(new_value);
+        }
+        txn.commit().map_err(map_mdbx_err)?;
+        Ok(results)
+    })
+}
+
 /// Same as batch_put -- there is no separate optimistic-retry path needed
 /// here (unlike the old TiKV engine): mdbx's single-writer-per-txn commit
 /// already serializes concurrent writers at the mmap/file-lock level.
@@ -411,6 +450,7 @@ pub fn register_module(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult
     child.add_function(wrap_pyfunction!(transactional_batch_put, &child)?)?;
     child.add_function(wrap_pyfunction!(delete, &child)?)?;
     child.add_function(wrap_pyfunction!(batch_delete, &child)?)?;
+    child.add_function(wrap_pyfunction!(increment_counters_batch, &child)?)?;
     child.add_function(wrap_pyfunction!(scan_prefix, &child)?)?;
     child.add_function(wrap_pyfunction!(put_state_hamt_nodes, &child)?)?;
     child.add_function(wrap_pyfunction!(batch_get_state_hamt_roots, &child)?)?;
@@ -453,6 +493,38 @@ mod tests {
         let table: Table = txn.open_table(None).unwrap();
         let v: Option<Vec<u8>> = txn.get(&table, b"mdbx:test:roundtrip").unwrap();
         assert_eq!(v, Some(b"hello".to_vec()));
+    }
+
+    /// Exercises the same read-modify-write logic `increment_counters_batch`
+    /// runs inside its held rw_txn, directly (bypassing the pyfunction
+    /// wrapper, matching this module's other tests). Covers: starting from
+    /// missing (0), repeated increments accumulating, and a negative delta
+    /// (decrement) working the same way.
+    #[test]
+    fn counter_increment_accumulates_and_starts_from_zero() {
+        ensure_open();
+        let database = DB.get().unwrap();
+        let key = b"mdbx:test:counter:accumulates";
+
+        let apply = |delta: i64| -> i64 {
+            let txn = database.begin_rw_txn().unwrap();
+            let table: Table = txn.open_table(None).unwrap();
+            let existing: Option<Vec<u8>> = txn.get(&table, key).unwrap();
+            let current = existing
+                .map(|bytes| i64::from_be_bytes(bytes.as_slice().try_into().unwrap()))
+                .unwrap_or(0);
+            let new_value = current + delta;
+            txn.put(&table, key, new_value.to_be_bytes(), WriteFlags::UPSERT)
+                .unwrap();
+            txn.commit().unwrap();
+            new_value
+        };
+
+        assert_eq!(apply(1), 1);
+        assert_eq!(apply(1), 2);
+        assert_eq!(apply(3), 5);
+        assert_eq!(apply(-2), 3);
+        assert_eq!(apply(-3), 0);
     }
 
     /// End-to-end: build a real HAMT via `build_root_handle_and_nodes`,

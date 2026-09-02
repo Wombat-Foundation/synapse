@@ -241,6 +241,15 @@ class EventsWorkerStore(SQLBaseStore):
         super().__init__(database, db_conn, hs)
 
         self._embedded_event_json_enabled = open_embedded_event_json_engine(hs)
+        # Namespaces event_to_state_group/refcount keys in the embedded
+        # engine -- see embedded_event_to_state_group.py's module docstring.
+        # Independent from (but must agree with) the state datastore's own
+        # hamt_namespace property: both default to the server name unless
+        # embedded_hamt.namespace is set in config, so they naturally agree
+        # without needing to share an instance.
+        self._embedded_hamt_namespace = (
+            hs.config.database.embedded_hamt_namespace or hs.hostname
+        )
 
         self._stream_id_gen: MultiWriterIdGenerator
         self._backfill_id_gen: MultiWriterIdGenerator

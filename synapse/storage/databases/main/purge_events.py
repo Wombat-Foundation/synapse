@@ -26,6 +26,11 @@ from synapse.api.errors import SynapseError
 from synapse.storage.database import LoggingTransaction
 from synapse.storage.databases.main import CacheInvalidationWorkerStore
 from synapse.storage.databases.main.embedded_event_json import delete_event_json_batch
+from synapse.storage.databases.main.embedded_event_to_state_group import (
+    decrement_state_group_refcounts_batch,
+    delete_event_to_state_group_batch,
+    get_state_group_for_events_batch,
+)
 from synapse.storage.databases.main.state import StateGroupWorkerStore
 from synapse.storage.engines import PostgresEngine
 from synapse.storage.engines._base import IsolationLevel
@@ -287,25 +292,51 @@ class PurgeEventsStore(StateGroupWorkerStore, CacheInvalidationWorkerStore):
 
         logger.info("[purge] finding state groups referenced by deleted events")
 
-        # Get all state groups that are referenced by events that are to be
-        # deleted.
-        txn.execute(
+        if getattr(self, "_embedded_event_json_enabled", False):
+            # Exclusive by configured engine, not a dual-write -- see
+            # embedded_event_to_state_group.py. This is the *forward*
+            # lookup (event_id -> state_group) for exactly the event_ids in
+            # this purge batch's temp table, which mdbx answers directly;
+            # it is not the reverse "is state_group X still referenced
+            # elsewhere" question (that's get_referenced_state_groups,
+            # backed by the separate refcount).
+            all_purge_event_ids = [event_id for event_id, _should_delete in event_rows]
+            event_id_to_state_group = get_state_group_for_events_batch(
+                self._embedded_hamt_namespace, all_purge_event_ids
+            )
+            referenced_state_groups = set(event_id_to_state_group.values())
+            logger.info(
+                "[purge] found %i referenced state groups", len(referenced_state_groups)
+            )
+
+            logger.info("[purge] removing events from event_to_state_groups")
+            delete_event_to_state_group_batch(
+                self._embedded_hamt_namespace, list(event_id_to_state_group.keys())
+            )
+            decrement_state_group_refcounts_batch(
+                self._embedded_hamt_namespace,
+                list(event_id_to_state_group.values()),
+            )
+        else:
+            # Get all state groups that are referenced by events that are to be
+            # deleted.
+            txn.execute(
+                """
+                SELECT DISTINCT state_group FROM events_to_purge
+                INNER JOIN event_to_state_groups USING (event_id)
             """
-            SELECT DISTINCT state_group FROM events_to_purge
-            INNER JOIN event_to_state_groups USING (event_id)
-        """
-        )
+            )
 
-        referenced_state_groups = {sg for (sg,) in txn}
-        logger.info(
-            "[purge] found %i referenced state groups", len(referenced_state_groups)
-        )
+            referenced_state_groups = {sg for (sg,) in txn}
+            logger.info(
+                "[purge] found %i referenced state groups", len(referenced_state_groups)
+            )
 
-        logger.info("[purge] removing events from event_to_state_groups")
-        txn.execute(
-            "DELETE FROM event_to_state_groups "
-            "WHERE event_id IN (SELECT event_id from events_to_purge)"
-        )
+            logger.info("[purge] removing events from event_to_state_groups")
+            txn.execute(
+                "DELETE FROM event_to_state_groups "
+                "WHERE event_id IN (SELECT event_id from events_to_purge)"
+            )
 
         # Delete all remote non-state events
         for table in (
@@ -577,6 +608,18 @@ class PurgeEventsStore(StateGroupWorkerStore, CacheInvalidationWorkerStore):
         # SQL, the embedded mirror needs its own delete pass.
         if room_event_ids:
             delete_event_json_batch(room_event_ids)
+            # Same for event_to_state_groups: fetch state_groups before
+            # deleting so the refcount can be rebalanced.
+            event_id_to_state_group = get_state_group_for_events_batch(
+                self._embedded_hamt_namespace, room_event_ids
+            )
+            delete_event_to_state_group_batch(
+                self._embedded_hamt_namespace, list(event_id_to_state_group.keys())
+            )
+            decrement_state_group_refcounts_batch(
+                self._embedded_hamt_namespace,
+                list(event_id_to_state_group.values()),
+            )
 
         # Other tables we do NOT need to clear out:
         #
