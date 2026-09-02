@@ -68,21 +68,22 @@ LEAVE_DB = os.environ.get("SYNAPSE_LEAVE_DB", False)
 FAST_PG_SOCKET_DIR = "/tmp/synapse-pgtest"
 FAST_PG_PORT = 5433
 HAS_FAST_PG = os.path.exists(f"{FAST_PG_SOCKET_DIR}/.s.PGSQL.{FAST_PG_PORT}")
+USE_FAST_PG = HAS_FAST_PG and "SYNAPSE_POSTGRES_HOST" not in os.environ
 
 POSTGRES_USER = os.environ.get(
-    "SYNAPSE_POSTGRES_USER", "postgres" if HAS_FAST_PG else None
+    "SYNAPSE_POSTGRES_USER", "postgres" if USE_FAST_PG else None
 )
 POSTGRES_HOST = os.environ.get(
-    "SYNAPSE_POSTGRES_HOST", FAST_PG_SOCKET_DIR if HAS_FAST_PG else None
+    "SYNAPSE_POSTGRES_HOST", FAST_PG_SOCKET_DIR if USE_FAST_PG else None
 )
 POSTGRES_PASSWORD = os.environ.get("SYNAPSE_POSTGRES_PASSWORD", None)
 POSTGRES_PORT = (
     int(os.environ["SYNAPSE_POSTGRES_PORT"])
     if "SYNAPSE_POSTGRES_PORT" in os.environ
-    else (FAST_PG_PORT if HAS_FAST_PG else None)
+    else (FAST_PG_PORT if USE_FAST_PG else None)
 )
 
-if USE_POSTGRES_FOR_TESTS and HAS_FAST_PG and "SYNAPSE_POSTGRES_HOST" not in os.environ:
+if USE_POSTGRES_FOR_TESTS and USE_FAST_PG:
     print(
         f"tests/utils.py: using the RAM-disk test Postgres at "
         f"{FAST_PG_SOCKET_DIR} (found its socket) -- set SYNAPSE_POSTGRES_HOST "
@@ -100,7 +101,12 @@ SQLITE_PERSIST_DB = os.environ.get("SYNAPSE_TEST_PERSIST_SQLITE_DB") is not None
 # whole purpose. mdbx is just a local file, so no "is a server reachable"
 # check is needed here -- config/database.py opens it directly.
 EMBEDDED_HAMT_ENGINE = os.environ.get("SYNAPSE_TEST_EMBEDDED_HAMT_ENGINE")
+if EMBEDDED_HAMT_ENGINE is None and os.environ.get("SYNAPSE_MDBX"):
+    EMBEDDED_HAMT_ENGINE = "mdbx"
+
 EMBEDDED_HAMT_PATH = os.environ.get("SYNAPSE_TEST_EMBEDDED_HAMT_PATH")
+if EMBEDDED_HAMT_PATH is None and os.environ.get("SYNAPSE_MDBX"):
+    EMBEDDED_HAMT_PATH = "/tmp/synapse-embedded-hamt"
 
 # the dbname we will connect to in order to create the base database.
 POSTGRES_DBNAME_FOR_INITIAL_CREATE = "postgres"

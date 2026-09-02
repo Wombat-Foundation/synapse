@@ -126,6 +126,19 @@ class DatabaseConfig(Config):
         if env_path:
             self.embedded_hamt_path = env_path
 
+        # A concise production switch. The path is deliberately still
+        # required: unlike tests, a production server must never silently put
+        # persistent state into a temporary directory.
+        if os.environ.get("SYNAPSE_MDBX"):
+            self.embedded_hamt_engine = "mdbx"
+            self.embedded_hamt_path = os.environ.get(
+                "SYNAPSE_MDBX_PATH", self.embedded_hamt_path
+            )
+            if not self.embedded_hamt_path:
+                raise ConfigError(
+                    "SYNAPSE_MDBX requires SYNAPSE_MDBX_PATH or embedded_hamt.path"
+                )
+
         if multi_database_config and database_config:
             raise ConfigError("Can't specify both 'database' and 'databases' in config")
 

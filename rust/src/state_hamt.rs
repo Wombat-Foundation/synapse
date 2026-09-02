@@ -1214,6 +1214,25 @@ fn lookup_state_entries_impl(
                 }
             }
         }
+    } else {
+        // A flat root uses the room structural key directly. As above, verify
+        // only nodes actually reachable from this root: the fetched batch can
+        // legitimately contain nodes for other rooms.
+        let mut seen = HashSet::from([root_hash]);
+        let mut stack = vec![root_hash];
+        while let Some(hash) = stack.pop() {
+            if let Some(bytes) = raw_bytes.get(&hash) {
+                decode_persisted_node_verified(bytes, structural_key, hash)?;
+            }
+            if let Some(node) = node_map.get(&hash) {
+                for child in &node.children {
+                    let child_hash = child.structural_hash();
+                    if seen.insert(child_hash) {
+                        stack.push(child_hash);
+                    }
+                }
+            }
+        }
     }
 
     Ok((entries, missing.into_iter().collect()))
@@ -2161,6 +2180,44 @@ mod tests {
                 "$42".to_owned()
             )]
         );
+    }
+
+    #[test]
+    fn lookup_state_entries_rejects_substituted_reachable_flat_node() {
+        let server_secret = [11u8; 32];
+        let room_id = "!room:test.example";
+        let entries = (0..1_000)
+            .map(|i| {
+                (
+                    "m.room.member".to_owned(),
+                    format!("@user-{i}:test.example"),
+                    format!("${i}"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let ((root_hash, _), mut nodes) =
+            build_root_handle_and_nodes(&server_secret, room_id, entries).unwrap();
+        let root_bytes = nodes
+            .iter()
+            .find(|(hash, _)| *hash == root_hash)
+            .map(|(_, bytes)| bytes.clone())
+            .unwrap();
+        let child_hash = node_child_hashes_raw(&root_bytes)
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("large flat root should have a child");
+
+        // The substituted bytes are valid node bytes, but do not match the
+        // structural hash under which they were supplied.
+        nodes
+            .iter_mut()
+            .find(|(hash, _)| *hash == child_hash)
+            .expect("child should be persisted")
+            .1 = root_bytes.clone();
+
+        let structural_key = room_structural_key_raw(&server_secret, room_id);
+        assert!(lookup_state_entries_impl(&structural_key, &root_bytes, nodes, &[]).is_err());
     }
 
     #[test]

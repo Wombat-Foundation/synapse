@@ -44,7 +44,7 @@ stop)
 		if pg_ctl -D "$PGDATA" status >/dev/null 2>&1; then
 			pg_ctl -D "$PGDATA" stop -m fast >/dev/null 2>&1
 			# Wait for the server to actually stop
-			for i in $(seq 1 10); do
+			for _ in {1..10}; do
 				if ! pg_ctl -D "$PGDATA" status >/dev/null 2>&1; then
 					break
 				fi
@@ -56,7 +56,7 @@ stop)
 			rm -rf "$PGDATA" "$LOGFILE"
 			# Remove only our port's socket files, not the shared directory.
 			rm -f "$PGSOCKETDIR/.s.PGSQL.$PGPORT" \
-			      "$PGSOCKETDIR/.s.PGSQL.$PGPORT.lock"
+				"$PGSOCKETDIR/.s.PGSQL.$PGPORT.lock"
 			rmdir --ignore-fail-on-non-empty "$PGSOCKETDIR" 2>/dev/null || true
 			echo "Stopped and cleaned $PG_STORAGE PostgreSQL at $PGDATA" >&2
 		else
@@ -88,7 +88,16 @@ start)
 	;;
 esac
 
-mkdir -p "$PGSOCKETDIR"
+if [ -e "$PGSOCKETDIR" ] && [ ! -d "$PGSOCKETDIR" ]; then
+	echo "PostgreSQL socket path exists but is not a directory: $PGSOCKETDIR" >&2
+	exit 1
+fi
+install -d -m 700 "$PGSOCKETDIR"
+if [ ! -O "$PGSOCKETDIR" ]; then
+	echo "PostgreSQL socket directory is not owned by this user: $PGSOCKETDIR" >&2
+	exit 1
+fi
+chmod 700 "$PGSOCKETDIR"
 
 if pg_ctl -D "$PGDATA" status >/dev/null 2>&1; then
 	echo "# PostgreSQL cluster already running at $PGDATA" >&2

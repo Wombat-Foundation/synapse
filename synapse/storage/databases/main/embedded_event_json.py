@@ -54,25 +54,17 @@ logger = logging.getLogger(__name__)
 
 
 def open_embedded_event_json_engine(hs: "HomeServer") -> bool:
-    """Idempotently opens the shared mdbx keyspace for this process, if
-    `embedded_hamt_engine`/`embedded_hamt_path` are configured. Safe to call
-    from multiple store classes in the same process (mdbx_engine.open_client
-    is itself idempotent -- see `database::mdbx::open_client_sync`).
+    """Return whether the optional embedded event-JSON backend is enabled.
 
-    Returns whether the engine is available for use.
+    `embedded_hamt` configures only persistent state HAMT storage. It must not
+    enable the independent event-JSON and event-chain stores: those keys are
+    not part of the HAMT namespace and doing so lets separate homeservers
+    sharing an MDBX file overwrite each other's event data.
+
+    The event-JSON backend has no independent configuration yet, so it remains
+    disabled.
     """
-    engine = hs.config.database.embedded_hamt_engine
-    path = hs.config.database.embedded_hamt_path
-    if not engine or not path:
-        return False
-    if engine != "mdbx":
-        raise RuntimeError(
-            f"Unknown embedded_hamt_engine: {engine!r} (only 'mdbx' is supported)"
-        )
-    from synapse.synapse_rust import mdbx_engine
-
-    mdbx_engine.open_client(path)
-    return True
+    return False
 
 
 def _event_json_key(event_id: str) -> bytes:

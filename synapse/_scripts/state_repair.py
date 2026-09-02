@@ -89,10 +89,8 @@ def _discover_room_txn(txn: LoggingTransaction, room_id: str) -> dict[str, Any]:
 
     txn.execute(
         """
-        SELECT COUNT(*) FROM event_edges AS edge
-        JOIN events AS prev ON prev.event_id = edge.prev_event_id
-        JOIN state_events AS se ON se.event_id = edge.prev_event_id
-        WHERE prev.room_id = ?
+        SELECT COUNT(*) FROM msc4242_state_dag_edges
+        WHERE room_id = ?
         """,
         (room_id,),
     )

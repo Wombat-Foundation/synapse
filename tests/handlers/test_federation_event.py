@@ -161,6 +161,7 @@ class FederationEventHandlerTests(unittest.FederatingHomeserverTestCase):
         handler = self.hs.get_federation_event_handler()
         store = self.hs.get_datastores().main
         persisted = False
+        encrypted_handlers_saw_persisted: list[bool] = []
 
         async def persist_events(*args: object, **kwargs: object) -> None:
             nonlocal persisted
@@ -171,7 +172,7 @@ class FederationEventHandlerTests(unittest.FederatingHomeserverTestCase):
         # Device-cache validation is post-persistence. A failure must not make
         # the already-persisted batch fall back to the single-event path.
         async def handle_encrypted(event: object) -> None:
-            self.assertTrue(persisted)
+            encrypted_handlers_saw_persisted.append(persisted)
             if event is first_event:
                 raise Exception()
 
@@ -226,6 +227,7 @@ class FederationEventHandlerTests(unittest.FederatingHomeserverTestCase):
         handle_encrypted_event.assert_has_awaits(
             [mock.call(first_event), mock.call(second_event)]
         )
+        self.assertEqual(encrypted_handlers_saw_persisted, [True, True])
 
     def test_process_pulled_event_with_missing_state(self) -> None:
         """Ensure that we correctly handle pulled events with lots of missing state

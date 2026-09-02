@@ -63,7 +63,7 @@ COMPLEMENT_SYNAPSE_EDITABLE_IMAGE_PATH="$LOCAL_IMAGE_NAMESPACE/complement-synaps
 # Helper to emit annotations that collapse portions of the log in GitHub Actions
 echo_if_github() {
   if [[ -n "$GITHUB_WORKFLOW" ]]; then
-    echo $*
+    printf '%s\n' "$*"
   fi
 }
 
@@ -73,7 +73,7 @@ usage() {
 Usage: $0 [-f] <go test arguments>...
 Run the complement test suite on Synapse.
   --in-repo
-        Whether to run the in-repo suite of Complement tests (see `./complement` in this project)
+        Whether to run the in-repo suite of Complement tests (see ./complement in this project)
         vs the Complement tests from the Complement repo.
 
   -f, --fast
@@ -161,13 +161,13 @@ main() {
   # broke `realpath: synapse/scripts-dev/..: No such file or directory` in
   # CI, where complement.sh is invoked as `synapse/scripts-dev/complement.sh`
   # from a parent directory).
-  cd "$(dirname $0)/.."
+  cd "$(dirname "$0")/.."
   repo_root="$(pwd)"
 
   # Check for a user-specified Complement checkout
   if [[ -z "$COMPLEMENT_DIR" ]]; then
     COMPLEMENT_REF=${COMPLEMENT_REF:-main}
-    COMPLEMENT_REPO=${COMPLEMENT_REPO:-matrix-org/complement}
+    COMPLEMENT_REPO=${COMPLEMENT_REPO:-gamesguru/complement}
     echo "COMPLEMENT_DIR not set. Fetching ${COMPLEMENT_REPO} at ${COMPLEMENT_REF}..."
 
     # Download the Complement checkout at the specified ref.
@@ -176,13 +176,15 @@ main() {
     # Delete the existing complement checkout. Otherwise we'll end up with stale
     # test files after they're deleted server-side, and `tar` will not delete
     # old files.
-    rm -rf complement-${COMPLEMENT_REF}
+    complement_repo_name="${COMPLEMENT_REPO##*/}"
+    complement_repo_name="${complement_repo_name%.git}"
+    COMPLEMENT_DIR="${complement_repo_name}-${COMPLEMENT_REF}"
+    rm -rf "$COMPLEMENT_DIR"
 
     # Extract the checkout.
     tar -xzf "${COMPLEMENT_REF}.tar.gz"
 
-    COMPLEMENT_DIR=complement-${COMPLEMENT_REF}
-    echo "Checkout available at 'complement-${COMPLEMENT_REF}'"
+    echo "Checkout available at '$COMPLEMENT_DIR'"
   fi
 
   if [[ -z "$use_in_repo_tests" ]] && [[ "$(realpath "$COMPLEMENT_DIR")" == "$(realpath ./complement)" ]]; then
@@ -218,8 +220,8 @@ main() {
       # inconvenience; the container will overwrite the module with its own copy.
       mv -n synapse/synapse_rust.abi3.so synapse/synapse_rust.abi3.so~host
       # And restore it on exit:
-      synapse_pkg=`realpath synapse`
-      trap "mv -f '$synapse_pkg/synapse_rust.abi3.so~host' '$synapse_pkg/synapse_rust.abi3.so'" EXIT
+      synapse_pkg=$(realpath synapse)
+      trap 'mv -f "$synapse_pkg/synapse_rust.abi3.so~host" "$synapse_pkg/synapse_rust.abi3.so"' EXIT
     fi
 
     editable_mount="$(realpath .):/editable-src:z"
@@ -231,10 +233,10 @@ main() {
       # - The uv lock file must be the same (otherwise we assume dependencies have changed)
 
       # First set up the module in the right place for an editable installation.
-      $CONTAINER_RUNTIME run --rm -v $editable_mount --entrypoint 'cp' "$COMPLEMENT_SYNAPSE_EDITABLE_IMAGE_PATH" -- /synapse_rust.abi3.so.bak /editable-src/synapse/synapse_rust.abi3.so
+      $CONTAINER_RUNTIME run --rm -v "$editable_mount" --entrypoint 'cp' "$COMPLEMENT_SYNAPSE_EDITABLE_IMAGE_PATH" -- /synapse_rust.abi3.so.bak /editable-src/synapse/synapse_rust.abi3.so
 
-      if ($CONTAINER_RUNTIME run --rm -v $editable_mount --entrypoint 'python' "$COMPLEMENT_SYNAPSE_EDITABLE_IMAGE_PATH" -c 'import synapse.synapse_rust' \
-        && $CONTAINER_RUNTIME run --rm -v $editable_mount --entrypoint 'diff' "$COMPLEMENT_SYNAPSE_EDITABLE_IMAGE_PATH" --brief /editable-src/uv.lock /uv.lock.bak); then
+      if ($CONTAINER_RUNTIME run --rm -v "$editable_mount" --entrypoint 'python' "$COMPLEMENT_SYNAPSE_EDITABLE_IMAGE_PATH" -c 'import synapse.synapse_rust' \
+        && $CONTAINER_RUNTIME run --rm -v "$editable_mount" --entrypoint 'diff' "$COMPLEMENT_SYNAPSE_EDITABLE_IMAGE_PATH" --brief /editable-src/uv.lock /uv.lock.bak); then
         skip_docker_build=1
       else
         echo "Editable Synapse image is stale. Will rebuild."
@@ -244,26 +246,29 @@ main() {
   fi
 
   if [ -z "$skip_docker_build" ]; then
+    # Shell words in this environment variable are Docker build options.
+    # Convert them once to an array so each option remains a distinct argv item.
+    read -r -a docker_build_args <<<"${DOCKER_BUILD_ARGS:-}"
     if [ -n "$use_editable_synapse" ]; then
 
       # Build a special image designed for use in development with editable
       # installs.
-      $CONTAINER_RUNTIME build ${DOCKER_BUILD_ARGS:-} \
+      $CONTAINER_RUNTIME build "${docker_build_args[@]}" \
         -t "$SYNAPSE_EDITABLE_IMAGE_PATH" \
         -f "docker/editable.Dockerfile" .
 
-      $CONTAINER_RUNTIME build ${DOCKER_BUILD_ARGS:-} \
+      $CONTAINER_RUNTIME build "${docker_build_args[@]}" \
         -t "$SYNAPSE_WORKERS_EDITABLE_IMAGE_PATH" \
         --build-arg FROM="$SYNAPSE_EDITABLE_IMAGE_PATH" \
         -f "docker/Dockerfile-workers" .
 
-      $CONTAINER_RUNTIME build ${DOCKER_BUILD_ARGS:-} \
+      $CONTAINER_RUNTIME build "${docker_build_args[@]}" \
         -t "$COMPLEMENT_SYNAPSE_EDITABLE_IMAGE_PATH" \
         --build-arg FROM="$SYNAPSE_WORKERS_EDITABLE_IMAGE_PATH" \
         -f "docker/complement/Dockerfile" "docker/complement"
 
       # Prepare the Rust module
-      $CONTAINER_RUNTIME run --rm -v $editable_mount --entrypoint 'cp' "$COMPLEMENT_SYNAPSE_EDITABLE_IMAGE_PATH" -- /synapse_rust.abi3.so.bak /editable-src/synapse/synapse_rust.abi3.so
+      $CONTAINER_RUNTIME run --rm -v "$editable_mount" --entrypoint 'cp' "$COMPLEMENT_SYNAPSE_EDITABLE_IMAGE_PATH" -- /synapse_rust.abi3.so.bak /editable-src/synapse/synapse_rust.abi3.so
 
     else
       # We remove the `egg-info` as it can contain outdated information which won't line
@@ -271,7 +276,7 @@ main() {
       rm -rf matrix_synapse.egg-info/
       # Build the base Synapse image from the local checkout
       echo_if_github "::group::Build Docker image: matrixdotorg/synapse"
-      $CONTAINER_RUNTIME build ${DOCKER_BUILD_ARGS:-} \
+      $CONTAINER_RUNTIME build "${docker_build_args[@]}" \
         -t "$SYNAPSE_IMAGE_PATH" \
         --build-arg SYNAPSE_VERSION_STRING="$synapse_version_string" \
         --build-arg TEST_ONLY_SKIP_DEP_HASH_VERIFICATION \
@@ -281,7 +286,7 @@ main() {
 
       # Build the workers docker image (from the base Synapse image we just built).
       echo_if_github "::group::Build Docker image: matrixdotorg/synapse-workers"
-      $CONTAINER_RUNTIME build ${DOCKER_BUILD_ARGS:-} \
+      $CONTAINER_RUNTIME build "${docker_build_args[@]}" \
         -t "$SYNAPSE_WORKERS_IMAGE_PATH" \
         --build-arg FROM="$SYNAPSE_IMAGE_PATH" \
         -f "docker/Dockerfile-workers" .
@@ -289,7 +294,7 @@ main() {
 
       # Build the unified Complement image (from the worker Synapse image we just built).
       echo_if_github "::group::Build Docker image: complement/Dockerfile"
-      $CONTAINER_RUNTIME build ${DOCKER_BUILD_ARGS:-} \
+      $CONTAINER_RUNTIME build "${docker_build_args[@]}" \
         -t "$COMPLEMENT_SYNAPSE_IMAGE_PATH" \
         --build-arg FROM="$SYNAPSE_WORKERS_IMAGE_PATH" \
         -f "docker/complement/Dockerfile" "docker/complement"
@@ -300,6 +305,11 @@ main() {
     echo "Docker images built."
   else
     echo "Skipping Docker image build as requested."
+  fi
+
+  if [ -n "$skip_complement_run" ]; then
+    echo "Docker images built; skipping Complement tests as requested."
+    return 0
   fi
 
   # Default set of Complement tests to run from the Complement repo
@@ -334,7 +344,7 @@ main() {
 
   # Export the list of test packages as a space-separated environment variable, so other
   # scripts can use it.
-  export SYNAPSE_SUPPORTED_COMPLEMENT_TEST_PACKAGES="${available_complement_test_packages[@]}"
+  export SYNAPSE_SUPPORTED_COMPLEMENT_TEST_PACKAGES="${available_complement_test_packages[*]}"
 
   # Default set of Complement tests to run when using the in-repo test suite. Most
   # likely, this should be all tests.
@@ -541,6 +551,8 @@ main() {
   return 0
 }
 
+# Invoked by the EXIT trap installed in main.
+# shellcheck disable=SC2329
 cleanup_complement_containers() {
   local container_label="COMPLEMENT_WRAPPER_TOKEN=$COMPLEMENT_WRAPPER_TOKEN"
   local containers container ours=()

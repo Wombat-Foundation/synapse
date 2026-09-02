@@ -739,12 +739,20 @@ class ReplicationCommandHandler:
                 current_token,
                 cmd.new_token,
             )
+            previous_token = current_token
             (updates, current_token, missing_updates) = await stream.get_updates_since(
                 cmd.instance_name, current_token, cmd.new_token
             )
 
-            if not updates:
-                break
+            # A limited response must either provide rows or move the token.
+            # Retrying an empty, non-advancing response would spin forever;
+            # completing catch-up would incorrectly tell the stream handler
+            # that it has reached cmd.new_token. Fail closed instead.
+            if not updates and missing_updates and current_token == previous_token:
+                raise RuntimeError(
+                    f"Replication stream {stream_name!r} returned an empty, "
+                    f"non-advancing limited response at {current_token}"
+                )
 
             # TODO: add some tests for this
 

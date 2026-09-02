@@ -114,11 +114,10 @@ Before publication, emit:
 - event count and stream range covered;
 - missing-input checks.
 
-Publication should require an explicit `--publish` flag and should refuse if the
-diff would remove the local server's own membership without an additional
-override.
+The current command is read-only: compare output is intended to make its input
+and any future repair plan auditable before write support is designed.
 
-### 5. Publish
+### 5. Future publication design
 
 Publication order:
 
@@ -132,8 +131,9 @@ Publication order:
 8. invalidate state, current-state, membership, room-summary, and sync caches;
 9. release the room repair lock.
 
-The old branch remains present. Repair creates a new branch and repoints live
-metadata after all replacement data verifies.
+The old branch should remain present. A future repair implementation should
+create a new branch and repoint live metadata only after all replacement data
+verifies.
 
 ## CLI Shape
 
@@ -146,12 +146,9 @@ synapse_state_repair --config homeserver.yaml list-rejected
 synapse_state_repair --config homeserver.yaml list-outliers
 ```
 
-Useful safety flags:
+Useful current flags:
 
 ```
---require-full-state
---refuse-local-membership-loss
---max-events N
 --write-report report.json
 ```
 
@@ -164,8 +161,6 @@ Build the read-only `synapse_state_repair check-room` command that:
 - reports room version and forward extremities;
 - reports state event and state edge counts;
 - identifies events in the affected range;
-- compares current state against state recomputed for the current forward
-  extremities;
 - writes a JSON report.
 
 The first write-capable milestone should only publish repaired HAMTs/state
