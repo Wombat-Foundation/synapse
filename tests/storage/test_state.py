@@ -43,16 +43,7 @@ from tests.unittest import HomeserverTestCase
 logger = logging.getLogger(__name__)
 
 
-# Selects the TiKV branch in unit tests. It is never passed to open_client or
-# used as a network address; integration tests get real PD endpoints from
-# SYNAPSE_TEST_TIKV_PD_ENDPOINTS via the homeserver configuration.
-_MOCK_TIKV_ENABLED = object()
-
-
 class StateStoreTestCase(HomeserverTestCase):
-    def _enable_mock_tikv(self) -> None:
-        self.state_datastore.tikv_pd_endpoints = cast(list[str], _MOCK_TIKV_ENABLED)
-
     def prepare(self, reactor: MemoryReactor, clock: Clock, hs: HomeServer) -> None:
         self.store = hs.get_datastores().main
         self.storage = hs.get_storage_controllers()
@@ -276,14 +267,9 @@ class StateStoreTestCase(HomeserverTestCase):
         )
         assert state_group is not None
 
-        materialize_method = (
-            "_materialize_state_hamt_from_tikv"
-            if self.state_datastore.tikv_pd_endpoints
-            else "_materialize_state_hamt_from_postgres_txn"
-        )
         with patch.object(
             self.state_datastore,
-            materialize_method,
+            "_materialize_state_hamt_from_postgres_txn",
             side_effect=AssertionError("exact filters must not materialize full state"),
         ):
             result = self.get_success(
@@ -328,56 +314,7 @@ class StateStoreTestCase(HomeserverTestCase):
             },
         )
 
-    def test_empty_state_group_does_not_retry(self) -> None:
-        from twisted.internet import defer
-
-        state_group = self.get_success(
-            self.state_datastore.store_state_group(
-                event_id="$empty-state-group",
-                room_id=self.room.to_string(),
-                room_version=RoomVersions.V1,
-                prev_group=None,
-                delta_ids=None,
-                current_state_ids={},
-            )
-        )
-
-        self._enable_mock_tikv()
-        try:
-            with (
-                patch.object(
-                    self.state_datastore,
-                    "_materialize_state_hamt_from_tikv_direct",
-                    return_value=[],
-                ),
-                patch.object(
-                    self.state_datastore.hs.get_clock(),
-                    "sleep",
-                    return_value=defer.succeed(None),
-                ) as sleep,
-            ):
-                state_group_map = self.get_success(
-                    self.state_datastore._get_state_groups_from_groups(
-                        [state_group], StateFilter.all()
-                    )
-                )
-
-                self.assertDictEqual(state_group_map[state_group], {})
-                sleep.assert_not_called()
-        finally:
-            self.state_datastore.tikv_pd_endpoints = []
-
     def test_state_group_hamt_corruption_does_not_fallback_to_sql(self) -> None:
-        if self.state_datastore.tikv_pd_endpoints:
-            # This test manipulates the SQL-backed state_hamt_roots/
-            # state_hamt_nodes tables directly to simulate corruption. Those
-            # tables are only written when TiKV is *not* configured (see
-            # _persist_state_hamt_txn) -- when TiKV is in use they stay
-            # empty, so this test's own setup doesn't apply. See
-            # test_state_group_hamt_corruption_does_not_fallback_to_sql_tikv
-            # for the TiKV equivalent.
-            self.skipTest("Not applicable when TiKV is configured")
-
         event = self.inject_state_event(
             self.room, self.u_alice, EventTypes.Create, "", {}
         )
@@ -425,343 +362,13 @@ class StateStoreTestCase(HomeserverTestCase):
             str(failure.value),
         )
 
-    def test_state_group_hamt_corruption_does_not_fallback_to_sql_tikv(self) -> None:
-        """TiKV equivalent of test_state_group_hamt_corruption_does_not_fallback_to_sql.
-
-        When TiKV is configured, both the full HAMT trie and its root pointer
-        live in TiKV. The corruption is simulated by inserting an undecodable
-        node and repointing the TiKV root record at it.
-        """
-        if not self.state_datastore.tikv_pd_endpoints:
-            self.skipTest("Requires TiKV -- set SYNAPSE_TEST_TIKV_PD_ENDPOINTS to run")
-
-        from synapse.storage.databases.state.bg_updates import (
-            _decode_state_hamt_root,
-            _encode_state_hamt_root,
-            _state_hamt_node_tikv_key,
-            _state_hamt_root_tikv_key,
-        )
-        from synapse.synapse_rust import tikv_engine
-
-        event = self.inject_state_event(
-            self.room, self.u_alice, EventTypes.Create, "", {}
-        )
-        state_group = self.get_success(
-            self.store._get_state_group_for_event(event.event_id)
-        )
-        assert state_group is not None
-
-        root_key = _state_hamt_root_tikv_key(
-            self.state_datastore.tikv_namespace, state_group
-        )
-        root_value = tikv_engine.get(root_key)
-        assert root_value is not None, "Expected a HAMT root record to exist in TiKV"
-        room_prefix, _root_hash, lattice, room_id = _decode_state_hamt_root(root_value)
-
-        garbage_structural_hash = random_string(32).encode("ascii")
-        garbage_node_key = _state_hamt_node_tikv_key(
-            self.state_datastore.tikv_namespace, room_prefix, garbage_structural_hash
-        )
-        tikv_engine.put(garbage_node_key, b"not a valid persisted HAMT node")
-
-        tikv_engine.put(
-            root_key,
-            _encode_state_hamt_root(
-                room_prefix, garbage_structural_hash, lattice, room_id=room_id
-            ),
-        )
-
-        # If a HAMT root exists, missing/corrupt nodes are data corruption.
-        # Do not hide that by falling back to the legacy SQL snapshot.
-        failure = self.get_failure(
-            self.storage.state.stores.state._get_state_groups_from_groups(
-                [state_group], StateFilter.all()
-            ),
-            RuntimeError,
-        )
-        self.assertIn(
-            "Failed to decode persisted HAMT node",
-            str(failure.value),
-        )
-
-    def test_multi_group_selective_lookup_real_tikv(self) -> None:
-        """Verify multi-group selective lookup against real TiKV with multiple divergent rooms."""
-        if not self.state_datastore.tikv_pd_endpoints:
-            self.skipTest("Requires TiKV -- set SYNAPSE_TEST_TIKV_PD_ENDPOINTS to run")
-
-        # Create room 1 with Create and Name events
-        event1 = self.inject_state_event(
-            self.room, self.u_alice, EventTypes.Create, "", {}
-        )
-        sg1 = self.get_success(self.store._get_state_group_for_event(event1.event_id))
-        event2 = self.inject_state_event(
-            self.room, self.u_alice, EventTypes.Name, "", {"name": "Room 1 Name"}
-        )
-        sg2 = self.get_success(self.store._get_state_group_for_event(event2.event_id))
-
-        # Create room 2 with Create and Topic events
-        room2 = RoomID.from_string("!room2:test")
-        self.get_success(
-            self.store.store_room(
-                room2.to_string(),
-                room_creator_user_id=self.u_alice.to_string(),
-                is_public=True,
-                room_version=RoomVersions.V1,
-            )
-        )
-        event3 = self.inject_state_event(room2, self.u_alice, EventTypes.Create, "", {})
-        event4 = self.inject_state_event(
-            room2, self.u_alice, EventTypes.Topic, "", {"topic": "Room 2 Topic"}
-        )
-        sg3 = self.get_success(self.store._get_state_group_for_event(event3.event_id))
-        sg4 = self.get_success(self.store._get_state_group_for_event(event4.event_id))
-        assert (
-            sg1 is not None and sg2 is not None and sg3 is not None and sg4 is not None
-        )
-
-        # Look up m.room.name across state groups
-        state_filter = StateFilter.from_types([(EventTypes.Name, "")])
-        res = self.get_success(
-            self.storage.state.stores.state._get_state_groups_from_groups(
-                [sg1, sg2, sg4], state_filter
-            )
-        )
-        self.assertEqual(
-            res,
-            {
-                sg1: {},
-                sg2: {(EventTypes.Name, ""): event2.event_id},
-                sg4: {},
-            },
-        )
-
-    def test_prefetch_tikv_hamt_blocking_missing_child_raises(self) -> None:
-        """Verify that _prefetch_tikv_hamt_blocking raises RuntimeError on missing child nodes."""
-        from unittest.mock import patch
-
-        from synapse.storage.databases.state.bg_updates import (
-            _encode_state_hamt_root,
-            _state_hamt_node_tikv_key,
-            _state_hamt_root_tikv_key,
-        )
-        from synapse.synapse_rust import state_hamt
-
-        room_prefix = b"01234567"
-        room_id = "!test:test"
-        server_secret = self.state_datastore._state_hamt_secret()
-        # Build a multi-entry state HAMT with enough events to force child nodes
-        entries = [
-            (f"org.matrix.test.{i}", f"key_{i}", f"$event_{i}:test") for i in range(100)
-        ]
-        root_hash, _sg, lattice, nodes = state_hamt.build_root_handle_with_lattice(
-            server_secret, room_id, entries
-        )
-        nodes_dict = dict(nodes)
-        self.assertGreater(len(nodes_dict), 1, "Expected multi-node HAMT tree")
-        root_bytes = nodes_dict[root_hash]
-        encoded_root = _encode_state_hamt_root(
-            room_prefix, root_hash, lattice, room_id=room_id
-        )
-
-        def mock_get(key: bytes) -> bytes | None:
-            if key == _state_hamt_root_tikv_key(
-                self.state_datastore.tikv_namespace, 1234
-            ):
-                return encoded_root
-            return None
-
-        # Return ONLY the root node, simulating missing child nodes in TiKV
-        def mock_batch_get(keys: list[bytes]) -> list[tuple[bytes, bytes]]:
-            res = []
-            for k in keys:
-                if k == _state_hamt_node_tikv_key(
-                    self.state_datastore.tikv_namespace, room_prefix, root_hash
-                ):
-                    res.append((k, root_bytes))
-            return res
-
-        with patch("synapse.synapse_rust.tikv_engine.get", side_effect=mock_get):
-            with patch(
-                "synapse.synapse_rust.tikv_engine.batch_get", side_effect=mock_batch_get
-            ):
-                with self.assertRaises(RuntimeError) as ctx:
-                    self.state_datastore._prefetch_tikv_hamt_blocking(
-                        room_prefix,
-                        1234,
-                        room_id,
-                        [("org.matrix.test.0", "key_0", "$new_event_0:test")],
-                    )
-                self.assertIn(
-                    "Missing HAMT nodes while prefetching", str(ctx.exception)
-                )
-
-    def test_direct_tikv_reads_selective_and_full_mocked(self) -> None:
-        """Verify direct TiKV read helpers for selective key lookups and full materialization."""
-        from unittest.mock import patch
-
-        from synapse.storage.databases.state.bg_updates import (
-            _encode_state_hamt_root,
-            _state_hamt_node_tikv_key,
-            _state_hamt_root_tikv_key,
-        )
-        from synapse.synapse_rust import state_hamt
-
-        room_prefix = b"01234567"
-        room_id = "!test:test"
-        server_secret = self.state_datastore._state_hamt_secret()
-        entries = [
-            (EventTypes.Create, "", "$create:test"),
-            (EventTypes.Name, "", "$name:test"),
-        ]
-        root_hash, _sg, lattice, nodes = state_hamt.build_root_handle_with_lattice(
-            server_secret, room_id, entries
-        )
-        nodes_dict = dict(nodes)
-        root_bytes = nodes_dict[root_hash]
-        encoded_root = _encode_state_hamt_root(
-            room_prefix, root_hash, lattice, room_id=room_id
-        )
-
-        def mock_get(key: bytes) -> bytes | None:
-            if key == _state_hamt_root_tikv_key(
-                self.state_datastore.tikv_namespace, 1234
-            ):
-                return encoded_root
-            if key == _state_hamt_node_tikv_key(
-                self.state_datastore.tikv_namespace, room_prefix, root_hash
-            ):
-                return root_bytes
-            return None
-
-        def mock_batch_get(keys: list[bytes]) -> list[tuple[bytes, bytes]]:
-            res = []
-            for k in keys:
-                if k == _state_hamt_root_tikv_key(
-                    self.state_datastore.tikv_namespace, 1234
-                ):
-                    res.append((k, encoded_root))
-                    continue
-                for h, nb in nodes:
-                    if k == _state_hamt_node_tikv_key(
-                        self.state_datastore.tikv_namespace, room_prefix, h
-                    ):
-                        res.append((k, nb))
-            return res
-
-        with patch("synapse.synapse_rust.tikv_engine.get", side_effect=mock_get):
-            with patch(
-                "synapse.synapse_rust.tikv_engine.batch_get", side_effect=mock_batch_get
-            ):
-                # 1. Selective key lookup (pure TiKV with embedded room_id)
-                entries_selective = (
-                    self.state_datastore._lookup_state_hamt_from_tikv_direct(
-                        1234, [(EventTypes.Name, "")]
-                    )
-                )
-                self.assertIsNotNone(entries_selective)
-                assert entries_selective is not None
-                self.assertEqual(
-                    entries_selective, [(EventTypes.Name, "", "$name:test")]
-                )
-
-                # 2. Absent root returns None
-                entries_absent = (
-                    self.state_datastore._lookup_state_hamt_from_tikv_direct(
-                        9999, [(EventTypes.Name, "")]
-                    )
-                )
-                self.assertIsNone(entries_absent)
-
-                # 3. Multi-group selective key lookup
-                with patch(
-                    "synapse.synapse_rust.tikv_engine.lookup_state_hamts",
-                    return_value=[[(EventTypes.Name, "", "$name:test")]],
-                ) as mock_lookup:
-                    multi_res, missing = (
-                        self.state_datastore._lookup_state_hamts_from_tikv_direct(
-                            [1234, 9999], [(EventTypes.Name, "")]
-                        )
-                    )
-                    self.assertEqual(missing, [9999])
-                    self.assertEqual(
-                        multi_res, {1234: [(EventTypes.Name, "", "$name:test")]}
-                    )
-                    mock_lookup.assert_called_once()
-
-                # 4. Full materialization
-                with patch(
-                    "synapse.synapse_rust.tikv_engine.materialize_state_hamt",
-                    return_value=entries,
-                ):
-                    entries_full = (
-                        self.state_datastore._materialize_state_hamt_from_tikv_direct(
-                            1234
-                        )
-                    )
-                    self.assertIsNotNone(entries_full)
-                    assert entries_full is not None
-                    self.assertIn((EventTypes.Create, "", "$create:test"), entries_full)
-                    self.assertIn((EventTypes.Name, "", "$name:test"), entries_full)
-
-    def test_multi_group_exact_filter_under_tikv_uses_batch_lookup(self) -> None:
-        """Verify that fetching exact state filter across multiple groups uses _lookup_state_hamts_from_tikv_direct."""
-        from unittest.mock import patch
-
-        event1 = self.inject_state_event(
-            self.room, self.u_alice, EventTypes.Create, "", {}
-        )
-        sg1 = self.get_success(self.store._get_state_group_for_event(event1.event_id))
-        event2 = self.inject_state_event(
-            self.room, self.u_alice, EventTypes.Name, "", {"name": "room_name"}
-        )
-        sg2 = self.get_success(self.store._get_state_group_for_event(event2.event_id))
-        assert sg1 is not None and sg2 is not None
-
-        # Enable pure TiKV mode
-        self._enable_mock_tikv()
-        try:
-            state_filter = StateFilter.from_types([(EventTypes.Name, "")])
-
-            with patch.object(
-                self.state_datastore,
-                "_lookup_state_hamts_from_tikv_direct",
-                return_value=(
-                    {
-                        sg1: [],
-                        sg2: [(EventTypes.Name, "", event2.event_id)],
-                    },
-                    [],
-                ),
-            ) as mock_batch_lookup:
-                res = self.get_success(
-                    self.storage.state.stores.state._get_state_groups_from_groups(
-                        [sg1, sg2], state_filter
-                    )
-                )
-                mock_batch_lookup.assert_called_once()
-                self.assertEqual(
-                    res,
-                    {
-                        sg1: {},
-                        sg2: {(EventTypes.Name, ""): event2.event_id},
-                    },
-                )
-        finally:
-            self.state_datastore.tikv_pd_endpoints = []
 
     def test_multi_group_exact_filter_under_pure_sql_shares_node_fetches(self) -> None:
-        """SQL-mode mirror of test_multi_group_exact_filter_under_tikv_uses_batch_lookup:
-        with no TiKV configured, a selective (exact_keys) lookup across several
-        state groups must go through _lookup_state_hamt_from_postgres_many_txn,
-        not the singular per-group SQL loop, and must return correct per-group
+        """A selective (exact_keys) lookup across several state groups must
+        go through _lookup_state_hamt_from_postgres_many_txn, not the
+        singular per-group SQL loop, and must return correct per-group
         results without mocking anything -- this exercises the real SQL HAMT
         node-sharing path end to end."""
-        if self.state_datastore.tikv_pd_endpoints:
-            # This test specifically exercises the pure-SQL HAMT path, which
-            # only applies when TiKV is not configured -- see the identical
-            # guard on test_state_group_hamt_corruption_does_not_fallback_to_sql.
-            self.skipTest("Not applicable when TiKV is configured")
-
         event1 = self.inject_state_event(
             self.room, self.u_alice, EventTypes.Create, "", {}
         )
@@ -771,7 +378,6 @@ class StateStoreTestCase(HomeserverTestCase):
         )
         sg2 = self.get_success(self.store._get_state_group_for_event(event2.event_id))
         assert sg1 is not None and sg2 is not None
-        assert not self.state_datastore.tikv_pd_endpoints
 
         state_filter = StateFilter.from_types([(EventTypes.Name, "")])
 
@@ -818,9 +424,6 @@ class StateStoreTestCase(HomeserverTestCase):
         empty room and on search across an upgraded room + its predecessor --
         both cases resolve state for two rooms in the same batched call.
         """
-        if self.state_datastore.tikv_pd_endpoints:
-            self.skipTest("Not applicable when TiKV is configured")
-
         event1 = self.inject_state_event(
             self.room, self.u_alice, EventTypes.Create, "", {}
         )
@@ -838,7 +441,6 @@ class StateStoreTestCase(HomeserverTestCase):
         event2 = self.inject_state_event(room2, self.u_alice, EventTypes.Create, "", {})
         sg2 = self.get_success(self.store._get_state_group_for_event(event2.event_id))
         assert sg1 is not None and sg2 is not None
-        assert not self.state_datastore.tikv_pd_endpoints
 
         state_filter = StateFilter.from_types([(EventTypes.Create, "")])
 
@@ -856,86 +458,7 @@ class StateStoreTestCase(HomeserverTestCase):
             },
         )
 
-    def test_fallback_sql_does_not_call_tikv_in_transaction(self) -> None:
-        """Verify that pure SQL fallback mode (use_tikv=False) makes zero TiKV calls inside runInteraction."""
-        from unittest.mock import patch
 
-        event = self.inject_state_event(
-            self.room, self.u_alice, EventTypes.Create, "", {}
-        )
-        state_group = self.get_success(
-            self.store._get_state_group_for_event(event.event_id)
-        )
-        assert state_group is not None
-
-        with (
-            patch("synapse.synapse_rust.tikv_engine.get") as mock_get,
-            patch("synapse.synapse_rust.tikv_engine.batch_get") as mock_batch_get,
-            patch(
-                "synapse.synapse_rust.tikv_engine.materialize_state_hamt"
-            ) as mock_mat,
-        ):
-            self._enable_mock_tikv()
-            try:
-                sql_res = self.get_success(
-                    self.store.db_pool.runInteraction(
-                        "test_fallback_sql",
-                        self.state_datastore._get_state_groups_from_groups_txn,
-                        [state_group],
-                        StateFilter.all(),
-                        use_tikv=False,
-                    )
-                )
-                self.assertIn(state_group, sql_res)
-                mock_get.assert_not_called()
-                mock_batch_get.assert_not_called()
-                mock_mat.assert_not_called()
-            finally:
-                self.state_datastore.tikv_pd_endpoints = []
-
-    def test_pure_tikv_avoids_sql_transactions(self) -> None:
-        """Verify that pure TiKV reads avoid all SQL transactions during state retrieval."""
-        from unittest.mock import patch
-
-        event = self.inject_state_event(
-            self.room, self.u_alice, EventTypes.Create, "", {}
-        )
-        state_group = self.get_success(
-            self.store._get_state_group_for_event(event.event_id)
-        )
-        assert state_group is not None
-
-        self._enable_mock_tikv()
-        try:
-            with (
-                patch.object(
-                    self.state_datastore,
-                    "_materialize_state_hamt_from_tikv_direct",
-                    return_value=[(EventTypes.Create, "", event.event_id)],
-                ),
-                patch.object(
-                    self.store.db_pool,
-                    "runInteraction",
-                    wraps=self.store.db_pool.runInteraction,
-                ) as spy_run_interaction,
-            ):
-                res = self.get_success(
-                    self.state_datastore._get_state_groups_from_groups(
-                        [state_group], StateFilter.all()
-                    )
-                )
-                self.assertEqual(
-                    res[state_group], {(EventTypes.Create, ""): event.event_id}
-                )
-                called_descs = [
-                    call.args[0] for call in spy_run_interaction.call_args_list
-                ]
-                self.assertNotIn("_get_state_groups_from_groups", called_descs)
-                self.assertNotIn(
-                    "_get_state_groups_from_groups.fallback_sql", called_descs
-                )
-        finally:
-            self.state_datastore.tikv_pd_endpoints = []
 
     def test_exact_filter_read_avoids_run_interaction(self) -> None:
         """Verify that exact-filter reads under TiKV execute real Rust lookup and avoid state fetch SQL transactions."""
@@ -1113,189 +636,9 @@ class StateStoreTestCase(HomeserverTestCase):
         finally:
             self.state_datastore.tikv_pd_endpoints = []
 
-    def test_tikv_write_failure_keeps_sql_fallback(self) -> None:
-        """A node-write failure leaves the committed SQL HAMT mirror usable."""
-        from unittest.mock import patch
 
-        self._enable_mock_tikv()
-        try:
-            with patch(
-                "synapse.synapse_rust.tikv_engine.batch_put",
-                side_effect=RuntimeError("TiKV connection refused"),
-            ):
-                self.get_failure(
-                    self.state_datastore.store_state_group(
-                        event_id="$fake:event",
-                        room_id=self.room.to_string(),
-                        room_version=RoomVersions.V1,
-                        prev_group=None,
-                        delta_ids=None,
-                        current_state_ids={
-                            (EventTypes.Create, ""): "$fake:event",
-                        },
-                    ),
-                    RuntimeError,
-                )
 
-            # TiKV publication runs after the SQL transaction, so the state
-            # group remains available through the SQL fallback until TiKV can
-            # be reached again.
-            row = self.get_success(
-                self.store.db_pool.simple_select_one_onecol(
-                    table="state_groups",
-                    keyvalues={"event_id": "$fake:event"},
-                    retcol="id",
-                    allow_none=True,
-                )
-            )
-            self.assertIsNotNone(row)
-            state_group = cast(int, row)
-            with patch("synapse.synapse_rust.tikv_engine.get", return_value=None):
-                state = self.get_success(
-                    self.state_datastore._get_state_groups_from_groups(
-                        [state_group], StateFilter.all()
-                    )
-                )
-            self.assertEqual(
-                state[state_group], {(EventTypes.Create, ""): "$fake:event"}
-            )
-        finally:
-            self.state_datastore.tikv_pd_endpoints = []
 
-    def test_tikv_root_write_failure_keeps_sql_fallback(self) -> None:
-        """A root-write failure leaves the committed SQL HAMT mirror usable."""
-        from unittest.mock import patch
-
-        self._enable_mock_tikv()
-        try:
-            calls: list[list[tuple[bytes, bytes]]] = []
-
-            def fail_roots(pairs: list[tuple[bytes, bytes]]) -> None:
-                calls.append(pairs)
-                if all(key.startswith(b"hamt:root:") for key, _value in pairs):
-                    raise RuntimeError("TiKV root write failed")
-
-            with patch(
-                "synapse.synapse_rust.tikv_engine.batch_put",
-                side_effect=fail_roots,
-            ):
-                self.get_failure(
-                    self.state_datastore.store_state_group(
-                        event_id="$root-failure:event",
-                        room_id=self.room.to_string(),
-                        room_version=RoomVersions.V1,
-                        prev_group=None,
-                        delta_ids=None,
-                        current_state_ids={
-                            (EventTypes.Create, ""): "$root-failure:event"
-                        },
-                    ),
-                    RuntimeError,
-                )
-
-            self.assertEqual(len(calls), 2)
-            self.assertTrue(all(key.startswith(b"hamt:node:") for key, _ in calls[0]))
-            self.assertTrue(all(key.startswith(b"hamt:root:") for key, _ in calls[1]))
-            row = self.get_success(
-                self.store.db_pool.simple_select_one_onecol(
-                    table="state_groups",
-                    keyvalues={"event_id": "$root-failure:event"},
-                    retcol="id",
-                    allow_none=True,
-                )
-            )
-            self.assertIsNotNone(row)
-        finally:
-            self.state_datastore.tikv_pd_endpoints = []
-
-    def test_tikv_publishes_nodes_before_roots(self) -> None:
-        """A successful TiKV-mode write publishes nodes before the root."""
-        from unittest.mock import patch
-
-        self._enable_mock_tikv()
-        try:
-            calls: list[list[tuple[bytes, bytes]]] = []
-
-            def record_put(pairs: list[tuple[bytes, bytes]]) -> None:
-                calls.append(pairs)
-
-            with patch(
-                "synapse.synapse_rust.tikv_engine.batch_put",
-                side_effect=record_put,
-            ):
-                state_group = self.get_success(
-                    self.state_datastore.store_state_group(
-                        event_id="$ordered-write:event",
-                        room_id=self.room.to_string(),
-                        room_version=RoomVersions.V1,
-                        prev_group=None,
-                        delta_ids=None,
-                        current_state_ids={
-                            (EventTypes.Create, ""): "$ordered-write:event"
-                        },
-                    )
-                )
-
-            self.assertEqual(len(calls), 2)
-            self.assertTrue(all(key.startswith(b"hamt:node:") for key, _ in calls[0]))
-            self.assertTrue(all(key.startswith(b"hamt:root:") for key, _ in calls[1]))
-            row = self.get_success(
-                self.store.db_pool.simple_select_one_onecol(
-                    table="state_groups",
-                    keyvalues={"id": state_group},
-                    retcol="event_id",
-                    allow_none=False,
-                )
-            )
-            self.assertEqual(row, "$ordered-write:event")
-        finally:
-            self.state_datastore.tikv_pd_endpoints = []
-
-    def test_mixed_existing_and_nonexistent_groups_under_tikv(self) -> None:
-        """Verify that present and genuinely absent groups resolve together."""
-        from unittest.mock import patch
-
-        event = self.inject_state_event(
-            self.room, self.u_alice, EventTypes.Create, "", {}
-        )
-        state_group = self.get_success(
-            self.store._get_state_group_for_event(event.event_id)
-        )
-        assert state_group is not None
-        nonexistent_group = 9999999
-
-        def mock_mat(
-            groups: list[int],
-        ) -> tuple[dict[int, list[tuple[str, str, str]]], list[int]]:
-            return (
-                (
-                    {state_group: [(EventTypes.Create, "", event.event_id)]}
-                    if state_group in groups
-                    else {}
-                ),
-                [group for group in groups if group != state_group],
-            )
-
-        self._enable_mock_tikv()
-        try:
-            with patch.object(
-                self.state_datastore,
-                "_materialize_state_hamts_from_tikv_direct",
-                side_effect=mock_mat,
-            ):
-                res = self.get_success(
-                    self.state_datastore._get_state_groups_from_groups(
-                        [state_group, nonexistent_group], StateFilter.all()
-                    )
-                )
-                self.assertIn(state_group, res)
-                self.assertIn(nonexistent_group, res)
-                self.assertEqual(
-                    res[state_group], {(EventTypes.Create, ""): event.event_id}
-                )
-                self.assertEqual(res[nonexistent_group], {})
-        finally:
-            self.state_datastore.tikv_pd_endpoints = []
 
     def test_mixed_batch_with_unresolved_existing_group_raises(self) -> None:
         """An unresolved existing group must not be masked by other results."""
@@ -1379,94 +722,6 @@ class StateStoreTestCase(HomeserverTestCase):
         finally:
             self.state_datastore.tikv_pd_endpoints = []
 
-    def test_exact_filter_partial_match_under_pure_tikv(self) -> None:
-        """Verify that exact key lookups under pure TiKV return partial matches correctly without SQL transactions."""
-        from unittest.mock import patch
-
-        from synapse.storage.databases.state.bg_updates import (
-            _encode_state_hamt_root,
-            _state_hamt_node_tikv_key,
-            _state_hamt_root_tikv_key,
-        )
-        from synapse.synapse_rust import state_hamt
-
-        room_prefix = b"01234567"
-        room_id = self.room.to_string()
-        server_secret = self.state_datastore._state_hamt_secret()
-        entries = [
-            (EventTypes.Create, "", "$create:test"),
-            (EventTypes.Name, "", "$name:test"),
-            (EventTypes.Topic, "", "$topic:test"),
-        ]
-        root_hash, _sg, lattice, nodes = state_hamt.build_root_handle_with_lattice(
-            server_secret, room_id, entries
-        )
-        nodes_dict = dict(nodes)
-        root_bytes = nodes_dict[root_hash]
-        encoded_root = _encode_state_hamt_root(
-            room_prefix, root_hash, lattice, room_id=room_id
-        )
-
-        state_group = 88889
-        self.get_success(
-            self.store.db_pool.simple_insert(
-                table="state_groups",
-                values={
-                    "id": state_group,
-                    "room_id": room_id,
-                    "event_id": "$create:test",
-                },
-                desc="test_exact_partial.insert_sg",
-            )
-        )
-
-        def mock_get(key: bytes) -> bytes | None:
-            if key == _state_hamt_root_tikv_key(
-                self.state_datastore.tikv_namespace, state_group
-            ):
-                return encoded_root
-            if key == _state_hamt_node_tikv_key(
-                self.state_datastore.tikv_namespace, room_prefix, root_hash
-            ):
-                return root_bytes
-            return None
-
-        def mock_batch_get(keys: list[bytes]) -> list[tuple[bytes, bytes]]:
-            res = []
-            for k in keys:
-                for h, nb in nodes:
-                    if k == _state_hamt_node_tikv_key(
-                        self.state_datastore.tikv_namespace, room_prefix, h
-                    ):
-                        res.append((k, nb))
-            return res
-
-        self._enable_mock_tikv()
-        try:
-            with (
-                patch("synapse.synapse_rust.tikv_engine.get", side_effect=mock_get),
-                patch(
-                    "synapse.synapse_rust.tikv_engine.batch_get",
-                    side_effect=mock_batch_get,
-                ),
-            ):
-                # Filter requesting m.room.name (present) and m.room.join_rules (absent)
-                res = self.get_success(
-                    self.state_datastore._get_state_groups_from_groups(
-                        [state_group],
-                        StateFilter.from_types(
-                            [
-                                (EventTypes.Name, ""),
-                                (EventTypes.JoinRules, ""),
-                            ]
-                        ),
-                    )
-                )
-                self.assertEqual(
-                    res[state_group], {(EventTypes.Name, ""): "$name:test"}
-                )
-        finally:
-            self.state_datastore.tikv_pd_endpoints = []
 
     def test_non_v1_root_record_raises_corruption(self) -> None:
         """Verify that any non-v1 root record is treated as corruption and raises RuntimeError."""
@@ -1499,23 +754,6 @@ class StateStoreTestCase(HomeserverTestCase):
         finally:
             self.state_datastore.tikv_pd_endpoints = []
 
-    def test_tikv_hamt_keys_are_namespaced(self) -> None:
-        """Independent SQL databases must not share TiKV state-group keys."""
-        from synapse.storage.databases.state.bg_updates import (
-            _state_hamt_node_tikv_key,
-            _state_hamt_root_tikv_key,
-        )
-
-        room_prefix = b"01234567"
-        structural_hash = b"0123456789abcdef0123456789abcdef"
-        self.assertNotEqual(
-            _state_hamt_root_tikv_key("worker-one", 1),
-            _state_hamt_root_tikv_key("worker-two", 1),
-        )
-        self.assertNotEqual(
-            _state_hamt_node_tikv_key("worker-one", room_prefix, structural_hash),
-            _state_hamt_node_tikv_key("worker-two", room_prefix, structural_hash),
-        )
 
     def test_get_state_groups(self) -> None:
         e1 = self.inject_state_event(self.room, self.u_alice, EventTypes.Create, "", {})
@@ -2099,70 +1337,6 @@ class StateStoreTestCase(HomeserverTestCase):
             final_state[final_sg][(EventTypes.JoinRules, "")], event4.event_id
         )
 
-    def test_purge_room_state_tikv_uses_returned_delete_ids(self) -> None:
-        """TiKV cleanup must use IDs returned by the purge transaction.
-
-        A PostgreSQL READ COMMITTED purge can delete a state group which was
-        committed after an earlier query but before the DELETE statement. In
-        that case every deleted ID must be durably queued before the TiKV
-        cleanup starts.
-        """
-        from unittest.mock import patch
-
-        from twisted.internet import defer as _defer
-
-        from synapse.storage.database import LoggingTransaction
-        from synapse.storage.databases.state.bg_updates import (
-            _state_hamt_root_tikv_key,
-        )
-
-        deleted_ids = [1, 2]
-        tikv_namespace = self.state_datastore.tikv_namespace
-        deleted_keys: list[list[bytes]] = []
-
-        def capture_batch_delete(keys: list[bytes]) -> None:
-            deleted_keys.append(keys)
-
-        def purge_transaction(txn: LoggingTransaction, _room_id: str) -> list[int]:
-            txn.execute_batch(
-                "INSERT INTO state_hamt_root_deletion_queue (state_group) VALUES (?)",
-                [(state_group,) for state_group in deleted_ids],
-            )
-            return deleted_ids
-
-        self._enable_mock_tikv()
-        try:
-            with patch.object(
-                self.state_datastore,
-                "_purge_room_state_txn",
-                side_effect=purge_transaction,
-            ) as purge_transaction_mock:
-                with patch(
-                    "synapse.storage.databases.state.store.defer_to_thread",
-                    side_effect=lambda _reactor, fn, *args, **kwargs: (
-                        fn(*args, **kwargs),
-                        _defer.succeed(None),
-                    )[1],
-                ):
-                    with patch(
-                        "synapse.synapse_rust.tikv_engine.batch_delete",
-                        side_effect=capture_batch_delete,
-                    ):
-                        self.get_success(
-                            self.state_datastore.purge_room_state(self.room.to_string())
-                        )
-
-            purge_transaction_mock.assert_called_once()
-        finally:
-            self.state_datastore.tikv_pd_endpoints = []
-
-        self.assertEqual(
-            len(deleted_keys), 1, "batch_delete must be called exactly once"
-        )
-        self.assertEqual(
-            set(deleted_keys[0]),
-            {_state_hamt_root_tikv_key(tikv_namespace, sg) for sg in deleted_ids},
-        )
 
     def test_purge_room_state_concurrent_insertion_no_orphans(self) -> None:
         """Verify PostgreSQL READ COMMITTED concurrent insertion race during purge."""

@@ -1,7 +1,7 @@
 from collections.abc import Sequence
 
 def room_structural_key(server_secret: bytes, room_id: str) -> bytes: ...
-def room_tikv_prefix(
+def room_hamt_prefix(
     server_secret: bytes,
     room_id: str,
     msc4291_room_ids_as_hashes: bool,

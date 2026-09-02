@@ -28,7 +28,6 @@ import logging
 import os
 import secrets
 import time
-import uuid
 from typing import (
     AbstractSet,
     Any,
@@ -92,7 +91,7 @@ from tests.server import (
 )
 from tests.test_utils import event_injection, setup_awaitable_errors
 from tests.test_utils.logging_setup import setup_logging
-from tests.utils import checked_cast, cleanup_tikv_namespace, default_config, setupdb
+from tests.utils import checked_cast, default_config, setupdb
 
 setupdb()
 setup_logging()
@@ -478,20 +477,6 @@ class HomeserverTestCase(TestCase):
             self.prepare(self.reactor, self.clock, self.hs)
 
     def tearDown(self) -> None:
-        # Clean up any TiKV HAMT data written under this test's namespace
-        # so orphaned keys don't accumulate on a shared cluster.
-        if hasattr(self, "hs") and self.hs is not None:
-            namespace = self.hs.config.database.tikv_namespace
-            if namespace:
-                try:
-                    cleanup_tikv_namespace(namespace)
-                except Exception:
-                    # This is best-effort cleanup of test-only data. Do not let a
-                    # TiKV outage mask the result of the test which just ran.
-                    logger.warning(
-                        "Failed to clean up TiKV namespace %s", namespace, exc_info=True
-                    )
-
         # Reset to not use frozen dicts.
         events.USE_FROZEN_DICTS = False
 
@@ -552,10 +537,7 @@ class HomeserverTestCase(TestCase):
         """
         Get a default HomeServer config dict.
         """
-        config = default_config(
-            server_name="test",
-            tikv_namespace=f"trial-{os.getpid()}-{uuid.uuid4().hex}",
-        )
+        config = default_config(server_name="test")
 
         # apply any additional config which was specified via the override_config
         # decorator.

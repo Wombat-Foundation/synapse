@@ -28,8 +28,6 @@ from typing import (
     cast,
 )
 
-from prometheus_client import Histogram
-
 from synapse.api.constants import EventTypes
 from synapse.api.room_versions import RoomVersion
 from synapse.events import EventBase
@@ -38,7 +36,6 @@ from synapse.events.snapshot import (
 )
 from synapse.logging.context import defer_to_thread
 from synapse.logging.opentracing import tag_args, trace
-from synapse.metrics import SERVER_NAME_LABEL
 from synapse.metrics.background_process_metrics import wrap_as_background_process
 from synapse.storage._base import SQLBaseStore
 from synapse.storage.database import (
@@ -49,8 +46,8 @@ from synapse.storage.database import (
 from synapse.storage.databases.state.bg_updates import (
     StateBackgroundUpdateStore,
     _encode_state_hamt_root,
+    _state_hamt_node_key,
     _state_hamt_root_key,
-    put_state_hamt_objects,
 )
 from synapse.storage.engines import PostgresEngine
 from synapse.storage.types import Cursor
@@ -59,19 +56,13 @@ from synapse.types import MutableStateMap, StateKey, StateMap
 from synapse.types.state import StateFilter
 from synapse.util.caches.dictionary_cache import DictionaryCache
 from synapse.util.cancellation import cancellable
+from synapse.util.duration import Duration
 
 if TYPE_CHECKING:
     from synapse.server import HomeServer
     from synapse.storage.databases.state.deletion import StateDeletionDataStore
 
 logger = logging.getLogger(__name__)
-
-state_hamt_precommit_publish_timer = Histogram(
-    "synapse_state_hamt_precommit_publish_time_seconds",
-    "Time spent publishing HAMT nodes and roots before SQL state-group visibility",
-    labelnames=[SERVER_NAME_LABEL],
-    buckets=(0.0005, 0.001, 0.002, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 1.0),
-)
 
 
 class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
@@ -170,6 +161,12 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 raise RuntimeError(
                     f"Failed to open embedded mdbx engine at {self.embedded_hamt_path}"
                 ) from e
+
+            if hs.config.worker.run_background_tasks:
+                hs.get_clock().looping_call(
+                    self._drain_embedded_state_hamt_root_deletion_queue,
+                    Duration(minutes=5),
+                )
 
     @trace
     @tag_args
@@ -759,9 +756,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             for node_hash in node_hashes
         }
         found = mdbx_engine.batch_get(list(key_to_hash))
-        return {
-            key_to_hash[bytes(key)]: bytes(value) for key, value in found
-        }
+        return {key_to_hash[bytes(key)]: bytes(value) for key, value in found}
 
     def _store_state_hamt_root_embedded_txn(
         self,
@@ -863,14 +858,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 secret, room_id, room_version.msc4291_room_ids_as_hashes
             )
 
-        use_tikv = bool(self.tikv_pd_endpoints)
-        # When TiKV is enabled, collect HAMT objects to publish after the
-        # SQL transaction commits, so that subsequent TiKV reads can
-        # resolve these pre-v95 groups without raising a corruption error.
-        tikv_writes: list[
-            tuple[str, int, bytes, bytes, bytes, list[tuple[bytes, bytes]]]
-        ] = []
-
         def backfill_txn(txn: LoggingTransaction) -> None:
             for state_group, room_id in rows:
                 room_prefix = room_prefixes[room_id]
@@ -879,13 +866,11 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 current_state_ids = self._get_legacy_state_for_groups_txn(
                     txn, [state_group], StateFilter.all()
                 )[state_group]
-                root_hash, lattice, nodes = self._persist_state_hamt_txn(
+                # Both SQL and (if configured) the embedded engine are
+                # written synchronously here -- see _persist_state_hamt_txn.
+                self._persist_state_hamt_txn(
                     txn, state_group, room_id, room_prefix, current_state_ids
                 )
-                if use_tikv:
-                    tikv_writes.append(
-                        (room_id, state_group, room_prefix, root_hash, lattice, nodes)
-                    )
 
             self.db_pool.updates._background_update_progress_txn(
                 txn,
@@ -896,35 +881,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         await self.db_pool.runInteraction(
             self.STATE_HAMT_BACKFILL_ROOTS_UPDATE_NAME, backfill_txn
         )
-
-        # Publish backfilled roots and nodes to TiKV *after* the SQL
-        # transaction commits.  State groups are immutable so there is
-        # no read-side race: TiKV reads will simply continue to fall
-        # back to the legacy SQL walk until the publish completes.
-        if use_tikv and tikv_writes:
-            for (
-                room_id,
-                state_group,
-                room_prefix,
-                root_hash,
-                lattice,
-                nodes,
-            ) in tikv_writes:
-                self._publish_state_hamt_objects_before_commit(
-                    room_prefix,
-                    nodes,
-                    [
-                        (
-                            _state_hamt_root_key(self.hamt_namespace, state_group),
-                            _encode_state_hamt_root(
-                                room_prefix,
-                                root_hash,
-                                lattice,
-                                room_id=room_id,
-                            ),
-                        )
-                    ],
-                )
 
         return len(rows)
 
@@ -997,43 +953,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             local_roots=local_roots,
         )
 
-    def _publish_state_hamt_objects_before_commit(
-        self,
-        room_prefix: bytes,
-        nodes: list[tuple[bytes, bytes]],
-        roots: list[tuple[bytes, bytes]],
-    ) -> None:
-        """Publish immutable nodes, then roots, before SQL visibility.
-
-        This is called inside ``runInteraction``. If the database retries the
-        callback after an OperationalError or deadlock, the same TiKV writes
-        may run again. That is safe: nodes are content-addressed and roots are
-        overwritten at their immutable state-group key. A failed SQL commit
-        can leave unreachable TiKV objects, which are safe to retain.
-        """
-
-        worker_started, worker_finished, nodes_elapsed_ms, roots_elapsed_ms = (
-            put_state_hamt_objects(
-                self.hamt_namespace,
-                room_prefix,
-                nodes,
-                roots,
-                True,
-            )
-        )
-        logger.debug(
-            "[gg-state-timing] state_hamt_precommit_publish "
-            "nodes=%d roots=%d total_ms=%.1f nodes_put_ms=%.1f roots_put_ms=%.1f",
-            len(nodes),
-            len(roots),
-            (worker_finished - worker_started) * 1000,
-            nodes_elapsed_ms,
-            roots_elapsed_ms,
-        )
-        state_hamt_precommit_publish_timer.labels(
-            **{SERVER_NAME_LABEL: self.hs.hostname}
-        ).observe(worker_finished - worker_started)
-
     @trace
     @tag_args
     async def store_state_deltas_for_batched(
@@ -1070,17 +989,12 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             room_version.msc4291_room_ids_as_hashes,
         )
 
+        # Each group's incremental update looks up its predecessor via
+        # _get_embedded_hamt_node (mdbx, if configured) then SQL -- no
+        # prefetch needed before the transaction starts; both are local
+        # reads, unlike a real network round-trip would require.
         initial_nodes: dict[bytes, bytes] = {}
         initial_roots: dict[int, tuple[bytes, bytes]] = {}
-        if self.tikv_pd_endpoints:
-            batch_updates = [
-                (event.type, event.state_key, event.event_id)
-                for event, _context in events_and_context
-                if event.is_state()
-            ]
-            initial_nodes, initial_roots = await self._prefetch_tikv_hamt(
-                room_prefix, prev_group, room_id, batch_updates
-            )
 
         def insert_deltas_group_txn(
             txn: LoggingTransaction,
@@ -1123,11 +1037,12 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             state_group_iter = iter(state_groups)
             hamt_writes: list[tuple[int, bytes, bytes, list[tuple[bytes, bytes]]]] = []
             # Nodes for state groups persisted earlier *in this same batch*
-            # aren't necessarily visible in TiKV yet -- TiKV writes are
-            # deferred to a single flush after this whole transaction
-            # commits (see below) -- so a later group's incremental update
-            # needs this in-memory cache to find its predecessor's root,
-            # rather than reading (nothing) back from TiKV mid-transaction.
+            # aren't visible to a fresh SQL/mdbx lookup mid-transaction (SQL
+            # rows aren't visible to other reads in the same txn until
+            # commit, and mdbx isn't written until _store_state_hamt_nodes_txn
+            # runs for that row either) -- so a later group's incremental
+            # update needs this in-memory cache to find its predecessor's
+            # root.
             local_nodes = dict(initial_nodes)
             local_roots = dict(initial_roots)
 
@@ -1167,40 +1082,17 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
 
             return events_and_context, hamt_writes
 
-        events_and_context, hamt_writes = await self.db_pool.runInteraction(
+        # Both SQL and (if configured) the embedded engine were already
+        # written synchronously for every group in insert_deltas_group_txn
+        # (via _persist_state_group_snapshot_txn -> _persist_state_hamt_txn /
+        # _persist_state_hamt_incremental_txn), so there's nothing left to
+        # publish post-commit here.
+        events_and_context, _hamt_writes = await self.db_pool.runInteraction(
             "store_state_deltas_for_batched.insert_deltas_group",
             insert_deltas_group_txn,
             events_and_context,
             prev_group,
         )
-
-        # Publish all batched state groups to TiKV AFTER the SQL
-        # transaction commits.  TiKV writes are idempotent (nodes are
-        # content-addressed, roots overwrite at their immutable
-        # state-group key) and state groups are immutable once created,
-        # so there is no read-side inconsistency: TiKV reads will
-        # simply continue to fall back to SQL until the publish
-        # completes.  Performing the write here frees the DB worker
-        # thread and avoids holding the SQL transaction open across
-        # TiKV network round-trips.
-        if self.tikv_pd_endpoints and hamt_writes:
-            all_nodes = [node for _, _, _, nodes in hamt_writes for node in nodes]
-            roots = [
-                (
-                    _state_hamt_root_key(self.hamt_namespace, group),
-                    _encode_state_hamt_root(
-                        room_prefix, root_hash, lattice, room_id=room_id
-                    ),
-                )
-                for group, root_hash, lattice, _ in hamt_writes
-            ]
-            await defer_to_thread(
-                self.hs.get_reactor(),
-                self._publish_state_hamt_objects_before_commit,
-                room_prefix,
-                all_nodes,
-                roots,
-            )
 
         return events_and_context
 
@@ -1279,10 +1171,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
 
         initial_nodes: dict[bytes, bytes] = {}
         initial_roots: dict[int, tuple[bytes, bytes]] = {}
-        if self.tikv_pd_endpoints and prev_group is not None and updates is not None:
-            initial_nodes, initial_roots = await self._prefetch_tikv_hamt(
-                room_prefix, prev_group, room_id, updates
-            )
 
         def insert_full_state_txn(
             txn: LoggingTransaction, current_state_ids: StateMap[str]
@@ -1316,36 +1204,14 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
 
             return state_group, root_structural_hash, lattice, nodes
 
-        state_group, root_hash, lattice, nodes = await self.db_pool.runInteraction(
+        # Both SQL and (if configured) the embedded engine were already
+        # written synchronously in insert_full_state_txn -- nothing left to
+        # publish post-commit.
+        state_group, _root_hash, _lattice, _nodes = await self.db_pool.runInteraction(
             "store_state_group.insert_full_state",
             insert_full_state_txn,
             current_state_ids,
         )
-
-        # Publish to TiKV AFTER the SQL transaction commits.  TiKV
-        # writes are idempotent and state groups are immutable, so
-        # there is no read-side inconsistency: TiKV reads will fall
-        # back to SQL until the publish completes.  Performing the
-        # write here frees the DB worker thread and avoids holding
-        # the SQL transaction open across TiKV network round-trips.
-        if self.tikv_pd_endpoints:
-            await defer_to_thread(
-                self.hs.get_reactor(),
-                self._publish_state_hamt_objects_before_commit,
-                room_prefix,
-                nodes,
-                [
-                    (
-                        _state_hamt_root_key(self.hamt_namespace, state_group),
-                        _encode_state_hamt_root(
-                            room_prefix,
-                            root_hash,
-                            lattice,
-                            room_id=room_id,
-                        ),
-                    )
-                ],
-            )
 
         logger.debug(
             "[gg-state-timing] store_state_group group=%d elapsed_ms=%.1f",
@@ -1377,12 +1243,12 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             room_id,
             state_groups_to_sequence_numbers,
         )
-        if self.tikv_pd_endpoints and state_groups:
-            from synapse.synapse_rust import tikv_engine
+        if self.embedded_hamt_engine == "mdbx" and state_groups:
+            from synapse.synapse_rust import mdbx_engine
 
             await defer_to_thread(
                 self.hs.get_reactor(),
-                tikv_engine.batch_delete,
+                mdbx_engine.batch_delete,
                 [
                     _state_hamt_root_key(self.hamt_namespace, int(state_group))
                     for state_group in state_groups
@@ -1550,17 +1416,18 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             self._purge_room_state_txn,
             room_id,
         )
-        if self.tikv_pd_endpoints:
-            await self._drain_tikv_state_hamt_root_deletion_queue()
+        if self.embedded_hamt_engine == "mdbx":
+            await self._drain_embedded_state_hamt_root_deletion_queue()
 
-    @wrap_as_background_process("drain_tikv_state_hamt_root_deletion_queue")
-    async def _drain_tikv_state_hamt_root_deletion_queue(self) -> None:
-        """Delete queued TiKV roots after their SQL state groups are purged."""
+    @wrap_as_background_process("drain_embedded_state_hamt_root_deletion_queue")
+    async def _drain_embedded_state_hamt_root_deletion_queue(self) -> None:
+        """Delete queued embedded-engine roots after their SQL state groups
+        are purged."""
 
-        if not self.tikv_pd_endpoints:
+        if self.embedded_hamt_engine != "mdbx":
             return
 
-        from synapse.synapse_rust import tikv_engine
+        from synapse.synapse_rust import mdbx_engine
 
         while True:
 
@@ -1575,7 +1442,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 return [int(row[0]) for row in txn]
 
             state_groups = await self.db_pool.runInteraction(
-                "get_tikv_state_hamt_root_deletion_queue_batch", get_batch_txn
+                "get_embedded_state_hamt_root_deletion_queue_batch", get_batch_txn
             )
             if not state_groups:
                 return
@@ -1583,7 +1450,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             try:
                 await defer_to_thread(
                     self.hs.get_reactor(),
-                    tikv_engine.batch_delete,
+                    mdbx_engine.batch_delete,
                     [
                         _state_hamt_root_key(self.hamt_namespace, state_group)
                         for state_group in state_groups
@@ -1594,13 +1461,14 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     column="state_group",
                     iterable=state_groups,
                     keyvalues={},
-                    desc="remove_tikv_state_hamt_root_deletion_queue_batch",
+                    desc="remove_embedded_state_hamt_root_deletion_queue_batch",
                 )
             except Exception:
                 # The IDs remain durably queued for the periodic retry, so a
-                # TiKV outage cannot leave directly-readable stale roots forever.
+                # transient embedded-engine failure cannot leave
+                # directly-readable stale roots forever.
                 logger.warning(
-                    "Failed to clean up %d queued TiKV HAMT roots; will retry",
+                    "Failed to clean up %d queued embedded HAMT roots; will retry",
                     len(state_groups),
                     exc_info=True,
                 )
@@ -1631,10 +1499,11 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         if not deleted_state_groups:
             return []
 
-        if self.tikv_pd_endpoints:
+        if self.embedded_hamt_engine == "mdbx":
             # Persist a retry record in the same transaction as the SQL purge.
-            # If TiKV is unavailable after commit, its root keys can still be
-            # removed on a later retry instead of being lost with these IDs.
+            # If the embedded engine write fails after commit, its root keys
+            # can still be removed on a later retry instead of being lost
+            # with these IDs.
             txn.execute_batch(
                 """
                 INSERT INTO state_hamt_root_deletion_queue (state_group)

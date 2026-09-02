@@ -20,12 +20,10 @@
 #
 
 import atexit
-import hashlib
 import logging
 import os
 import signal
 import sys
-import uuid
 from types import FrameType, TracebackType
 from typing import (
     Literal,
@@ -96,48 +94,6 @@ POSTGRES_BASE_DB = "_synapse_unit_tests_base_%s" % (os.getpid(),)
 # DB to disk and query it with the sqlite CLI.
 SQLITE_PERSIST_DB = os.environ.get("SYNAPSE_TEST_PERSIST_SQLITE_DB") is not None
 
-# A comma-separated list of TiKV PD endpoints (e.g. "127.0.0.1:2379"). When
-# set, tests run with a real TiKV backend for HAMT state storage instead of
-# the SQL-backed state_hamt_nodes/state_hamt_roots tables -- see
-# tikv_pd_endpoints in synapse/config/database.py.
-TIKV_PD_ENDPOINTS = [
-    endpoint.strip()
-    for endpoint in os.environ.get("SYNAPSE_TEST_TIKV_PD_ENDPOINTS", "").split(",")
-    if endpoint.strip()
-] or None
-
-
-def cleanup_tikv_namespace(namespace: str) -> None:
-    """Delete all TiKV keys written under *namespace* (HAMT roots + nodes).
-
-    Every ``default_config()`` call that doesn't receive an explicit
-    ``tikv_namespace`` mints a fresh random one.  If we never clean up,
-    orphaned per-test namespaces accumulate on the shared TiKV cluster.
-    """
-    if not TIKV_PD_ENDPOINTS:
-        return
-
-    try:
-        from synapse.synapse_rust import tikv_engine
-    except ImportError:
-        return
-
-    namespace_hash = hashlib.sha256(namespace.encode("utf-8")).digest()[:16]
-    ns_hex = namespace_hash.hex().encode("ascii")
-
-    deleted = 0
-    for prefix in (b"hamt:root:" + ns_hex, b"hamt:node:" + ns_hex):
-        while True:
-            pairs = tikv_engine.scan_prefix(prefix, 1000)
-            if not pairs:
-                break
-            tikv_engine.batch_delete([k for k, _ in pairs])
-            deleted += len(pairs)
-
-    if deleted:
-        logger.info("Cleaned up %d TiKV keys for namespace %s", deleted, namespace)
-
-
 # the dbname we will connect to in order to create the base database.
 POSTGRES_DBNAME_FOR_INITIAL_CREATE = "postgres"
 
@@ -204,7 +160,6 @@ def default_config(
     *,
     server_name: str,
     parse: Literal[False] = ...,
-    tikv_namespace: str | None = ...,
 ) -> dict[str, object]: ...
 
 
@@ -213,7 +168,6 @@ def default_config(
     *,
     server_name: str,
     parse: Literal[True],
-    tikv_namespace: str | None = ...,
 ) -> HomeServerConfig: ...
 
 
@@ -221,7 +175,6 @@ def default_config(
     *,
     server_name: str,
     parse: bool = False,
-    tikv_namespace: str | None = None,
 ) -> dict[str, object] | HomeServerConfig:
     """
     Create a reasonable test config.
@@ -229,8 +182,6 @@ def default_config(
     Args:
         server_name: homeserver name
         parse: TODO
-        tikv_namespace: Optional TiKV namespace to use. If not specified and
-            TIKV_PD_ENDPOINTS is configured, a unique namespace is generated.
     """
     config_dict = {
         "server_name": server_name,
@@ -305,17 +256,6 @@ def default_config(
         "caches": {"global_factor": 1, "sync_response_cache_duration": 0},
         "listeners": [{"port": 0, "type": "http"}],
     }
-
-    if TIKV_PD_ENDPOINTS:
-        # Trial workers use separate SQL databases but share this TiKV cluster.
-        # State-group ids restart in each database, so isolate their HAMT keys
-        # uniquely per test database/homeserver setup.
-        if tikv_namespace is None:
-            tikv_namespace = f"trial-{os.getpid()}-{uuid.uuid4().hex}"
-        config_dict["tikv"] = {
-            "pd_endpoints": TIKV_PD_ENDPOINTS,
-            "namespace": tikv_namespace,
-        }
 
     if parse:
         config = HomeServerConfig()
