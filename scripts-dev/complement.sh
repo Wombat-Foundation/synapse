@@ -648,8 +648,11 @@ main() {
     if [ "$_pexit" -ne 0 ]; then go_test_exit_code="$_pexit"; fi
   done
 
+  echo "DEBUG: tests done, go_test_exit_code=$go_test_exit_code" >&2
+
   # ── Merge / refresh results ledger ────────────────────────────────────────────
   local merge_script="${repo_root}/scripts-dev/merge_complement_results.py"
+  echo "DEBUG: staged_results_file=$staged_results_file exists=$( [ -f "$staged_results_file" ] && echo yes || echo no ) size=$( [ -f "$staged_results_file" ] && wc -c <"$staged_results_file" || echo 0 )" >&2
   if [ -f "$staged_results_file" ] && [ -s "$staged_results_file" ]; then
     if [ "$RUN_TESTS" = "." ]; then
       # Full run: dedupe + sort staged, then replace main results outright.
