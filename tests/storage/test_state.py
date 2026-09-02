@@ -215,6 +215,52 @@ class StateStoreTestCase(HomeserverTestCase):
             {(EventTypes.Name, ""): e2.event_id},
         )
 
+    def test_embedded_engine_root_lookup_does_not_need_sql(self) -> None:
+        """`_store_state_hamt_root_embedded_txn` mirrors the HAMT root
+        record into the embedded engine itself (under the same
+        `hamt:root:...` key TiKV uses), not just SQL's `state_hamt_roots`.
+        Deleting that SQL row entirely and still reading correctly proves
+        `_fetch_hamt_roots_for_embedded_txn` actually took the embedded-
+        engine fast path rather than silently falling back to SQL.
+        """
+        import shutil
+        import tempfile
+
+        from synapse.synapse_rust import mdbx_engine
+
+        tmpdir = tempfile.mkdtemp(prefix="test-embedded-root-mdbx-")
+        self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
+        mdbx_engine.open_client(tmpdir)
+        self.state_datastore.embedded_hamt_engine = "mdbx"
+        self.state_datastore.embedded_hamt_path = tmpdir
+
+        e1 = self.inject_state_event(self.room, self.u_alice, EventTypes.Create, "", {})
+        e2 = self.inject_state_event(
+            self.room, self.u_alice, EventTypes.Name, "", {"name": "test room"}
+        )
+        state_group = self.get_success(
+            self.store._get_state_group_for_event(e2.event_id)
+        )
+        assert state_group is not None
+
+        self.get_success(
+            self.store.db_pool.simple_delete(
+                table="state_hamt_roots",
+                keyvalues={"state_group": state_group},
+                desc="test_embedded_engine_root_lookup_does_not_need_sql",
+            )
+        )
+
+        state_group_map = self.get_success(
+            self.state_datastore._get_state_groups_from_groups(
+                [state_group], StateFilter.all()
+            )
+        )
+        self.assertDictEqual(
+            state_group_map[state_group],
+            {(EventTypes.Create, ""): e1.event_id, (EventTypes.Name, ""): e2.event_id},
+        )
+
     def test_exact_state_filter_uses_selective_hamt_lookup(self) -> None:
         create = self.inject_state_event(
             self.room, self.u_alice, EventTypes.Create, "", {}

@@ -1152,20 +1152,41 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
     ) -> dict[int, tuple[bytes, bytes, str]]:
         """Fetch `(room_prefix, root_structural_hash, room_id)` for each of
         `groups` that has a published HAMT root -- the small SQL lookup the
-        embedded engine still needs (root records live only in
-        `state_hamt_roots`/`state_groups`; only nodes are mirrored into the
-        embedded engine's own store).
+        embedded engine still needs -- unless the embedded engine already
+        has the root record too (`_store_state_hamt_root_embedded_txn`
+        mirrors it there at persist time, under the same `hamt:root:...`
+        key TiKV uses), in which case this is a local point lookup with no
+        SQL at all. Only a group missing from the embedded engine's own
+        store falls back to `state_hamt_roots`/`state_groups` -- the same
+        self-healing shape TiKV's read path already has.
         """
+        engine = self._embedded_hamt_engine_module()
+        namespace = self.tikv_namespace
+        found: dict[int, tuple[bytes, bytes, str]] = {}
+        still_missing: list[int] = []
+        for group in groups:
+            root_value = engine.get(_state_hamt_root_tikv_key(namespace, group))
+            if root_value is None:
+                still_missing.append(group)
+                continue
+            room_prefix, root_hash, _lattice, room_id = _decode_state_hamt_root(
+                bytes(root_value)
+            )
+            found[group] = (room_prefix, root_hash, room_id)
+
+        if not still_missing:
+            return found
+
         root_rows = self.db_pool.simple_select_many_txn(
             txn,
             table="state_hamt_roots",
             column="state_group",
-            iterable=groups,
+            iterable=still_missing,
             keyvalues={},
             retcols=("state_group", "room_prefix", "root_structural_hash"),
         )
         if not root_rows:
-            return {}
+            return found
         roots = {
             int(group): (bytes(room_prefix), bytes(root_hash))
             for group, room_prefix, root_hash in root_rows
@@ -1179,11 +1200,14 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
             retcols=("id", "room_id"),
         )
         room_ids = {int(group): room_id for group, room_id in room_id_rows}
-        return {
-            group: (room_prefix, root_hash, room_ids[group])
-            for group, (room_prefix, root_hash) in roots.items()
-            if group in room_ids
-        }
+        found.update(
+            {
+                group: (room_prefix, root_hash, room_ids[group])
+                for group, (room_prefix, root_hash) in roots.items()
+                if group in room_ids
+            }
+        )
+        return found
 
     def _materialize_state_hamts_from_embedded_txn(
         self, txn: LoggingTransaction, groups: list[int]

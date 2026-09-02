@@ -772,6 +772,9 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 "root_lattice": bytearray(root_lattice),
             },
         )
+        self._store_state_hamt_root_embedded_txn(
+            state_group, room_prefix, root_structural_hash, root_lattice, room_id
+        )
 
         logger.debug(
             "[gg-state-timing] _persist_state_hamt_txn mode=rebuild "
@@ -944,6 +947,9 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 "root_lattice": bytearray(new_lattice),
             },
         )
+        self._store_state_hamt_root_embedded_txn(
+            state_group, room_prefix, new_root_hash, new_lattice, room_id
+        )
         logger.debug(
             "[gg-state-timing] _persist_state_hamt_incremental_txn "
             "group=%d prev=%d updates=%d nodes=%d elapsed_ms=%.1f",
@@ -986,6 +992,40 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 for structural_hash, node_bytes in nodes
             ],
         )
+
+    def _store_state_hamt_root_embedded_txn(
+        self,
+        state_group: int,
+        room_prefix: bytes,
+        root_hash: bytes,
+        lattice: bytes,
+        room_id: str,
+    ) -> None:
+        """Mirror a HAMT root record into the configured embedded engine,
+        under the same `hamt:root:<namespace_hash><state_group>` key TiKV
+        uses (`_state_hamt_root_tikv_key`) -- there's no TiKV-only key
+        scheme here, just an engine choice. Called synchronously in the
+        persisting transaction: unlike TiKV, an embedded engine is a local
+        call with no network round-trip to defer past commit, so there's no
+        reason to route it through the async post-commit publish path.
+        `_fetch_hamt_roots_for_embedded_txn` (bg_updates.py) reads this
+        first and falls back to `state_hamt_roots` SQL only on a miss, the
+        same self-healing shape TiKV's read path already has.
+        """
+        if not self.embedded_hamt_engine:
+            return
+        root_key = _state_hamt_root_tikv_key(self.tikv_namespace, state_group)
+        root_value = _encode_state_hamt_root(
+            room_prefix, root_hash, lattice, room_id=room_id
+        )
+        if self.embedded_hamt_engine == "mdbx":
+            from synapse.synapse_rust import mdbx_engine
+
+            mdbx_engine.put(root_key, root_value)
+        elif self.embedded_hamt_engine == "fjall":
+            from synapse.synapse_rust import fjall_engine
+
+            fjall_engine.put(root_key, root_value)
 
     async def _background_backfill_state_hamt_roots(
         self, progress: dict, batch_size: int
