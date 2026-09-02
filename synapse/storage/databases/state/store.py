@@ -48,10 +48,8 @@ from synapse.storage.database import (
 )
 from synapse.storage.databases.state.bg_updates import (
     StateBackgroundUpdateStore,
-    _decode_state_hamt_root,
     _encode_state_hamt_root,
-    _state_hamt_node_tikv_key,
-    _state_hamt_root_tikv_key,
+    _state_hamt_root_key,
     put_state_hamt_objects,
 )
 from synapse.storage.engines import PostgresEngine
@@ -59,10 +57,8 @@ from synapse.storage.types import Cursor
 from synapse.storage.util.sequence import build_sequence_generator
 from synapse.types import MutableStateMap, StateKey, StateMap
 from synapse.types.state import StateFilter
-from synapse.util.caches import intern_string
 from synapse.util.caches.dictionary_cache import DictionaryCache
 from synapse.util.cancellation import cancellable
-from synapse.util.duration import Duration
 
 if TYPE_CHECKING:
     from synapse.server import HomeServer
@@ -150,27 +146,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             id_column="id",
         )
 
-        self.tikv_pd_endpoints = hs.config.database.tikv_pd_endpoints
-        if self.tikv_pd_endpoints:
-            try:
-                from synapse.synapse_rust import tikv_engine
-
-                tikv_engine.open_client(self.tikv_pd_endpoints)
-                logger.info(
-                    "Connected to TiKV cluster at %s for state group offload",
-                    self.tikv_pd_endpoints,
-                )
-            except Exception as e:
-                raise RuntimeError(
-                    f"Failed to connect to TiKV cluster at {self.tikv_pd_endpoints}"
-                ) from e
-
-            if hs.config.worker.run_background_tasks:
-                hs.get_clock().looping_call(
-                    self._drain_tikv_state_hamt_root_deletion_queue,
-                    Duration(minutes=5),
-                )
-
         self.embedded_hamt_engine = hs.config.database.embedded_hamt_engine
         self.embedded_hamt_path = hs.config.database.embedded_hamt_path
         if self.embedded_hamt_engine and self.embedded_hamt_path:
@@ -212,105 +187,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         Returns:
             Dict of state group to state map.
         """
-        if self.tikv_pd_endpoints:
-            exact_keys = (
-                state_filter.concrete_types()
-                if not state_filter.has_wildcards()
-                else None
-            )
-
-            tikv_results: dict[int, StateMap[str]] = {}
-
-            def fetch_from_tikv_blocking(
-                target_groups: list[int],
-            ) -> tuple[dict[int, StateMap[str]], list[int]]:
-                res: dict[int, StateMap[str]] = {}
-                missing: list[int] = []
-                if len(target_groups) > 1:
-                    entries_by_group: dict[int, list[tuple[str, str, str]]]
-                    if exact_keys is not None:
-                        entries_by_group, missing = (
-                            self._lookup_state_hamts_from_tikv_direct(
-                                target_groups, exact_keys
-                            )
-                        )
-                    else:
-                        entries_by_group, missing = (
-                            self._materialize_state_hamts_from_tikv_direct(
-                                target_groups
-                            )
-                        )
-                    for group, batch_entries in entries_by_group.items():
-                        batch_state_map: MutableStateMap[str] = {}
-                        for typ, state_key, event_id in batch_entries:
-                            key = (intern_string(typ), intern_string(state_key))
-                            batch_state_map[key] = event_id
-                        res[group] = dict(state_filter.filter_state(batch_state_map))
-                    return res, missing
-
-                for group in target_groups:
-                    entries: list[tuple[str, str, str]] | None
-                    if exact_keys is not None:
-                        entries = self._lookup_state_hamt_from_tikv_direct(
-                            group, exact_keys
-                        )
-                    else:
-                        entries = self._materialize_state_hamt_from_tikv_direct(group)
-                    if entries is None:
-                        missing.append(group)
-                        continue
-
-                    state_map: MutableStateMap[str] = {}
-                    for typ, state_key, event_id in entries:
-                        key = (intern_string(typ), intern_string(state_key))
-                        state_map[key] = event_id
-                    res[group] = dict(state_filter.filter_state(state_map))
-                return res, missing
-
-            _gg_tikv_start = time.monotonic()
-            tikv_results, missing_groups = await defer_to_thread(
-                self.hs.get_reactor(),
-                fetch_from_tikv_blocking,
-                groups,
-            )
-            logger.debug(
-                "[gg-state-timing] _get_state_groups_from_groups tikv_dispatch "
-                "groups=%d elapsed_ms=%.1f missing=%d",
-                len(groups),
-                (time.monotonic() - _gg_tikv_start) * 1000,
-                len(missing_groups),
-            )
-
-            if missing_groups:
-                # TiKV publication happens after the SQL transaction commits so
-                # that its network round-trips do not hold a database worker.
-                # Until publication completes (or if it must be retried), use
-                # the SQL HAMT mirror for existing groups. A group which does
-                # not exist in SQL is genuinely absent or purged and resolves
-                # to an empty state map.
-                existing_rows = await self.db_pool.simple_select_many_batch(
-                    table="state_groups",
-                    column="id",
-                    iterable=missing_groups,
-                    retcols=("id",),
-                    desc="_get_state_groups_from_groups.check_missing_tikv_roots",
-                )
-                existing_in_sql = {group for (group,) in existing_rows}
-                for group in missing_groups:
-                    if group not in existing_in_sql:
-                        tikv_results[group] = {}
-                if existing_in_sql:
-                    sql_results = await self.db_pool.runInteraction(
-                        "_get_state_groups_from_groups.fallback_sql",
-                        self._get_state_groups_from_groups_txn,
-                        list(existing_in_sql),
-                        state_filter,
-                        use_tikv=False,
-                    )
-                    tikv_results.update(sql_results)
-
-            return tikv_results
-
         # _get_state_groups_from_groups_txn (bg_updates.py) already
         # disambiguates a missing HAMT root from a legitimately empty/purged
         # state group *inside* the transaction, and raises RuntimeError
@@ -319,8 +195,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         # `state_groups` row that references them, so there is no
         # cross-connection visibility race to poll for here: a caller-side
         # retry loop could never observe a corrupt group without the inner
-        # txn having already raised on the very first attempt. See the
-        # equivalent one-shot check on the TiKV-direct path above.
+        # txn having already raised on the very first attempt.
         chunks = [groups[i : i + 100] for i in range(0, len(groups), 100)]
         _gg_sql_start = time.monotonic()
         results: dict[int, StateMap[str]] = {}
@@ -572,111 +447,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             for state_key, event_id in current_state_ids.items()
         ]
 
-    def _prefetch_tikv_hamt_blocking(
-        self,
-        room_prefix: bytes,
-        state_group: int,
-        room_id: str,
-        updates: list[tuple[str, str, str]],
-    ) -> tuple[dict[bytes, bytes], dict[int, tuple[bytes, bytes]]] | None:
-        """Fetch a HAMT tree before starting a SQL transaction."""
-        from synapse.synapse_rust import state_hamt, tikv_engine
-
-        root_value = tikv_engine.get(
-            _state_hamt_root_tikv_key(self.tikv_namespace, state_group)
-        )
-        if root_value is None:
-            return None
-
-        stored_prefix, root_hash, lattice, _stored_room_id = _decode_state_hamt_root(
-            root_value
-        )
-        if stored_prefix != room_prefix:
-            raise RuntimeError(
-                f"HAMT root for state group {state_group} has the wrong room prefix"
-            )
-
-        root_key = _state_hamt_node_tikv_key(
-            self.tikv_namespace, room_prefix, root_hash
-        )
-        root_rows = tikv_engine.batch_get([root_key])
-        if not root_rows:
-            raise RuntimeError(
-                f"Missing HAMT root node while prefetching state group {state_group}"
-            )
-        nodes = {root_hash: bytes(root_rows[0][1])}
-
-        while True:
-            _applied, missing = state_hamt.apply_flat_state_updates(
-                self._state_hamt_secret(),
-                room_id,
-                nodes[root_hash],
-                list(nodes.items()),
-                lattice,
-                updates,
-            )
-            missing_hashes = {
-                bytes(node_hash)
-                for node_hash in missing
-                if bytes(node_hash) not in nodes
-            }
-            if not missing_hashes:
-                break
-            key_to_hash = {
-                _state_hamt_node_tikv_key(
-                    self.tikv_namespace, room_prefix, node_hash
-                ): node_hash
-                for node_hash in missing_hashes
-            }
-            rows = tikv_engine.batch_get(list(key_to_hash))
-            found = {
-                key_to_hash[bytes(node_key)]: bytes(node_bytes)
-                for node_key, node_bytes in rows
-            }
-            unresolved = missing_hashes - found.keys()
-            if unresolved:
-                raise RuntimeError(
-                    "Missing HAMT nodes while prefetching state group "
-                    f"{state_group}: {[node_hash.hex() for node_hash in unresolved]}"
-                )
-            nodes.update(found)
-
-        return nodes, {state_group: (root_hash, lattice)}
-
-    async def _prefetch_tikv_hamt(
-        self,
-        room_prefix: bytes,
-        state_group: int,
-        room_id: str,
-        updates: list[tuple[str, str, str]],
-    ) -> tuple[dict[bytes, bytes], dict[int, tuple[bytes, bytes]]]:
-        _gg_prefetch_start = time.monotonic()
-        prefetched = await defer_to_thread(
-            self.hs.get_reactor(),
-            self._prefetch_tikv_hamt_blocking,
-            room_prefix,
-            state_group,
-            room_id,
-            updates,
-        )
-        if prefetched is not None:
-            logger.debug(
-                "[gg-state-timing] _prefetch_tikv_hamt group=%d elapsed_ms=%.1f "
-                "nodes=%d",
-                state_group,
-                (time.monotonic() - _gg_prefetch_start) * 1000,
-                len(prefetched[0]),
-            )
-            return prefetched
-
-        # This is an optimization for an incremental update, not the
-        # authoritative read path. A predecessor without a published root can
-        # be a newly created/legacy group, or be in its publication window;
-        # callers can safely rebuild from their full state map in either case.
-        # Do not wait here: a write must not block on a fake test clock (or
-        # turn a recoverable missed optimization into a failed persistence).
-        return {}, {}
-
     def _persist_state_hamt_txn(
         self,
         txn: LoggingTransaction,
@@ -809,33 +579,13 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         update from: a pre-existing root written before this column
         existed, or a room's very first state group.
 
-        Works for both backends. In TiKV mode, node bytes are fetched from
-        and (implicitly, via the returned `new_nodes`) flushed to TiKV --
-        mirroring `_lookup_state_hamt_from_tikv_txn`'s fetch pattern and
-        `_persist_state_hamt_txn`'s existing "SQL stores nodes in-txn, TiKV
-        gets them after commit" split -- rather than `state_hamt_nodes`.
         """
         from synapse.synapse_rust import state_hamt
 
         _gg_inc_start = time.monotonic()
-        use_tikv = bool(self.tikv_pd_endpoints)
         local_roots = local_roots or {}
-        if use_tikv and prev_state_group in local_roots:
+        if prev_state_group in local_roots:
             prev_root_hash, prev_lattice = local_roots[prev_state_group]
-        elif use_tikv:
-            from synapse.synapse_rust import tikv_engine
-
-            root_value = tikv_engine.get(
-                _state_hamt_root_tikv_key(self.tikv_namespace, prev_state_group)
-            )
-            if root_value is None:
-                return None
-            (
-                _stored_prefix,
-                prev_root_hash,
-                prev_lattice,
-                _stored_room_id,
-            ) = _decode_state_hamt_root(root_value)
         else:
             prev_root = self.db_pool.simple_select_one_txn(
                 txn,
@@ -851,22 +601,15 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         local_nodes = local_nodes or {}
         root_node_bytes = local_nodes.get(prev_root_hash)
         if root_node_bytes is None:
-            if use_tikv:
-                from synapse.synapse_rust import tikv_engine
-
-                root_node_bytes = tikv_engine.get(
-                    _state_hamt_node_tikv_key(
-                        self.tikv_namespace, room_prefix, prev_root_hash
-                    )
-                )
-            else:
-                root_node_bytes = self.db_pool.simple_select_one_onecol_txn(
-                    txn,
-                    table="state_hamt_nodes",
-                    keyvalues={"structural_hash": bytearray(prev_root_hash)},
-                    retcol="node_bytes",
-                    allow_none=True,
-                )
+            root_node_bytes = self._get_embedded_hamt_node(room_prefix, prev_root_hash)
+        if root_node_bytes is None:
+            root_node_bytes = self.db_pool.simple_select_one_onecol_txn(
+                txn,
+                table="state_hamt_nodes",
+                keyvalues={"structural_hash": bytearray(prev_root_hash)},
+                retcol="node_bytes",
+                allow_none=True,
+            )
         if root_node_bytes is None:
             raise RuntimeError(
                 "Missing HAMT root node for state group "
@@ -901,31 +644,25 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     "apply_flat_state_updates reported no progress for state group "
                     f"{prev_state_group}"
                 )
-            if use_tikv:
-                from synapse.synapse_rust import tikv_engine
-
-                key_to_hash = {
-                    _state_hamt_node_tikv_key(
-                        self.tikv_namespace, room_prefix, node_hash
-                    ): node_hash
-                    for node_hash in missing
-                }
-                rows = [
-                    (key_to_hash[bytes(node_key)], bytes(node_bytes))
-                    for node_key, node_bytes in tikv_engine.batch_get(list(key_to_hash))
-                ]
-            else:
+            found = self._get_embedded_hamt_nodes_batch(room_prefix, missing)
+            still_missing = [
+                node_hash for node_hash in missing if node_hash not in found
+            ]
+            if still_missing:
                 rows = self.db_pool.simple_select_many_txn(
                     txn,
                     table="state_hamt_nodes",
                     column="structural_hash",
-                    iterable=[bytearray(node_hash) for node_hash in missing],
+                    iterable=[bytearray(node_hash) for node_hash in still_missing],
                     keyvalues={},
                     retcols=("structural_hash", "node_bytes"),
                 )
-            found = {
-                bytes(node_hash): bytes(node_bytes) for node_hash, node_bytes in rows
-            }
+                found.update(
+                    {
+                        bytes(node_hash): bytes(node_bytes)
+                        for node_hash, node_bytes in rows
+                    }
+                )
             nodes.update(found)
             unresolved = set(missing) - found.keys()
             if unresolved:
@@ -975,7 +712,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         if self.embedded_hamt_engine == "mdbx":
             from synapse.synapse_rust import mdbx_engine
 
-            mdbx_engine.put_state_hamt_nodes(self.tikv_namespace, room_prefix, nodes)
+            mdbx_engine.put_state_hamt_nodes(self.hamt_namespace, room_prefix, nodes)
 
         txn.executemany(
             """
@@ -989,6 +726,43 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             ],
         )
 
+    def _get_embedded_hamt_node(
+        self, room_prefix: bytes, node_hash: bytes
+    ) -> bytes | None:
+        """Point lookup of a single HAMT node in the embedded engine, if
+        configured -- consulted before falling back to `state_hamt_nodes`
+        SQL. Returns `None` on a miss (caller falls back), never raises for
+        a missing key.
+        """
+        if self.embedded_hamt_engine != "mdbx":
+            return None
+        from synapse.synapse_rust import mdbx_engine
+
+        key = _state_hamt_node_key(self.hamt_namespace, room_prefix, node_hash)
+        value = mdbx_engine.get(key)
+        return bytes(value) if value is not None else None
+
+    def _get_embedded_hamt_nodes_batch(
+        self, room_prefix: bytes, node_hashes: list[bytes]
+    ) -> dict[bytes, bytes]:
+        """Batched version of `_get_embedded_hamt_node`. Returns only the
+        hashes actually found; missing ones are simply absent from the
+        result, same self-healing shape as `embedded_event_json`'s
+        `get_event_json_batch`.
+        """
+        if self.embedded_hamt_engine != "mdbx" or not node_hashes:
+            return {}
+        from synapse.synapse_rust import mdbx_engine
+
+        key_to_hash = {
+            _state_hamt_node_key(self.hamt_namespace, room_prefix, node_hash): node_hash
+            for node_hash in node_hashes
+        }
+        found = mdbx_engine.batch_get(list(key_to_hash))
+        return {
+            key_to_hash[bytes(key)]: bytes(value) for key, value in found
+        }
+
     def _store_state_hamt_root_embedded_txn(
         self,
         state_group: int,
@@ -998,19 +772,18 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         room_id: str,
     ) -> None:
         """Mirror a HAMT root record into the configured embedded engine,
-        under the same `hamt:root:<namespace_hash><state_group>` key TiKV
-        uses (`_state_hamt_root_tikv_key`) -- there's no TiKV-only key
-        scheme here, just an engine choice. Called synchronously in the
-        persisting transaction: unlike TiKV, an embedded engine is a local
-        call with no network round-trip to defer past commit, so there's no
-        reason to route it through the async post-commit publish path.
+        under the `hamt:root:<namespace_hash><state_group>` key
+        (`_state_hamt_root_key`). Called synchronously in the persisting
+        transaction: an embedded engine is a local call with no network
+        round-trip to defer past commit, so there's no reason to route it
+        through an async post-commit publish path.
         `_fetch_hamt_roots_for_embedded_txn` (bg_updates.py) reads this
         first and falls back to `state_hamt_roots` SQL only on a miss, the
         same self-healing shape TiKV's read path already has.
         """
         if not self.embedded_hamt_engine:
             return
-        root_key = _state_hamt_root_tikv_key(self.tikv_namespace, state_group)
+        root_key = _state_hamt_root_key(self.hamt_namespace, state_group)
         root_value = _encode_state_hamt_root(
             room_prefix, root_hash, lattice, room_id=room_id
         )
@@ -1086,7 +859,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 # background update outright.
                 room_prefixes[room_id] = None
                 continue
-            room_prefixes[room_id] = state_hamt.room_tikv_prefix(
+            room_prefixes[room_id] = state_hamt.room_hamt_prefix(
                 secret, room_id, room_version.msc4291_room_ids_as_hashes
             )
 
@@ -1142,7 +915,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     nodes,
                     [
                         (
-                            _state_hamt_root_tikv_key(self.tikv_namespace, state_group),
+                            _state_hamt_root_key(self.hamt_namespace, state_group),
                             _encode_state_hamt_root(
                                 room_prefix,
                                 root_hash,
@@ -1241,7 +1014,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
 
         worker_started, worker_finished, nodes_elapsed_ms, roots_elapsed_ms = (
             put_state_hamt_objects(
-                self.tikv_namespace,
+                self.hamt_namespace,
                 room_prefix,
                 nodes,
                 roots,
@@ -1291,7 +1064,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
 
         from synapse.synapse_rust import state_hamt
 
-        room_prefix = state_hamt.room_tikv_prefix(
+        room_prefix = state_hamt.room_hamt_prefix(
             self._state_hamt_secret(),
             room_id,
             room_version.msc4291_room_ids_as_hashes,
@@ -1414,7 +1187,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             all_nodes = [node for _, _, _, nodes in hamt_writes for node in nodes]
             roots = [
                 (
-                    _state_hamt_root_tikv_key(self.tikv_namespace, group),
+                    _state_hamt_root_key(self.hamt_namespace, group),
                     _encode_state_hamt_root(
                         room_prefix, root_hash, lattice, room_id=room_id
                     ),
@@ -1498,7 +1271,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
 
         from synapse.synapse_rust import state_hamt
 
-        room_prefix = state_hamt.room_tikv_prefix(
+        room_prefix = state_hamt.room_hamt_prefix(
             self._state_hamt_secret(),
             room_id,
             room_version.msc4291_room_ids_as_hashes,
@@ -1563,7 +1336,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 nodes,
                 [
                     (
-                        _state_hamt_root_tikv_key(self.tikv_namespace, state_group),
+                        _state_hamt_root_key(self.hamt_namespace, state_group),
                         _encode_state_hamt_root(
                             room_prefix,
                             root_hash,
@@ -1611,7 +1384,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 self.hs.get_reactor(),
                 tikv_engine.batch_delete,
                 [
-                    _state_hamt_root_tikv_key(self.tikv_namespace, int(state_group))
+                    _state_hamt_root_key(self.hamt_namespace, int(state_group))
                     for state_group in state_groups
                 ],
             )
@@ -1812,7 +1585,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     self.hs.get_reactor(),
                     tikv_engine.batch_delete,
                     [
-                        _state_hamt_root_tikv_key(self.tikv_namespace, state_group)
+                        _state_hamt_root_key(self.hamt_namespace, state_group)
                         for state_group in state_groups
                     ],
                 )

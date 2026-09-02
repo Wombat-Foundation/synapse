@@ -84,8 +84,6 @@ class DatabaseConfig(Config):
         super().__init__(*args)
 
         self.databases: list[DatabaseConnectionConfig] = []
-        self.tikv_pd_endpoints: list[str] | None = None
-        self.tikv_namespace: str | None = None
         self.embedded_hamt_engine: str | None = None
         self.embedded_hamt_path: str | None = None
 
@@ -108,11 +106,6 @@ class DatabaseConfig(Config):
         multi_database_config = config.get("databases")
         database_config = config.get("database")
         database_path = config.get("database_path")
-
-        tikv_config = config.get("tikv")
-        if tikv_config:
-            self.tikv_pd_endpoints = tikv_config.get("pd_endpoints")
-            self.tikv_namespace = tikv_config.get("namespace")
 
         embedded_config = config.get("embedded_hamt")
         if embedded_config:

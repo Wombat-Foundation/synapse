@@ -51,10 +51,10 @@ logger = logging.getLogger(__name__)
 MAX_STATE_DELTA_HOPS = 100
 
 
-def _state_hamt_node_tikv_key(
+def _state_hamt_node_key(
     namespace: str, room_prefix: bytes, structural_hash: bytes
 ) -> bytes:
-    # Must match `node_tikv_key` in `rust/src/tikv_engine.rs`.
+    # Must match `node_key` in `rust/src/database/core.rs`.
     namespace_hash = hashlib.sha256(namespace.encode("utf-8")).digest()[:16]
     return (
         b"hamt:node:"
@@ -66,7 +66,7 @@ def _state_hamt_node_tikv_key(
     )
 
 
-def _state_hamt_root_tikv_key(namespace: str, state_group: int) -> bytes:
+def _state_hamt_root_key(namespace: str, state_group: int) -> bytes:
     """Return the per-namespace HAMT root key.
 
     State-group ids are only unique inside one Synapse database, so the
@@ -122,67 +122,6 @@ def _decode_state_hamt_root(
     return room_prefix, root_hash, lattice, room_id
 
 
-def put_state_hamt_objects(
-    namespace: str,
-    room_prefix: bytes,
-    nodes: list[tuple[bytes, bytes]],
-    roots: list[tuple[bytes, bytes]],
-    use_tikv: bool,
-) -> tuple[float, float, float, float]:
-    worker_started = time.monotonic()
-    # Nodes and root pointers live in the same TiKV namespace. State-group ids
-    # are only unique within one Synapse database, so namespace both key types
-    # to prevent independent deployments from overwriting each other's state.
-    # A linear event batch contains many adjacent snapshots and therefore many
-    # repeated, unchanged node hashes. Collapse them before sending the batch to
-    # TiKV rather than overwriting the same immutable object repeatedly.
-    pairs = list(
-        {
-            _state_hamt_node_tikv_key(
-                namespace, room_prefix, structural_hash
-            ): node_bytes
-            for structural_hash, node_bytes in nodes
-        }.items()
-    )
-
-    nodes_elapsed_ms = 0.0
-    roots_elapsed_ms = 0.0
-    if use_tikv:
-        from synapse.synapse_rust import tikv_engine
-
-        # State nodes are read through TiKV's Raw KV API, so they must also be
-        # written through Raw KV: transactional and raw data use distinct
-        # keyspaces. Publish roots only after every immutable node has been
-        # written. The caller performs this before committing SQL state-group
-        # visibility, so no committed group can expose a missing root.
-        nodes_bytes = sum(len(key) + len(value) for key, value in pairs)
-        nodes_start = time.monotonic()
-        tikv_engine.batch_put(pairs)
-        nodes_elapsed_ms = (time.monotonic() - nodes_start) * 1000
-        logger.debug(
-            "[gg-state-timing] state_hamt_nodes_batch_put "
-            "count=%d bytes=%d elapsed_ms=%.1f",
-            len(pairs),
-            nodes_bytes,
-            nodes_elapsed_ms,
-        )
-
-        roots_bytes = sum(len(key) + len(value) for key, value in roots)
-        roots_start = time.monotonic()
-        tikv_engine.batch_put(roots)
-        roots_elapsed_ms = (time.monotonic() - roots_start) * 1000
-        logger.debug(
-            "[gg-state-timing] state_hamt_roots_batch_put "
-            "count=%d bytes=%d elapsed_ms=%.1f",
-            len(roots),
-            roots_bytes,
-            roots_elapsed_ms,
-        )
-
-    worker_finished = time.monotonic()
-    return worker_started, worker_finished, nodes_elapsed_ms, roots_elapsed_ms
-
-
 class StateGroupBackgroundUpdateStore(SQLBaseStore):
     """Defines functions related to state groups needed to run the state background
     updates.
@@ -195,24 +134,28 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         hs: "HomeServer",
     ):
         super().__init__(database, db_conn, hs)
-        self._tikv_namespace_override: str | None = None
+        self._hamt_namespace_override: str | None = None
 
     @property
-    def tikv_namespace(self) -> str:
-        if self._tikv_namespace_override is not None:
-            return self._tikv_namespace_override
-        db_pool_ns = getattr(self.db_pool, "_tikv_namespace", None)
+    def hamt_namespace(self) -> str:
+        """Namespaces HAMT root/node keys in the embedded engine so that
+        independent deployments sharing a filesystem (e.g. multiple trial
+        workers in the same test run) can't overwrite each other's state.
+        Defaults to the server name; tests override it to a fresh value per
+        run (see `tests/utils.py`).
+        """
+        if self._hamt_namespace_override is not None:
+            return self._hamt_namespace_override
+        db_pool_ns = getattr(self.db_pool, "_hamt_namespace", None)
         if db_pool_ns:
             return str(db_pool_ns)
-        return self.hs.config.database.tikv_namespace or self.hs.hostname
+        return self.hs.hostname
 
-    @tikv_namespace.setter
-    def tikv_namespace(self, value: str) -> None:
-        self._tikv_namespace_override = value
+    @hamt_namespace.setter
+    def hamt_namespace(self, value: str) -> None:
+        self._hamt_namespace_override = value
         if hasattr(self, "db_pool") and self.db_pool is not None:
-            self.db_pool._tikv_namespace = value
-        if hasattr(self.hs.config, "database"):
-            self.hs.config.database.tikv_namespace = value
+            self.db_pool._hamt_namespace = value
 
     def _state_hamt_secret(self) -> bytes:
         return hashlib.sha256(self.hs.config.key.macaroon_secret_key).digest()
@@ -269,7 +212,6 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         txn: LoggingTransaction,
         groups: list[int],
         state_filter: StateFilter | None = None,
-        use_tikv: bool | None = None,
     ) -> Mapping[int, StateMap[str]]:
         """
         Given a number of state groups, fetch the latest state for each group.
@@ -278,7 +220,6 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
             txn: The transaction object.
             groups: The given state groups that you want to fetch the latest state for.
             state_filter: The state filter to apply the state we fetch state from the database.
-            use_tikv: Whether to query TiKV (defaults to self.tikv_pd_endpoints). Set False for pure SQL fallback.
 
         Returns:
             Map from state_group to a StateMap at that point.
@@ -290,7 +231,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         results: dict[int, MutableStateMap[str]] = {group: {} for group in groups}
 
         hamt_results, missing_groups = self._get_state_groups_from_hamt_txn(
-            txn, groups, state_filter, use_tikv=use_tikv
+            txn, groups, state_filter
         )
         results.update(hamt_results)
 
@@ -299,7 +240,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
 
         # Existing groups without a root are expected only while the v95
         # backfill is pending. Once it has completed, a missing root is data
-        # corruption regardless of whether this call reads TiKV or SQL.
+        # corruption.
         txn.execute(
             "SELECT 1 FROM background_updates WHERE update_name = ?",
             ("state_hamt_backfill_roots",),
@@ -517,13 +458,10 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         txn: LoggingTransaction,
         groups: list[int],
         state_filter: StateFilter,
-        use_tikv: bool | None = None,
     ) -> tuple[dict[int, MutableStateMap[str]], list[int]]:
         _gg_hamt_txn_start = time.monotonic()
         results: dict[int, MutableStateMap[str]] = {}
         missing_groups: list[int] = []
-        if use_tikv is None:
-            use_tikv = bool(getattr(self, "tikv_pd_endpoints", None))
         exact_keys = (
             state_filter.concrete_types() if not state_filter.has_wildcards() else None
         )
@@ -533,9 +471,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         # falling back to `state_hamt_roots`/`state_groups` SQL only for a
         # group it doesn't have. Always use the bulk path (it degrades to a
         # single-root fetch fine for len(groups) == 1).
-        use_embedded = not use_tikv and bool(
-            getattr(self, "embedded_hamt_engine", None)
-        )
+        use_embedded = bool(getattr(self, "embedded_hamt_engine", None))
 
         bulk_results: dict[int, list[tuple[str, str, str]] | None] | None = None
         bulk_selective_results: dict[int, list[tuple[str, str, str]] | None] | None = (
@@ -550,7 +486,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
                 bulk_selective_results = self._lookup_state_hamts_from_embedded_txn(
                     txn, groups, exact_keys
                 )
-        elif len(groups) > 1 and not use_tikv:
+        elif len(groups) > 1:
             if exact_keys is None:
                 bulk_results = self._materialize_state_hamt_from_postgres_many_txn(
                     txn, groups
@@ -563,9 +499,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         for group in groups:
             if exact_keys is not None:
                 entries = (
-                    self._lookup_state_hamt_from_tikv(txn, group, exact_keys)
-                    if use_tikv
-                    else bulk_selective_results[group]
+                    bulk_selective_results[group]
                     if bulk_selective_results is not None
                     else self._lookup_state_hamt_from_postgres_txn(
                         txn, group, exact_keys
@@ -575,8 +509,6 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
                 entries = (
                     bulk_results[group]
                     if bulk_results is not None
-                    else self._materialize_state_hamt_from_tikv(txn, group)
-                    if use_tikv
                     else self._materialize_state_hamt_from_postgres_txn(txn, group)
                 )
             if entries is None:
@@ -592,201 +524,12 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
 
         logger.debug(
             "[gg-state-timing] _get_state_groups_from_hamt_txn groups=%d "
-            "use_tikv=%s elapsed_ms=%.1f missing=%d",
+            "elapsed_ms=%.1f missing=%d",
             len(groups),
-            use_tikv,
             (time.monotonic() - _gg_hamt_txn_start) * 1000,
             len(missing_groups),
         )
         return results, missing_groups
-
-    def _materialize_state_hamts_from_tikv_direct(
-        self, state_groups: list[int]
-    ) -> tuple[dict[int, list[tuple[str, str, str]]], list[int]]:
-        """Materialize several state groups from TiKV in one node traversal.
-
-        The root records are fetched together, then Rust walks every reachable
-        HAMT in lockstep. This deduplicates both root RPCs and node fetches for
-        roots that share subtrees, without holding a SQL transaction open.
-        """
-        from synapse.synapse_rust import tikv_engine
-
-        if not state_groups:
-            return {}, []
-
-        root_key_to_group = {
-            _state_hamt_root_tikv_key(self.tikv_namespace, state_group): state_group
-            for state_group in state_groups
-        }
-        roots: dict[int, tuple[bytes, bytes, str]] = {}
-        for root_key, root_value in tikv_engine.batch_get(list(root_key_to_group)):
-            state_group = root_key_to_group[bytes(root_key)]
-            room_prefix, root_hash, _lattice, stored_room_id = _decode_state_hamt_root(
-                bytes(root_value)
-            )
-            roots[state_group] = (room_prefix, root_hash, stored_room_id)
-
-        missing_groups = [
-            state_group for state_group in state_groups if state_group not in roots
-        ]
-        present_groups = [
-            state_group for state_group in state_groups if state_group in roots
-        ]
-        if not present_groups:
-            return {}, missing_groups
-
-        entries_by_root = tikv_engine.materialize_state_hamts(
-            self.tikv_namespace,
-            self._state_hamt_secret(),
-            [roots[state_group] for state_group in present_groups],
-        )
-        return dict(zip(present_groups, entries_by_root)), missing_groups
-
-    def _materialize_state_hamt_from_tikv_direct(
-        self, state_group: int
-    ) -> list[tuple[str, str, str]] | None:
-        """Materialize a state_group's HAMT against TiKV directly without a SQL transaction.
-
-        The root pointer (`state_group -> room_prefix + root_hash`) is read
-        from TiKV, then the content-addressed node tree is BFS-fetched, decoded,
-        and walked entirely in Rust (see `materialize_state_hamt` in `rust/src/tikv_engine.rs`).
-        """
-        from synapse.synapse_rust import tikv_engine
-
-        root_value = tikv_engine.get(
-            _state_hamt_root_tikv_key(self.tikv_namespace, state_group)
-        )
-        if root_value is None:
-            return None
-        room_prefix, root_structural_hash, _lattice, stored_room_id = (
-            _decode_state_hamt_root(root_value)
-        )
-        return tikv_engine.materialize_state_hamt(
-            self.tikv_namespace,
-            room_prefix,
-            root_structural_hash,
-            self._state_hamt_secret(),
-            stored_room_id,
-        )
-
-    def _materialize_state_hamt_from_tikv(
-        self, txn: LoggingTransaction, state_group: int
-    ) -> list[tuple[str, str, str]] | None:
-        return self._materialize_state_hamt_from_tikv_direct(state_group)
-
-    def _lookup_state_hamts_from_tikv_direct(
-        self, state_groups: list[int], keys: list[tuple[str, str]]
-    ) -> tuple[dict[int, list[tuple[str, str, str]]], list[int]]:
-        """Selective HAMT key lookup across several state groups in one TiKV traversal.
-
-        Root records are fetched in a single TiKV batch_get, structural keys are derived,
-        and Rust traverses the trees across all groups in lockstep with shared BFS node
-        batching and L1 node caching.
-        """
-        _gg_tikv_many_start = time.monotonic()
-        from synapse.synapse_rust import state_hamt, tikv_engine
-
-        if not state_groups:
-            return {}, []
-
-        root_key_to_group = {
-            _state_hamt_root_tikv_key(self.tikv_namespace, state_group): state_group
-            for state_group in state_groups
-        }
-        roots: dict[int, tuple[bytes, bytes, bytes]] = {}
-        secret = self._state_hamt_secret()
-        for root_key, root_value in tikv_engine.batch_get(list(root_key_to_group)):
-            state_group = root_key_to_group[bytes(root_key)]
-            room_prefix, root_hash, _lattice, stored_room_id = _decode_state_hamt_root(
-                bytes(root_value)
-            )
-            structural_key = state_hamt.room_structural_key(secret, stored_room_id)
-            roots[state_group] = (room_prefix, root_hash, structural_key)
-
-        missing_groups = [
-            state_group for state_group in state_groups if state_group not in roots
-        ]
-        present_groups = [
-            state_group for state_group in state_groups if state_group in roots
-        ]
-        if not present_groups:
-            return {}, missing_groups
-
-        queries = [
-            (roots[sg][0], roots[sg][1], roots[sg][2], keys) for sg in present_groups
-        ]
-        entries_by_group = tikv_engine.lookup_state_hamts(self.tikv_namespace, queries)
-        logger.debug(
-            "[gg-state-timing] _lookup_state_hamts_from_tikv_direct "
-            "groups=%d keys=%d elapsed_ms=%.1f",
-            len(state_groups),
-            len(keys),
-            (time.monotonic() - _gg_tikv_many_start) * 1000,
-        )
-        return dict(zip(present_groups, entries_by_group)), missing_groups
-
-    def _lookup_state_hamt_from_tikv_direct(
-        self,
-        state_group: int,
-        keys: list[tuple[str, str]],
-    ) -> list[tuple[str, str, str]] | None:
-        """Selective HAMT key lookup directly against TiKV without a SQL transaction."""
-        from synapse.synapse_rust import state_hamt, tikv_engine
-
-        root_value = tikv_engine.get(
-            _state_hamt_root_tikv_key(self.tikv_namespace, state_group)
-        )
-        if root_value is None:
-            return None
-        room_prefix, root_hash, _lattice, room_id = _decode_state_hamt_root(root_value)
-
-        root_key = _state_hamt_node_tikv_key(
-            self.tikv_namespace, room_prefix, root_hash
-        )
-        root_bytes = tikv_engine.get(root_key)
-        if root_bytes is None:
-            raise RuntimeError(
-                f"Missing HAMT root node for state group {state_group}: {root_hash.hex()}"
-            )
-        nodes: dict[bytes, bytes] = {root_hash: bytes(root_bytes)}
-        secret = self._state_hamt_secret()
-
-        while True:
-            entries, missing = state_hamt.lookup_state_entries(
-                secret,
-                room_id,
-                root_bytes,
-                list(nodes.items()),
-                keys,
-            )
-            missing = [
-                bytes(node_hash) for node_hash in missing if node_hash not in nodes
-            ]
-            if not missing:
-                return entries
-            key_to_hash = {
-                _state_hamt_node_tikv_key(
-                    self.tikv_namespace, room_prefix, node_hash
-                ): node_hash
-                for node_hash in missing
-            }
-            rows = tikv_engine.batch_get(list(key_to_hash))
-            for node_key, node_bytes in rows:
-                nodes[key_to_hash[bytes(node_key)]] = bytes(node_bytes)
-            unresolved = set(missing) - nodes.keys()
-            if unresolved:
-                raise RuntimeError(
-                    "Missing HAMT child nodes for state group "
-                    f"{state_group}: {[node_hash.hex() for node_hash in unresolved]}"
-                )
-
-    def _lookup_state_hamt_from_tikv(
-        self,
-        txn: LoggingTransaction,
-        state_group: int,
-        keys: list[tuple[str, str]],
-    ) -> list[tuple[str, str, str]] | None:
-        return self._lookup_state_hamt_from_tikv_direct(state_group, keys)
 
     def _materialize_state_hamt_from_postgres_txn(
         self, txn: LoggingTransaction, state_group: int
@@ -1030,8 +773,8 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         keys: list[tuple[str, str]],
     ) -> dict[int, list[tuple[str, str, str]] | None]:
         """Selective HAMT key lookup across several state groups, sharing node
-        fetches -- the SQL-mode mirror of the TiKV batched selective lookup
-        (`lookup_state_hamts`/`lookup_state_hamts_core` in tikv_engine.rs).
+        fetches -- the SQL-mode mirror of the embedded engine's batched
+        selective lookup (`lookup_state_hamts` in `rust/src/database/`).
 
         Each round, every group attempts to resolve `keys` against whatever
         nodes have been fetched so far; any node hashes still missing across
@@ -1150,14 +893,13 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         `groups` that has a published HAMT root -- the small SQL lookup the
         embedded engine still needs -- unless the embedded engine already
         has the root record too (`_store_state_hamt_root_embedded_txn`
-        mirrors it there at persist time, under the same `hamt:root:...`
-        key TiKV uses), in which case this is a local point lookup with no
-        SQL at all. Only a group missing from the embedded engine's own
-        store falls back to `state_hamt_roots`/`state_groups` -- the same
-        self-healing shape TiKV's read path already has.
+        mirrors it there at persist time, under the `hamt:root:...` key), in
+        which case this is a local point lookup with no SQL at all. Only a
+        group missing from the embedded engine's own store falls back to
+        `state_hamt_roots`/`state_groups` -- a self-healing shape.
         """
         engine = self._embedded_hamt_engine_module()
-        namespace = self.tikv_namespace
+        namespace = self.hamt_namespace
         found: dict[int, tuple[bytes, bytes, str]] = {}
         still_missing: list[int] = []
         # One batched Rust call instead of an N-iteration Python for loop
@@ -1218,7 +960,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         engine = self._embedded_hamt_engine_module()
         ordered_groups = list(roots.keys())
         materialized = engine.materialize_state_hamts(
-            self.tikv_namespace,
+            self.hamt_namespace,
             self._state_hamt_secret(),
             [roots[group] for group in ordered_groups],
         )
@@ -1244,7 +986,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
             (room_prefix, root_hash, self._room_structural_key(room_id), keys)
             for room_prefix, root_hash, room_id in (roots[g] for g in ordered_groups)
         ]
-        looked_up = engine.lookup_state_hamts(self.tikv_namespace, queries)
+        looked_up = engine.lookup_state_hamts(self.hamt_namespace, queries)
         for group, entries in zip(ordered_groups, looked_up):
             results[group] = entries
         return results
@@ -1300,8 +1042,8 @@ class StateBackgroundUpdateStore(StateGroupBackgroundUpdateStore):
 
         # State groups created before schema v95 (the HAMT tables) have no
         # `state_hamt_roots` row. `_get_state_groups_from_groups_txn` treats
-        # that as corruption once TiKV isn't configured, so any pre-existing
-        # database needs every legacy group's root built once. The handler
+        # that as corruption, so any pre-existing database needs every
+        # legacy group's root built once. The handler
         # lives on `StateGroupDataStore` (store.py), which is where
         # `_persist_state_hamt_txn` -- the same root-building logic used for
         # newly-created groups -- is defined.

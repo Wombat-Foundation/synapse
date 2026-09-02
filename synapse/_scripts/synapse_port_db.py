@@ -1213,10 +1213,10 @@ class Porter:
         return done, remaining + done
 
     async def _maybe_requeue_state_hamt_backfill(self) -> None:
-        """If the source SQLite database was TiKV-backed the backfill completed
-        without writing SQL ``state_hamt_roots`` rows.  The completed entry was
-        copied from SQLite into PostgreSQL's ``background_updates`` table, so
-        Synapse would never re-run it.
+        """If the source SQLite database's backfill completed without every
+        room's ``state_hamt_roots`` row present (e.g. an interrupted run),
+        the completed entry was still copied from SQLite into PostgreSQL's
+        ``background_updates`` table, so Synapse would never re-run it.
 
         Detect missing roots (including a partially completed source backfill)
         and reset the background update so Synapse executes it on startup.

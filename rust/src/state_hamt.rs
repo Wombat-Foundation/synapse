@@ -219,7 +219,9 @@ pub fn room_structural_key_raw(server_secret: &[u8; 32], room_id: &str) -> [u8; 
 }
 
 /// Derive a fixed-width, room-scoped prefix used to lay out this room's HAMT
-/// nodes contiguously in TiKV's flat sorted keyspace (see `tikv_engine.rs`).
+/// nodes contiguously in the embedded engine's flat sorted keyspace (see
+/// `database/core.rs`'s `node_key`). Despite the historical name this isn't
+/// TiKV-specific -- mdbx uses the exact same scheme (see `mdbx.rs`).
 ///
 /// For MSC4291-style room versions the room ID *is* `!` + base64url(hash(create
 /// event)) -- already a uniformly-distributed digest -- so we decode it directly
@@ -231,7 +233,7 @@ pub fn room_structural_key_raw(server_secret: &[u8; 32], room_id: &str) -> [u8; 
 /// (the official per-room-version marker) rather than comparing version
 /// numbers, since which versions get hash-based room IDs is not simply "v12
 /// and above" (e.g. experimental/Hydra versions).
-pub fn room_tikv_prefix_raw(
+pub fn room_hamt_prefix_raw(
     server_secret: &[u8; 32],
     room_id: &str,
     msc4291_room_ids_as_hashes: bool,
@@ -901,11 +903,11 @@ pub fn room_structural_key(server_secret: Vec<u8>, room_id: &str) -> PyResult<Ve
     Ok(room_structural_key_raw(&server_secret, room_id).to_vec())
 }
 
-/// See `room_tikv_prefix_raw` for the derivation. `msc4291_room_ids_as_hashes`
+/// See `room_hamt_prefix_raw` for the derivation. `msc4291_room_ids_as_hashes`
 /// must come from the caller's real `RoomVersion.msc4291_room_ids_as_hashes`.
 #[pyfunction]
 #[pyo3(text_signature = "(server_secret, room_id, msc4291_room_ids_as_hashes, /)")]
-pub fn room_tikv_prefix(
+pub fn room_hamt_prefix(
     server_secret: Vec<u8>,
     room_id: &str,
     msc4291_room_ids_as_hashes: bool,
@@ -913,7 +915,7 @@ pub fn room_tikv_prefix(
     let server_secret: [u8; 32] = server_secret
         .try_into()
         .map_err(|_| pyo3::exceptions::PyValueError::new_err("server_secret must be 32 bytes"))?;
-    room_tikv_prefix_raw(&server_secret, room_id, msc4291_room_ids_as_hashes)
+    room_hamt_prefix_raw(&server_secret, room_id, msc4291_room_ids_as_hashes)
         .map(|prefix| prefix.to_vec())
         .map_err(pyo3::exceptions::PyValueError::new_err)
 }
@@ -1341,7 +1343,7 @@ pub fn unreachable_node_hashes(
 pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     let child_module = PyModule::new(py, "state_hamt")?;
     child_module.add_function(wrap_pyfunction!(room_structural_key, &child_module)?)?;
-    child_module.add_function(wrap_pyfunction!(room_tikv_prefix, &child_module)?)?;
+    child_module.add_function(wrap_pyfunction!(room_hamt_prefix, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(build_root_handle, &child_module)?)?;
     child_module.add_function(wrap_pyfunction!(
         build_root_handle_with_lattice,
@@ -1913,14 +1915,14 @@ mod tests {
     }
 
     #[test]
-    fn room_tikv_prefix_is_deterministic_and_room_scoped() {
+    fn room_hamt_prefix_is_deterministic_and_room_scoped() {
         let server_secret = [7u8; 32];
         let room_id = "!AbCdEfGhIjKlMnOpQr:test.example";
         let other_room_id = "!ZyXwVuTsRqPoNmLkJi:test.example";
 
-        let prefix1 = room_tikv_prefix_raw(&server_secret, room_id, false).unwrap();
-        let prefix2 = room_tikv_prefix_raw(&server_secret, room_id, false).unwrap();
-        let other_prefix = room_tikv_prefix_raw(&server_secret, other_room_id, false).unwrap();
+        let prefix1 = room_hamt_prefix_raw(&server_secret, room_id, false).unwrap();
+        let prefix2 = room_hamt_prefix_raw(&server_secret, room_id, false).unwrap();
+        let other_prefix = room_hamt_prefix_raw(&server_secret, other_room_id, false).unwrap();
 
         assert_eq!(prefix1, prefix2);
         assert_ne!(prefix1, other_prefix);
@@ -1928,7 +1930,7 @@ mod tests {
     }
 
     #[test]
-    fn room_tikv_prefix_decodes_msc4291_room_ids_without_rehashing() {
+    fn room_hamt_prefix_decodes_msc4291_room_ids_without_rehashing() {
         use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 
         let server_secret = [7u8; 32];
@@ -1936,7 +1938,7 @@ mod tests {
         let create_event_hash = [42u8; 32];
         let room_id = format!("!{}", URL_SAFE_NO_PAD.encode(create_event_hash));
 
-        let prefix = room_tikv_prefix_raw(&server_secret, &room_id, true).unwrap();
+        let prefix = room_hamt_prefix_raw(&server_secret, &room_id, true).unwrap();
 
         // The prefix should be exactly the leading 8 bytes of the decoded
         // hash -- i.e. derived directly from the room ID, not re-hashed
@@ -1945,9 +1947,9 @@ mod tests {
     }
 
     #[test]
-    fn room_tikv_prefix_rejects_invalid_msc4291_room_id() {
+    fn room_hamt_prefix_rejects_invalid_msc4291_room_id() {
         let server_secret = [7u8; 32];
-        assert!(room_tikv_prefix_raw(&server_secret, "!not-valid-base64!!!", true).is_err());
+        assert!(room_hamt_prefix_raw(&server_secret, "!not-valid-base64!!!", true).is_err());
     }
 
     #[test]
