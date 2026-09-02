@@ -149,12 +149,12 @@ class StateStoreTestCase(HomeserverTestCase):
         )
 
     def test_state_group_reads_via_embedded_mdbx_engine(self) -> None:
-        """Nodes are written to the embedded engine at persist time
-        (`_store_state_hamt_nodes_txn`) regardless of `embedded_hamt_engine`
-        config; this only enables it on the *read* path, exercising the new
-        `_materialize_state_hamts_from_embedded_txn` /
-        `_lookup_state_hamts_from_embedded_txn` wiring end-to-end against a
-        real mdbx database.
+        """With `embedded_hamt_engine` configured before these events are
+        persisted, `_store_state_hamt_nodes_txn` writes exclusively to mdbx
+        (not SQL -- see `_persist_state_hamt_txn`), and reads resolve
+        entirely through `_materialize_state_hamts_from_embedded_txn` /
+        `_lookup_state_hamts_from_embedded_txn` against a real mdbx
+        database.
         """
         import shutil
         import tempfile
@@ -204,6 +204,138 @@ class StateStoreTestCase(HomeserverTestCase):
         self.assertDictEqual(
             selective_state[state_group],
             {(EventTypes.Name, ""): e2.event_id},
+        )
+
+    def test_embedded_engine_writes_are_exclusive_not_dual(self) -> None:
+        """Once `embedded_hamt_engine` is configured, new state groups are
+        written to mdbx ONLY -- `state_hamt_roots`/`state_hamt_nodes` SQL
+        rows are not also inserted (see `_persist_state_hamt_txn`). This is
+        the opposite of the old TiKV-era "SQL mirror kept even when the
+        embedded engine is enabled" behaviour.
+        """
+        import shutil
+        import tempfile
+
+        from synapse.synapse_rust import mdbx_engine
+
+        tmpdir = tempfile.mkdtemp(prefix="test-exclusive-write-mdbx-")
+        self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
+        mdbx_engine.open_client(tmpdir)
+        self.state_datastore.embedded_hamt_engine = "mdbx"
+        self.state_datastore.embedded_hamt_path = tmpdir
+
+        event = self.inject_state_event(
+            self.room, self.u_alice, EventTypes.Create, "", {}
+        )
+        state_group = self.get_success(
+            self.store._get_state_group_for_event(event.event_id)
+        )
+        assert state_group is not None
+
+        sql_root = self.get_success(
+            self.store.db_pool.simple_select_one(
+                table="state_hamt_roots",
+                keyvalues={"state_group": state_group},
+                retcols=("state_group",),
+                allow_none=True,
+                desc="test_embedded_engine_writes_are_exclusive_not_dual",
+            )
+        )
+        self.assertIsNone(
+            sql_root,
+            "state_hamt_roots got a row for a group persisted with the "
+            "embedded engine configured -- writes should be exclusive, not "
+            "dual",
+        )
+
+        # But it really is in mdbx -- not just "nowhere".
+        full_state = self.get_success(
+            self.state_datastore._get_state_groups_from_groups(
+                [state_group], StateFilter.all()
+            )
+        )
+        self.assertDictEqual(
+            full_state[state_group], {(EventTypes.Create, ""): event.event_id}
+        )
+
+    def test_embedded_hamt_migration_copies_existing_sql_data(self) -> None:
+        """A state group written before `embedded_hamt_engine` was turned on
+        stays SQL-only until `_background_migrate_state_hamt_to_embedded`
+        runs; after it completes, the group is readable via mdbx with SQL
+        deleted out from under it -- proving the data actually moved, not
+        just that the SQL fallback happened to still work.
+        """
+        import shutil
+        import tempfile
+
+        from synapse.synapse_rust import mdbx_engine
+
+        # Persist with no embedded engine configured -- goes to SQL only.
+        event = self.inject_state_event(
+            self.room, self.u_alice, EventTypes.Create, "", {}
+        )
+        state_group = self.get_success(
+            self.store._get_state_group_for_event(event.event_id)
+        )
+        assert state_group is not None
+
+        sql_root_before = self.get_success(
+            self.store.db_pool.simple_select_one_onecol(
+                table="state_hamt_roots",
+                keyvalues={"state_group": state_group},
+                retcol="state_group",
+                desc="test_embedded_hamt_migration.check_sql_before",
+            )
+        )
+        self.assertEqual(sql_root_before, state_group)
+
+        # Now turn on the embedded engine and run the migration. In real
+        # deployments `embedded_hamt_engine` is set before the store is
+        # constructed, so __init__ registers the handler for
+        # do_next_background_update to dispatch to; this test flips the
+        # config after construction (same pattern the other embedded-engine
+        # tests here use), so no handler was ever registered for this store
+        # instance -- exercise _enqueue_embedded_hamt_migration_if_needed
+        # (real production code, still worth covering) then drive the
+        # handler directly rather than through the dispatcher.
+        tmpdir = tempfile.mkdtemp(prefix="test-hamt-migration-mdbx-")
+        self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
+        mdbx_engine.open_client(tmpdir)
+        self.state_datastore.embedded_hamt_engine = "mdbx"
+        self.state_datastore.embedded_hamt_path = tmpdir
+
+        self.get_success(
+            self.state_datastore._enqueue_embedded_hamt_migration_if_needed()
+        )
+        progress: dict = {}
+        while True:
+            moved = self.get_success(
+                self.state_datastore._background_migrate_state_hamt_to_embedded(
+                    progress, batch_size=500
+                )
+            )
+            if moved == 0:
+                break
+            progress = {"last_state_group": state_group}
+
+        # Delete the SQL rows entirely -- if the read below still works,
+        # the data really moved into mdbx rather than the read just still
+        # falling back to SQL.
+        self.get_success(
+            self.store.db_pool.simple_delete(
+                table="state_hamt_roots",
+                keyvalues={"state_group": state_group},
+                desc="test_embedded_hamt_migration.delete_sql_root",
+            )
+        )
+
+        full_state = self.get_success(
+            self.state_datastore._get_state_groups_from_groups(
+                [state_group], StateFilter.all()
+            )
+        )
+        self.assertDictEqual(
+            full_state[state_group], {(EventTypes.Create, ""): event.event_id}
         )
 
     def test_embedded_engine_root_lookup_does_not_need_sql(self) -> None:

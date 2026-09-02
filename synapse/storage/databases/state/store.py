@@ -68,6 +68,8 @@ logger = logging.getLogger(__name__)
 class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
     """A data store for fetching/storing state groups."""
 
+    EMBEDDED_HAMT_MIGRATION_UPDATE_NAME = "state_hamt_embedded_migration"
+
     def __init__(
         self,
         database: DatabasePool,
@@ -167,6 +169,158 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     self._drain_embedded_state_hamt_root_deletion_queue,
                     Duration(minutes=5),
                 )
+
+            self.db_pool.updates.register_background_update_handler(
+                self.EMBEDDED_HAMT_MIGRATION_UPDATE_NAME,
+                self._background_migrate_state_hamt_to_embedded,
+            )
+            if hs.config.worker.run_background_tasks:
+                hs.run_as_background_process(
+                    "enqueue_state_hamt_embedded_migration",
+                    self._enqueue_embedded_hamt_migration_if_needed,
+                )
+
+    async def _enqueue_embedded_hamt_migration_if_needed(self) -> None:
+        """Turning on the embedded engine doesn't retroactively move
+        existing `state_hamt_nodes`/`state_hamt_roots` SQL rows into it --
+        new writes go exclusively to whichever engine is configured (see
+        `_persist_state_hamt_txn`), but old data written before the switch
+        stays SQL-only until this migration copies it over.
+
+        `has_completed_background_update` isn't a reliable "already
+        enqueued?" check here: it short-circuits to `True` once the
+        updater's own poll loop has run dry and set `_all_done` (which will
+        already be true on almost every real startup, since this row is
+        inserted at runtime rather than being a schema-declared update the
+        loop knew about from the start) -- that would make this a no-op
+        forever, never actually inserting the row. `simple_upsert` on the
+        primary key is what actually makes this idempotent (a second call
+        updates the existing row's non-key columns to the same values
+        rather than erroring or duplicating); `start_doing_background_updates`
+        unconditionally resets `_all_done` and restarts the poll loop so a
+        freshly-inserted row is picked up even if the loop had already gone
+        idle.
+        """
+        await self.db_pool.simple_upsert(
+            table="background_updates",
+            keyvalues={"update_name": self.EMBEDDED_HAMT_MIGRATION_UPDATE_NAME},
+            values={},
+            insertion_values={"progress_json": "{}"},
+            desc="enqueue_state_hamt_embedded_migration",
+        )
+        self.db_pool.updates.start_doing_background_updates()
+
+    async def _background_migrate_state_hamt_to_embedded(
+        self, progress: dict, batch_size: int
+    ) -> int:
+        """Copy existing SQL `state_hamt_roots` rows (and, per root, every
+        node reachable from it) into the embedded engine, for data written
+        before `embedded_hamt_engine` was turned on. New writes never need
+        this -- they already go straight to the configured engine
+        exclusively -- this only backfills history.
+
+        Existing SQL rows are left in place rather than deleted: harmless
+        once migrated (nothing reads them anymore -- see
+        `_fetch_hamt_roots_for_embedded_txn`), and keeping them means
+        turning the embedded engine back off doesn't lose data.
+        """
+        last_state_group = progress.get("last_state_group", 0)
+
+        def get_batch_txn(
+            txn: LoggingTransaction,
+        ) -> list[tuple[int, bytes, bytes, bytes, str]]:
+            txn.execute(
+                """
+                SELECT hr.state_group, hr.room_prefix, hr.root_structural_hash,
+                       hr.root_lattice, sg.room_id
+                FROM state_hamt_roots hr
+                INNER JOIN state_groups sg ON sg.id = hr.state_group
+                WHERE hr.state_group > ?
+                ORDER BY hr.state_group
+                LIMIT ?
+                """,
+                (last_state_group, batch_size),
+            )
+            return cast(
+                list[tuple[int, bytes, bytes, bytes, str]],
+                [
+                    (
+                        state_group,
+                        bytes(room_prefix),
+                        bytes(root_hash),
+                        bytes(lattice) if lattice is not None else b"",
+                        room_id,
+                    )
+                    for state_group, room_prefix, root_hash, lattice, room_id in txn
+                ],
+            )
+
+        rows = await self.db_pool.runInteraction(
+            f"{self.EMBEDDED_HAMT_MIGRATION_UPDATE_NAME}_select", get_batch_txn
+        )
+
+        if not rows:
+            await self.db_pool.updates._end_background_update(
+                self.EMBEDDED_HAMT_MIGRATION_UPDATE_NAME
+            )
+            return 0
+
+        from synapse.synapse_rust import mdbx_engine, state_hamt
+
+        def migrate_one_txn(
+            txn: LoggingTransaction,
+            state_group: int,
+            room_prefix: bytes,
+            root_hash: bytes,
+            lattice: bytes,
+            room_id: str,
+        ) -> None:
+            nodes: dict[bytes, bytes] = {}
+            frontier = [root_hash]
+            while frontier:
+                fetched = self.db_pool.simple_select_many_txn(
+                    txn,
+                    table="state_hamt_nodes",
+                    column="structural_hash",
+                    iterable=[bytearray(h) for h in frontier if h not in nodes],
+                    keyvalues={},
+                    retcols=("structural_hash", "node_bytes"),
+                )
+                frontier = []
+                for node_hash, node_bytes in fetched:
+                    node_hash = bytes(node_hash)
+                    node_bytes = bytes(node_bytes)
+                    if node_hash in nodes:
+                        continue
+                    nodes[node_hash] = node_bytes
+                    frontier.extend(
+                        bytes(child)
+                        for child in state_hamt.node_child_hashes(node_bytes)
+                    )
+            mdbx_engine.put_state_hamt_nodes(
+                self.hamt_namespace, room_prefix, list(nodes.items())
+            )
+            if lattice:
+                self._store_state_hamt_root_embedded_txn(
+                    state_group, room_prefix, root_hash, lattice, room_id
+                )
+
+        def migrate_batch_txn(txn: LoggingTransaction) -> None:
+            for state_group, room_prefix, root_hash, lattice, room_id in rows:
+                migrate_one_txn(
+                    txn, state_group, room_prefix, root_hash, lattice, room_id
+                )
+            self.db_pool.updates._background_update_progress_txn(
+                txn,
+                self.EMBEDDED_HAMT_MIGRATION_UPDATE_NAME,
+                {"last_state_group": rows[-1][0]},
+            )
+
+        await self.db_pool.runInteraction(
+            self.EMBEDDED_HAMT_MIGRATION_UPDATE_NAME, migrate_batch_txn
+        )
+
+        return len(rows)
 
     @trace
     @tag_args
@@ -525,23 +679,26 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             )
         )
 
-        # Keep an SQL mirror even when TiKV is enabled. TiKV publication is
-        # deliberately post-commit; the mirror is the read fallback during
-        # that window and if a transient TiKV failure needs a later retry.
+        # Exclusive by configured engine, not a dual-write: SQL owns this
+        # data unless the embedded engine is configured, in which case it
+        # owns it instead. _store_state_hamt_nodes_txn already makes this
+        # same choice for nodes.
         self._store_state_hamt_nodes_txn(txn, room_prefix, nodes)
-        self.db_pool.simple_insert_txn(
-            txn,
-            table="state_hamt_roots",
-            values={
-                "state_group": state_group,
-                "room_prefix": bytearray(room_prefix),
-                "root_structural_hash": bytearray(root_structural_hash),
-                "root_lattice": bytearray(root_lattice),
-            },
-        )
-        self._store_state_hamt_root_embedded_txn(
-            state_group, room_prefix, root_structural_hash, root_lattice, room_id
-        )
+        if self.embedded_hamt_engine == "mdbx":
+            self._store_state_hamt_root_embedded_txn(
+                state_group, room_prefix, root_structural_hash, root_lattice, room_id
+            )
+        else:
+            self.db_pool.simple_insert_txn(
+                txn,
+                table="state_hamt_roots",
+                values={
+                    "state_group": state_group,
+                    "room_prefix": bytearray(room_prefix),
+                    "root_structural_hash": bytearray(root_structural_hash),
+                    "root_lattice": bytearray(root_lattice),
+                },
+            )
 
         logger.debug(
             "[gg-state-timing] _persist_state_hamt_txn mode=rebuild "
@@ -584,22 +741,41 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         if prev_state_group in local_roots:
             prev_root_hash, prev_lattice = local_roots[prev_state_group]
         else:
-            prev_root = self.db_pool.simple_select_one_txn(
-                txn,
-                table="state_hamt_roots",
-                keyvalues={"state_group": prev_state_group},
-                retcols=("root_structural_hash", "root_lattice"),
-                allow_none=True,
-            )
-            if prev_root is None or prev_root[1] is None:
+            prev_root_hash = None
+            prev_lattice = None
+            mdbx_active = self.embedded_hamt_engine == "mdbx"
+            if mdbx_active:
+                embedded_root = self._get_embedded_hamt_root(prev_state_group)
+                if embedded_root is not None:
+                    prev_root_hash, prev_lattice = embedded_root
+            if prev_root_hash is None and (
+                not mdbx_active or self._embedded_hamt_migration_pending_txn(txn)
+            ):
+                prev_root = self.db_pool.simple_select_one_txn(
+                    txn,
+                    table="state_hamt_roots",
+                    keyvalues={"state_group": prev_state_group},
+                    retcols=("root_structural_hash", "root_lattice"),
+                    allow_none=True,
+                )
+                if prev_root is not None and prev_root[1] is not None:
+                    prev_root_hash, prev_lattice = (
+                        bytes(prev_root[0]),
+                        bytes(prev_root[1]),
+                    )
+            if prev_root_hash is None or prev_lattice is None:
                 return None
-            prev_root_hash, prev_lattice = bytes(prev_root[0]), bytes(prev_root[1])
 
+        assert prev_root_hash is not None
+        assert prev_lattice is not None
         local_nodes = local_nodes or {}
         root_node_bytes = local_nodes.get(prev_root_hash)
         if root_node_bytes is None:
             root_node_bytes = self._get_embedded_hamt_node(room_prefix, prev_root_hash)
-        if root_node_bytes is None:
+        if root_node_bytes is None and (
+            self.embedded_hamt_engine != "mdbx"
+            or self._embedded_hamt_migration_pending_txn(txn)
+        ):
             root_node_bytes = self.db_pool.simple_select_one_onecol_txn(
                 txn,
                 table="state_hamt_nodes",
@@ -671,19 +847,21 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         new_root_hash, _new_state_group_id, new_lattice, new_nodes = applied
 
         self._store_state_hamt_nodes_txn(txn, room_prefix, new_nodes)
-        self.db_pool.simple_insert_txn(
-            txn,
-            table="state_hamt_roots",
-            values={
-                "state_group": state_group,
-                "room_prefix": bytearray(room_prefix),
-                "root_structural_hash": bytearray(new_root_hash),
-                "root_lattice": bytearray(new_lattice),
-            },
-        )
-        self._store_state_hamt_root_embedded_txn(
-            state_group, room_prefix, new_root_hash, new_lattice, room_id
-        )
+        if self.embedded_hamt_engine == "mdbx":
+            self._store_state_hamt_root_embedded_txn(
+                state_group, room_prefix, new_root_hash, new_lattice, room_id
+            )
+        else:
+            self.db_pool.simple_insert_txn(
+                txn,
+                table="state_hamt_roots",
+                values={
+                    "state_group": state_group,
+                    "room_prefix": bytearray(room_prefix),
+                    "root_structural_hash": bytearray(new_root_hash),
+                    "root_lattice": bytearray(new_lattice),
+                },
+            )
         logger.debug(
             "[gg-state-timing] _persist_state_hamt_incremental_txn "
             "group=%d prev=%d updates=%d nodes=%d elapsed_ms=%.1f",
@@ -701,15 +879,16 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         room_prefix: bytes,
         nodes: list[tuple[bytes, bytes]],
     ) -> None:
-        # Written under the namespaced, room-prefixed key
-        # (`database::core::node_key`) the embedded engine's
-        # materialize/lookup BFS walk actually looks up -- a plain
-        # `batch_put` keyed by the raw structural_hash would be invisible
-        # to it.
+        # Exclusive by configured engine -- not a dual-write. Written under
+        # the namespaced, room-prefixed key (`database::core::node_key`) the
+        # embedded engine's materialize/lookup BFS walk actually looks up --
+        # a plain `batch_put` keyed by the raw structural_hash would be
+        # invisible to it.
         if self.embedded_hamt_engine == "mdbx":
             from synapse.synapse_rust import mdbx_engine
 
             mdbx_engine.put_state_hamt_nodes(self.hamt_namespace, room_prefix, nodes)
+            return
 
         txn.executemany(
             """
@@ -722,6 +901,38 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 for structural_hash, node_bytes in nodes
             ],
         )
+
+    def _embedded_hamt_migration_pending_txn(self, txn: LoggingTransaction) -> bool:
+        """Whether `EMBEDDED_HAMT_MIGRATION_UPDATE_NAME` is still queued or
+        running -- the one bounded, explicit window where reading SQL
+        alongside the embedded engine is legitimate rather than silent
+        self-healing. See `_background_migrate_state_hamt_to_embedded`.
+        """
+        txn.execute(
+            "SELECT 1 FROM background_updates WHERE update_name = ?",
+            (self.EMBEDDED_HAMT_MIGRATION_UPDATE_NAME,),
+        )
+        return txn.fetchone() is not None
+
+    def _get_embedded_hamt_root(self, state_group: int) -> tuple[bytes, bytes] | None:
+        """Point lookup of a single HAMT root's `(root_hash, lattice)` in
+        the embedded engine, if configured. Returns `None` on a miss.
+        """
+        if self.embedded_hamt_engine != "mdbx":
+            return None
+        from synapse.synapse_rust import mdbx_engine
+
+        (record,) = mdbx_engine.batch_get_state_hamt_roots(
+            self.hamt_namespace, [state_group]
+        )
+        if record is None:
+            return None
+        _group, _room_prefix, root_hash, _room_id, lattice = record
+        if not lattice:
+            # A root written before the lattice column existed -- no usable
+            # base for an incremental update, same as SQL's NULL root_lattice.
+            return None
+        return bytes(root_hash), bytes(lattice)
 
     def _get_embedded_hamt_node(
         self, room_prefix: bytes, node_hash: bytes
@@ -858,8 +1069,34 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 secret, room_id, room_version.msc4291_room_ids_as_hashes
             )
 
+        # Once the embedded engine is exclusive, a group it already has a
+        # root for never gets a state_hamt_roots row -- so the SELECT above
+        # (which only checks SQL) would otherwise keep re-matching every
+        # already-migrated group forever as the id cursor passes it, and
+        # _get_legacy_state_for_groups_txn returns {} for any post-v95 group
+        # (state_groups_state isn't written for those), silently overwriting
+        # a good root with an empty one. Skip anything the embedded engine
+        # already has.
+        already_embedded: set[int] = set()
+        if self.embedded_hamt_engine == "mdbx":
+            from synapse.synapse_rust import mdbx_engine
+
+            state_groups = [state_group for state_group, _ in rows]
+            already_embedded = {
+                state_group
+                for state_group, record in zip(
+                    state_groups,
+                    mdbx_engine.batch_get_state_hamt_roots(
+                        self.hamt_namespace, state_groups
+                    ),
+                )
+                if record is not None
+            }
+
         def backfill_txn(txn: LoggingTransaction) -> None:
             for state_group, room_id in rows:
+                if state_group in already_embedded:
+                    continue
                 room_prefix = room_prefixes[room_id]
                 if room_prefix is None:
                     continue

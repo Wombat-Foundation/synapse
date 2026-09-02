@@ -206,7 +206,7 @@ pub fn scan_prefix(
     })
 }
 
-type PyRootRecord = (i64, Vec<u8>, Vec<u8>, String);
+type PyRootRecord = (i64, Vec<u8>, Vec<u8>, String, Vec<u8>);
 
 /// Batched HAMT root lookup: one FFI call instead of an N-iteration Python
 /// `for` loop each paying its own round trip. Returns one entry per input
@@ -231,7 +231,15 @@ pub fn batch_get_state_hamt_roots(
                 .into_iter()
                 .zip(groups)
                 .map(|(record, group)| {
-                    record.map(|r| (group, r.room_prefix, r.root_hash.to_vec(), r.room_id))
+                    record.map(|r| {
+                        (
+                            group,
+                            r.room_prefix,
+                            r.root_hash.to_vec(),
+                            r.room_id,
+                            r.lattice,
+                        )
+                    })
                 })
                 .collect()
         })
