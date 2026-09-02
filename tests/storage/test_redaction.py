@@ -387,18 +387,25 @@ class RedactionTestCase(unittest.HomeserverTestCase):
 
         self.assert_dict({"content": {}}, json.loads(event_json))
 
-    def test_redact_censor_updates_embedded_mirror(self) -> None:
-        """Censoring an event must update the embedded mdbx mirror, not just
-        SQL -- otherwise `get_event` keeps serving the pre-censor JSON from
-        mdbx forever, since (unlike ordinary redactions) there's no
-        redaction row to dynamically re-apply on read.
+    def test_expire_event_updates_embedded_mirror(self) -> None:
+        """`_censor_event_txn` (shared by censoring and expiry) must update
+        the embedded mdbx mirror, not just SQL -- otherwise `get_event`
+        keeps serving the pre-expiry JSON from mdbx forever.
+
+        This must go through expiry, not an ordinary redaction: a redacted
+        event is dynamically re-pruned on every read from its `redactions`
+        row (see events_worker.py's "check for redactions" handling)
+        regardless of what's stored in event_json/mdbx, so a test built on
+        redaction+censor would pass even with a stale mirror. Expiry has no
+        such row -- the stored JSON is the only source of truth -- so it's
+        the case that actually exercises _censor_event_txn's write.
         """
         import shutil
         import tempfile
 
         from synapse.synapse_rust import mdbx_engine
 
-        tmpdir = tempfile.mkdtemp(prefix="test-censor-embedded-")
+        tmpdir = tempfile.mkdtemp(prefix="test-expire-embedded-")
         self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
         mdbx_engine.open_client(tmpdir)
         self.store._embedded_event_json_enabled = True
@@ -409,18 +416,12 @@ class RedactionTestCase(unittest.HomeserverTestCase):
         self.inject_room_member(self.room1, self.u_alice, Membership.JOIN)
         msg_event = self.inject_message(self.room1, self.u_alice, "t")
 
-        # Prime the mirror with the pre-censor content.
+        # Prime the mirror with the pre-expiry content.
         self.store._get_event_cache.clear()
         event = self.get_success(self.store.get_event(msg_event.event_id))
         self.assertEqual(event.content.get("body"), "t")
 
-        self.inject_redaction(
-            self.room1, msg_event.event_id, self.u_alice, "Because I said so"
-        )
-
-        # Advance past the retention period so the redaction gets censored.
-        self.reactor.advance(60 * 60 * 24 * 31)
-        self.reactor.advance(60 * 60 * 2)
+        self.get_success(self.store.expire_event(msg_event.event_id))
 
         # Force a read via the embedded engine alone by wiping the SQL row.
         self.store._get_event_cache.clear()
@@ -428,7 +429,7 @@ class RedactionTestCase(unittest.HomeserverTestCase):
             self.store.db_pool.simple_delete(
                 table="event_json",
                 keyvalues={"event_id": msg_event.event_id},
-                desc="test_redact_censor_updates_embedded_mirror",
+                desc="test_expire_event_updates_embedded_mirror",
             )
         )
 

@@ -81,7 +81,6 @@ from synapse.storage.database import (
 from synapse.storage.databases.main.embedded_event_json import (
     get_event_json_batch,
     open_embedded_event_json_engine,
-    put_event_json_batch,
 )
 from synapse.storage.types import Cursor
 from synapse.storage.util.id_generators import (
@@ -1608,8 +1607,19 @@ class EventsWorkerStore(SQLBaseStore):
         """Returns `event_id -> (internal_metadata, json, format_version)`
         for `event_ids`, preferring the embedded engine (a local point
         lookup, no SQL) and falling back to `event_json` in SQL for any id
-        it doesn't have -- the same self-healing shape the HAMT read path
-        uses for nodes/roots.
+        it doesn't have.
+
+        Deliberately does NOT write the SQL-fallback result back into mdbx:
+        `event_json` is mutable (censoring, expiry -- see
+        `_censor_event_txn`), and this read runs outside of and concurrently
+        with any writer's transaction. A reader that fetched a pre-censor
+        row here could still land its mdbx write after a concurrent
+        censor/expiry has already updated mdbx to the pruned value,
+        silently resurrecting content the writer just redacted -- there's
+        no version/CAS scheme to make a read-path write safe against that
+        race. Missing ids (e.g. from before the mirror existed) simply keep
+        falling back to SQL rather than self-healing; a real backfill needs
+        an explicit background job that can't race a live censor/expiry.
         """
         if not event_ids:
             return {}
@@ -1629,19 +1639,8 @@ class EventsWorkerStore(SQLBaseStore):
                 "FROM event_json WHERE " + clause,
                 args,
             )
-            backfill_rows = []
             for event_id, internal_metadata, json_str, format_version in txn:
                 found[event_id] = (internal_metadata, json_str, format_version)
-                backfill_rows.append(
-                    (event_id, internal_metadata, json_str, format_version)
-                )
-
-            # Populate the embedded mirror for rows it was missing (pre-dates
-            # the feature being enabled, or was never mirrored for some other
-            # reason) so it's actually self-healing rather than missing
-            # forever -- see embedded_event_json.py.
-            if self._embedded_event_json_enabled and backfill_rows:
-                put_event_json_batch(backfill_rows)
 
         return found
 

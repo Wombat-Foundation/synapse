@@ -357,6 +357,11 @@ main() {
   # It takes longer than 10m to run the whole suite.
   test_timeout="60m"
 
+  # Number of packages to run in parallel. Default 2 matches congruent's
+  # COMPLEMENT_PARALLEL=2 — go test defaults to GOMAXPROCS which can spin up
+  # enough containers simultaneously to cause 502s on registration.
+  test_parallel="${COMPLEMENT_PARALLEL:-2}"
+
   if [[ -n "$WORKERS" ]]; then
     # Use workers.
     export PASS_SYNAPSE_COMPLEMENT_USE_WORKERS=true
@@ -582,6 +587,8 @@ main() {
       -v
       -count=1
       -timeout "$test_timeout"
+      -p "$test_parallel"
+      -parallel "$test_parallel"
       "${extra_args[@]}"
     )
     [[ "$pattern" != "." ]] && flags+=(-run "$pattern")
