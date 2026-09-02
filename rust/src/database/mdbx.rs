@@ -124,8 +124,20 @@ pub fn batch_get(py: Python<'_>, keys: Vec<Vec<u8>>) -> PyResult<Vec<(Vec<u8>, V
 }
 
 #[pyfunction]
-pub fn batch_put(py: Python<'_>, pairs: Vec<(Vec<u8>, Vec<u8>)>) -> PyResult<()> {
+pub fn batch_put(py: Python<'_>, mut pairs: Vec<(Vec<u8>, Vec<u8>)>) -> PyResult<()> {
     py.detach(|| {
+        // Our keys are content-addressed (structural hashes / event ids),
+        // so a batch arrives in essentially random order. mdbx's B-tree
+        // insert cost is dominated by how much the cursor has to jump
+        // around the tree; sorting first turns that into a mostly-local,
+        // mostly-sequential walk (each insert near the last one), which is
+        // the standard mdbx/LMDB bulk-load optimization. This is safe
+        // regardless of what's already in the table (UPSERT still handles
+        // pre-existing keys correctly) -- unlike `WriteFlags::APPEND`,
+        // which would additionally require every key in this batch to sort
+        // above every key already in the table, a guarantee we don't have
+        // for a re-used/non-empty database, so APPEND isn't used here.
+        pairs.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
         let _guard = WRITE_LOCK.lock().unwrap();
         let database = db()?;
         let txn = database.begin_rw_txn().map_err(map_mdbx_err)?;
