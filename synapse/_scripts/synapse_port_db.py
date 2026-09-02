@@ -231,8 +231,8 @@ IGNORED_TABLES = {
 # Postgres or the insert fails with an undefined-column error.
 SQLITE_ONLY_COLUMNS: dict[str, set[str]] = {
     # 95/03_state_hamt_pure_tikv.sql.postgres drops `published` once HAMT
-    # roots and nodes stopped being authoritative in SQL for that
-    # deployment; the SQLite counterpart leaves it in place because older
+    # roots and nodes became authoritative in the embedded engine rather
+    # than SQL; the SQLite counterpart leaves it in place because older
     # supported SQLite versions can't drop a column (see that migration's
     # comment).
     "state_hamt_roots": {"published"},
