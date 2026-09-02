@@ -761,7 +761,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         # Keep an SQL mirror even when TiKV is enabled. TiKV publication is
         # deliberately post-commit; the mirror is the read fallback during
         # that window and if a transient TiKV failure needs a later retry.
-        self._store_state_hamt_nodes_txn(txn, nodes)
+        self._store_state_hamt_nodes_txn(txn, room_prefix, nodes)
         self.db_pool.simple_insert_txn(
             txn,
             table="state_hamt_roots",
@@ -933,7 +933,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
 
         new_root_hash, _new_state_group_id, new_lattice, new_nodes = applied
 
-        self._store_state_hamt_nodes_txn(txn, new_nodes)
+        self._store_state_hamt_nodes_txn(txn, room_prefix, new_nodes)
         self.db_pool.simple_insert_txn(
             txn,
             table="state_hamt_roots",
@@ -958,16 +958,22 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
     def _store_state_hamt_nodes_txn(
         self,
         txn: LoggingTransaction,
+        room_prefix: bytes,
         nodes: list[tuple[bytes, bytes]],
     ) -> None:
+        # Written under the namespaced, room-prefixed key
+        # (`database::core::node_key`) the embedded engine's
+        # materialize/lookup BFS walk actually looks up -- a plain
+        # `batch_put` keyed by the raw structural_hash would be invisible
+        # to it.
         if self.embedded_hamt_engine == "mdbx":
             from synapse.synapse_rust import mdbx_engine
 
-            mdbx_engine.batch_put(nodes)
+            mdbx_engine.put_state_hamt_nodes(self.tikv_namespace, room_prefix, nodes)
         elif self.embedded_hamt_engine == "fjall":
             from synapse.synapse_rust import fjall_engine
 
-            fjall_engine.batch_put(nodes)
+            fjall_engine.put_state_hamt_nodes(self.tikv_namespace, room_prefix, nodes)
 
         txn.executemany(
             """

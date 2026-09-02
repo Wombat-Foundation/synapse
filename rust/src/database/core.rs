@@ -78,6 +78,23 @@ pub fn node_key(
     key
 }
 
+/// Encodes a batch of `(structural_hash, node_bytes)` pairs (the shape
+/// `state_hamt.build_root_handle_with_lattice`/`apply_flat_state_updates`
+/// return) into `(node_key, node_bytes)` pairs ready for `batch_put` --
+/// shared by both engines' `put_state_hamt_nodes` so callers never write
+/// under a raw structural_hash key (which the BFS walk above can't find,
+/// since it always looks up the namespaced/room-prefixed key).
+pub fn encode_node_writes(
+    namespace: &str,
+    room_prefix: &[u8; ROOM_PREFIX_LEN],
+    nodes: Vec<(StructuralHash, Vec<u8>)>,
+) -> Vec<(Vec<u8>, Vec<u8>)> {
+    nodes
+        .into_iter()
+        .map(|(hash, bytes)| (node_key(namespace, room_prefix, &hash), bytes))
+        .collect()
+}
+
 /// Batch size while walking the HAMT -- bounds how much of the node cache's
 /// lock is held at once per round.
 const NODE_FETCH_BATCH_SIZE: usize = 100;

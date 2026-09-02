@@ -192,6 +192,37 @@ pub fn scan_prefix(
     })
 }
 
+/// Persists a batch of `(structural_hash, node_bytes)` pairs under their
+/// namespaced, room-prefixed keys (`core::node_key`) -- the only correct
+/// way to write nodes this engine's materialize/lookup walk can later
+/// find; writing under a raw `structural_hash` key (as a naive `batch_put`
+/// call would) is invisible to the BFS walk.
+#[pyfunction]
+#[pyo3(text_signature = "(namespace, room_prefix, nodes, /)")]
+pub fn put_state_hamt_nodes(
+    py: Python<'_>,
+    namespace: String,
+    room_prefix: Vec<u8>,
+    nodes: Vec<(Vec<u8>, Vec<u8>)>,
+) -> PyResult<()> {
+    let room_prefix: [u8; ROOM_PREFIX_LEN] = room_prefix.try_into().map_err(|_| {
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "room_prefix must be {ROOM_PREFIX_LEN} bytes"
+        ))
+    })?;
+    let nodes = nodes
+        .into_iter()
+        .map(|(hash, bytes)| {
+            let hash: StructuralHash = hash.try_into().map_err(|_| {
+                pyo3::exceptions::PyValueError::new_err("structural_hash must be 32 bytes")
+            })?;
+            Ok((hash, bytes))
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    let pairs = core::encode_node_writes(&namespace, &room_prefix, nodes);
+    batch_put(py, pairs)
+}
+
 #[pyfunction]
 #[pyo3(
     text_signature = "(namespace, room_prefix, root_structural_hash, server_secret, room_id, /)"
@@ -326,6 +357,7 @@ pub fn register_module(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult
     child.add_function(wrap_pyfunction!(delete, &child)?)?;
     child.add_function(wrap_pyfunction!(batch_delete, &child)?)?;
     child.add_function(wrap_pyfunction!(scan_prefix, &child)?)?;
+    child.add_function(wrap_pyfunction!(put_state_hamt_nodes, &child)?)?;
     child.add_function(wrap_pyfunction!(materialize_state_hamt, &child)?)?;
     child.add_function(wrap_pyfunction!(materialize_state_hamts, &child)?)?;
     child.add_function(wrap_pyfunction!(lookup_state_hamts, &child)?)?;

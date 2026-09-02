@@ -157,6 +157,64 @@ class StateStoreTestCase(HomeserverTestCase):
             {(EventTypes.Create, ""): e1.event_id, (EventTypes.Name, ""): e2.event_id},
         )
 
+    def test_state_group_reads_via_embedded_mdbx_engine(self) -> None:
+        """Nodes are written to the embedded engine at persist time
+        (`_store_state_hamt_nodes_txn`) regardless of `embedded_hamt_engine`
+        config; this only enables it on the *read* path, exercising the new
+        `_materialize_state_hamts_from_embedded_txn` /
+        `_lookup_state_hamts_from_embedded_txn` wiring end-to-end against a
+        real mdbx database.
+        """
+        import shutil
+        import tempfile
+
+        from synapse.synapse_rust import mdbx_engine
+
+        tmpdir = tempfile.mkdtemp(prefix="test-embedded-mdbx-")
+        self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
+        mdbx_engine.open_client(tmpdir)
+        self.state_datastore.embedded_hamt_engine = "mdbx"
+        self.state_datastore.embedded_hamt_path = tmpdir
+
+        e1 = self.inject_state_event(self.room, self.u_alice, EventTypes.Create, "", {})
+        e2 = self.inject_state_event(
+            self.room, self.u_alice, EventTypes.Name, "", {"name": "test room"}
+        )
+        e3 = self.inject_state_event(
+            self.room, self.u_alice, EventTypes.Topic, "", {"topic": "test topic"}
+        )
+        state_group = self.get_success(
+            self.store._get_state_group_for_event(e3.event_id)
+        )
+        assert state_group is not None
+
+        # Full materialize via the embedded engine.
+        full_state = self.get_success(
+            self.state_datastore._get_state_groups_from_groups(
+                [state_group], StateFilter.all()
+            )
+        )
+        self.assertDictEqual(
+            full_state[state_group],
+            {
+                (EventTypes.Create, ""): e1.event_id,
+                (EventTypes.Name, ""): e2.event_id,
+                (EventTypes.Topic, ""): e3.event_id,
+            },
+        )
+
+        # Selective (exact-keys) lookup via the embedded engine.
+        selective_state = self.get_success(
+            self.state_datastore._get_state_groups_from_groups(
+                [state_group],
+                StateFilter.from_types([(EventTypes.Name, "")]),
+            )
+        )
+        self.assertDictEqual(
+            selective_state[state_group],
+            {(EventTypes.Name, ""): e2.event_id},
+        )
+
     def test_exact_state_filter_uses_selective_hamt_lookup(self) -> None:
         create = self.inject_state_event(
             self.room, self.u_alice, EventTypes.Create, "", {}

@@ -23,6 +23,7 @@ import hashlib
 import logging
 import struct
 import time
+from types import ModuleType
 from typing import (
     TYPE_CHECKING,
     Mapping,
@@ -527,11 +528,30 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
             state_filter.concrete_types() if not state_filter.has_wildcards() else None
         )
 
+        # An embedded engine (mdbx/fjall) only mirrors nodes, not root
+        # records (those stay in `state_hamt_roots`/`state_groups`), so
+        # there's no per-group "direct" fast path the way TiKV has -- every
+        # call goes through the small root-record SQL lookup regardless of
+        # group count, then Rust walks the tree. Always use the bulk path
+        # (it degrades to a single-root fetch fine for len(groups) == 1).
+        use_embedded = not use_tikv and bool(
+            getattr(self, "embedded_hamt_engine", None)
+        )
+
         bulk_results: dict[int, list[tuple[str, str, str]] | None] | None = None
         bulk_selective_results: dict[int, list[tuple[str, str, str]] | None] | None = (
             None
         )
-        if len(groups) > 1 and not use_tikv:
+        if use_embedded:
+            if exact_keys is None:
+                bulk_results = self._materialize_state_hamts_from_embedded_txn(
+                    txn, groups
+                )
+            else:
+                bulk_selective_results = self._lookup_state_hamts_from_embedded_txn(
+                    txn, groups, exact_keys
+                )
+        elif len(groups) > 1 and not use_tikv:
             if exact_keys is None:
                 bulk_results = self._materialize_state_hamt_from_postgres_many_txn(
                     txn, groups
@@ -1107,6 +1127,111 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
             rounds,
         )
         return results
+
+    def _embedded_hamt_engine_module(self) -> ModuleType:
+        """Returns the `mdbx_engine`/`fjall_engine` PyO3 module configured
+        for this deployment (`embedded_hamt_engine` config). Nodes are
+        content-addressed and immutable, so either module's
+        `materialize_state_hamts`/`lookup_state_hamts` can walk the tree
+        itself in Rust -- unlike the SQL path above, no per-node round trip
+        back into Python is needed here.
+        """
+        engine = getattr(self, "embedded_hamt_engine", None)
+        if engine == "mdbx":
+            from synapse.synapse_rust import mdbx_engine
+
+            return mdbx_engine
+        elif engine == "fjall":
+            from synapse.synapse_rust import fjall_engine
+
+            return fjall_engine
+        raise RuntimeError(f"Unknown embedded_hamt_engine: {engine!r}")
+
+    def _fetch_hamt_roots_for_embedded_txn(
+        self, txn: LoggingTransaction, groups: list[int]
+    ) -> dict[int, tuple[bytes, bytes, str]]:
+        """Fetch `(room_prefix, root_structural_hash, room_id)` for each of
+        `groups` that has a published HAMT root -- the small SQL lookup the
+        embedded engine still needs (root records live only in
+        `state_hamt_roots`/`state_groups`; only nodes are mirrored into the
+        embedded engine's own store).
+        """
+        root_rows = self.db_pool.simple_select_many_txn(
+            txn,
+            table="state_hamt_roots",
+            column="state_group",
+            iterable=groups,
+            keyvalues={},
+            retcols=("state_group", "room_prefix", "root_structural_hash"),
+        )
+        if not root_rows:
+            return {}
+        roots = {
+            int(group): (bytes(room_prefix), bytes(root_hash))
+            for group, room_prefix, root_hash in root_rows
+        }
+        room_id_rows = self.db_pool.simple_select_many_txn(
+            txn,
+            table="state_groups",
+            column="id",
+            iterable=list(roots.keys()),
+            keyvalues={},
+            retcols=("id", "room_id"),
+        )
+        room_ids = {int(group): room_id for group, room_id in room_id_rows}
+        return {
+            group: (room_prefix, root_hash, room_ids[group])
+            for group, (room_prefix, root_hash) in roots.items()
+            if group in room_ids
+        }
+
+    def _materialize_state_hamts_from_embedded_txn(
+        self, txn: LoggingTransaction, groups: list[int]
+    ) -> dict[int, list[tuple[str, str, str]] | None]:
+        results: dict[int, list[tuple[str, str, str]] | None] = dict.fromkeys(
+            groups, None
+        )
+        roots = self._fetch_hamt_roots_for_embedded_txn(txn, groups)
+        if not roots:
+            return results
+        engine = self._embedded_hamt_engine_module()
+        ordered_groups = list(roots.keys())
+        materialized = engine.materialize_state_hamts(
+            self.tikv_namespace,
+            self._state_hamt_secret(),
+            [roots[group] for group in ordered_groups],
+        )
+        for group, entries in zip(ordered_groups, materialized):
+            results[group] = entries
+        return results
+
+    def _lookup_state_hamts_from_embedded_txn(
+        self,
+        txn: LoggingTransaction,
+        groups: list[int],
+        keys: list[tuple[str, str]],
+    ) -> dict[int, list[tuple[str, str, str]] | None]:
+        results: dict[int, list[tuple[str, str, str]] | None] = dict.fromkeys(
+            groups, None
+        )
+        roots = self._fetch_hamt_roots_for_embedded_txn(txn, groups)
+        if not roots:
+            return results
+        engine = self._embedded_hamt_engine_module()
+        ordered_groups = list(roots.keys())
+        queries = [
+            (room_prefix, root_hash, self._room_structural_key(room_id), keys)
+            for room_prefix, root_hash, room_id in (roots[g] for g in ordered_groups)
+        ]
+        looked_up = engine.lookup_state_hamts(self.tikv_namespace, queries)
+        for group, entries in zip(ordered_groups, looked_up):
+            results[group] = entries
+        return results
+
+    def _room_structural_key(self, room_id: str) -> bytes:
+        from synapse.synapse_rust import state_hamt
+
+        return bytes(state_hamt.room_structural_key(self._state_hamt_secret(), room_id))
 
 
 class StateBackgroundUpdateStore(StateGroupBackgroundUpdateStore):
