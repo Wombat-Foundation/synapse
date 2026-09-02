@@ -57,7 +57,14 @@ serde_json = { version = "1.0.85", features = [
 ulid = "1.1.2"
 # Keep the shared ICU 2.x graph compatible with CI's Rust 1.87 MSRV.  A loose
 # `2.0` requirement otherwise resolves to ICU 2.3, which requires Rust 1.88.
+# icu_provider/icu_locale_core are transitive-only (pulled in via idna ->
+# url -> reqwest), not direct deps of ours, so pinning icu_segmenter alone
+# doesn't constrain them -- `cargo update` (even without touching this file)
+# can still bump them past 2.2.0 on its own range. Pin them explicitly here
+# too so they can't drift independently of icu_segmenter.
 icu_segmenter = "=2.2.0"
+icu_provider = "=2.2.0"
+icu_locale_core = "=2.2.0"
 reqwest = { version = "0.12.15", default-features = false, features = [
     "http2",
     "stream",
