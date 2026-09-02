@@ -228,11 +228,24 @@ ownership/repair semantics are specified.
 
 ## Storage Engine Selection & libmdbx Embedded Architecture
 
-`libmdbx` was selected as Synapse's embedded storage engine alongside PostgreSQL. `fjall` was evaluated first and dropped -- see `git log` for `ab59dd8ba6` ("storage(embedded): drop fjall, commit to mdbx as the embedded engine") -- both on measured latency and architecturally: mdbx supports native multi-process `mmap` access on a shared filesystem, while fjall's LSM tree can only be opened by one OS process, which would require a separate RPC/socket bridge for every non-owning worker. **No such bridge was ever built or benchmarked** -- an earlier draft of this doc quoted a "fjall + UDS Bridge" figure as if it were measured; it wasn't (there is no bridge implementation anywhere in this repo's history, reachable or not). That figure has been removed rather than re-estimated.
+`libmdbx` was selected as Synapse's embedded storage engine alongside
+PostgreSQL. `fjall` was evaluated first and dropped -- see `git log` for
+`ab59dd8ba6` ("storage(embedded): drop fjall, commit to mdbx as the embedded
+engine") -- both on measured latency and architecturally: mdbx supports native
+multi-process `mmap` access on a shared filesystem, while fjall's LSM tree can
+only be opened by one OS process, which would require a separate RPC/socket
+bridge for every non-owning worker. **No such bridge was ever built or
+benchmarked** -- an earlier draft of this doc quoted a "fjall + UDS Bridge"
+figure as if it were measured; it wasn't (there is no bridge implementation
+anywhere in this repo's history, reachable or not). That figure has been removed
+rather than re-estimated.
 
 ### Benchmark Summary (2,000,000 nodes, 512 bytes/node)
 
-Re-run from scratch on `scripts-dev/benchmark_hamt_mdbx_vs_postgres.py` (mdbx and postgres are both still live in the tree and directly reproducible; fjall's crate/bindings were fully removed in `ab59dd8ba6`, so it can no longer be benchmarked and is omitted below rather than left stale):
+Re-run from scratch on `scripts-dev/benchmark_hamt_mdbx_vs_postgres.py` (mdbx
+and postgres are both still live in the tree and directly reproducible; fjall's
+crate/bindings were fully removed in `ab59dd8ba6`, so it can no longer be
+benchmarked and is omitted below rather than left stale):
 
 ```text
 ============================================================
@@ -244,13 +257,47 @@ batch = 10        18.9 us               186.0 us      9.8x
 commit (batch=5)  70.1 us               141.6 us      2.0x
 ============================================================
 ```
-(p50 latencies; see the script for p99 and full methodology. Reproduce with: `eval "$(scripts-dev/start_test_postgres.sh)"; python3 scripts-dev/benchmark_hamt_mdbx_vs_postgres.py`.)
 
-For reference, fjall's own numbers before removal (from the now-deleted `benchmark_hamt_storage_engines.py`, not reproducible today): batch=1 14.2us, batch=5 79.0us, batch=10 77.5us -- already slower than mdbx in-process, before accounting for the bridge a multi-process deployment would have additionally required.
+(p50 latencies; see the script for p99 and full methodology. Reproduce with:
+`eval "$(scripts-dev/start_test_postgres.sh)"; python3 scripts-dev/benchmark_hamt_mdbx_vs_postgres.py`.)
+
+For reference, fjall's own numbers before removal (from the now-deleted
+`benchmark_hamt_storage_engines.py`, not reproducible today): batch=1 14.2us,
+batch=5 79.0us, batch=10 77.5us -- already slower than mdbx in-process, before
+accounting for the bridge a multi-process deployment would have additionally
+required.
+
+### Bulk-load throughput fix (`73283299ed`)
+
+The one leg mdbx originally _lost_: `batch_put` inserted content-addressed keys
+(structural hashes / event ids) in whatever random order they arrived, costing a
+B-tree search/possible page-split per row with no locality. `73283299ed` sorts
+each batch by key before insertion (the standard mdbx/LMDB bulk-load pattern,
+safe against a non-empty table -- unlike `WriteFlags::APPEND`, not used here
+since it additionally requires every key to sort above the table's current max,
+a guarantee a reused database doesn't give us). Re-measured via
+`scripts-dev/benchmark_hamt_mdbx.py` (3 runs, stable):
+
+```text
+                        before      after       postgres
+bulk-load (rows/s)     43,612     ~185,000       58,202
+```
+
+mdbx now wins bulk-load too (previously postgres's only advantage), at the cost
+of a small, reproducible rise in point-read p50 at batch=1 (2.1us -> ~6.6us;
+still ~10x faster than postgres's 65.7us). That read-latency shift is not yet
+fully root-caused -- current best guess is a benchmark-sampling artifact (the
+read benchmark's `keys_pool` is drawn in pre-sort key-generation order, not a
+random cross-section of the post-sort tree), not a real regression, but it
+hasn't been isolated further.
 
 ### `event_json` benchmark (mixed-size payloads, realistic event ids)
 
-Same conclusion, separately validated against the actual `event_json` access pattern (event-id keys, 65/25/10% small/medium/large JSON size mix, not the HAMT node bench's uniform 512B) via `scripts-dev/benchmark_event_json_storage.py`, which is still live and unmodified -- re-run just now at n=2,000,000 (steady state, after the 200k warm-up leg):
+Same conclusion, separately validated against the actual `event_json` access
+pattern (event-id keys, 65/25/10% small/medium/large JSON size mix, not the HAMT
+node bench's uniform 512B) via `scripts-dev/benchmark_event_json_storage.py`,
+which is still live and unmodified -- re-run just now at n=2,000,000 (steady
+state, after the 200k warm-up leg):
 
 ```text
 n=2,000,000                mdbx        postgres     speedup
@@ -260,13 +307,22 @@ read(batch=20)              36.6us     222.2us       6.1x
 read(batch=100)            168.0us     661.4us       3.9x
 commit(batch=5)             57.7us     176.7us       3.1x
 ```
-(p50 latencies. Reproduce with: `eval "$(scripts-dev/start_test_postgres.sh)"; python3 scripts-dev/benchmark_event_json_storage.py`.)
+
+(p50 latencies. Reproduce with:
+`eval "$(scripts-dev/start_test_postgres.sh)"; python3 scripts-dev/benchmark_event_json_storage.py`.)
 
 ### Key Architectural Advantages of `libmdbx`:
+
 1. **Direct Zero-Copy `mmap` Read Latency (~2.1us at batch=1)**:
-   - Values are returned directly as borrowed `&[u8]` pointers in OS page cache without memory allocations, deserialization wrappers, or IPC overhead.
+   - Values are returned directly as borrowed `&[u8]` pointers in OS page cache
+     without memory allocations, deserialization wrappers, or IPC overhead.
 2. **Zero RPC Daemon / Zero Bridge Complexity**:
-   - All Synapse worker processes (`sync`, `federation`, `state_res`, `api`) open the `libmdbx` environment files directly via kernel `mmap`. This avoids the operational overhead a single-process engine like fjall would have required (a daemon or socket bridge for non-owning workers) -- but note that overhead was never built, so it's an architectural argument, not a measured one.
+   - All Synapse worker processes (`sync`, `federation`, `state_res`, `api`)
+     open the `libmdbx` environment files directly via kernel `mmap`. This
+     avoids the operational overhead a single-process engine like fjall would
+     have required (a daemon or socket bridge for non-owning workers) -- but
+     note that overhead was never built, so it's an architectural argument, not
+     a measured one.
 
 ### Dual-Store Crash-Consistency Protocol
 
@@ -292,9 +348,16 @@ commit(batch=5)             57.7us     176.7us       3.1x
                   +------------------------------------+
 ```
 
-1. **Write HAMT Nodes First**: Structural HAMT nodes are persisted to `libmdbx` before committing the `state_groups` transaction in PostgreSQL.
-2. **PostgreSQL Commit is Truth**: A state group exists if and only if its row in PostgreSQL `state_groups` is committed. If a crash occurs after writing `libmdbx` but before PostgreSQL commits, unreferenced HAMT nodes in `libmdbx` are inert content-addressed blobs that harm nothing.
-3. **Startup Self-Healing**: On startup, Synapse validates that the highest `state_group_id` in PostgreSQL has a matching HAMT root in `libmdbx`, automatically re-materializing missing roots if a crash occurred during commit.
+1. **Write HAMT Nodes First**: Structural HAMT nodes are persisted to `libmdbx`
+   before committing the `state_groups` transaction in PostgreSQL.
+2. **PostgreSQL Commit is Truth**: A state group exists if and only if its row
+   in PostgreSQL `state_groups` is committed. If a crash occurs after writing
+   `libmdbx` but before PostgreSQL commits, unreferenced HAMT nodes in `libmdbx`
+   are inert content-addressed blobs that harm nothing.
+3. **Startup Self-Healing**: On startup, Synapse validates that the highest
+   `state_group_id` in PostgreSQL has a matching HAMT root in `libmdbx`,
+   automatically re-materializing missing roots if a crash occurred during
+   commit.
 
 ## Read workflows
 

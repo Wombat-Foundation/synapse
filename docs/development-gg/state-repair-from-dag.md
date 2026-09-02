@@ -48,8 +48,7 @@ The repair must:
 
 The repair command should operate in phases.
 
-This is the same broad recovery model as conduwuit's YOLO admin
-tools:
+This is the same broad recovery model as conduwuit's YOLO admin tools:
 
 - `yolo rebuild-state` incrementally rebuilds room state from the beginning of
   the timeline without changing room membership or timeline order;
