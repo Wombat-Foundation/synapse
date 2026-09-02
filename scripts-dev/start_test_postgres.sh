@@ -41,9 +41,28 @@ ACTION="${1:-start}"
 case "$ACTION" in
 stop)
 	if [ -d "$PGDATA" ]; then
-		pg_ctl -D "$PGDATA" stop -m fast >/dev/null 2>&1 || true
-		rm -rf "$PGDATA" "$PGSOCKETDIR" "$LOGFILE"
-		echo "Stopped and cleaned RAM-disk PostgreSQL at $PGDATA" >&2
+		if pg_ctl -D "$PGDATA" status >/dev/null 2>&1; then
+			pg_ctl -D "$PGDATA" stop -m fast >/dev/null 2>&1
+			# Wait for the server to actually stop
+			for i in $(seq 1 10); do
+				if ! pg_ctl -D "$PGDATA" status >/dev/null 2>&1; then
+					break
+				fi
+				sleep 0.1
+			done
+		fi
+		# Only remove if the server is actually stopped
+		if ! pg_ctl -D "$PGDATA" status >/dev/null 2>&1; then
+			rm -rf "$PGDATA" "$LOGFILE"
+			# Remove only our port's socket files, not the shared directory.
+			rm -f "$PGSOCKETDIR/.s.PGSQL.$PGPORT" \
+			      "$PGSOCKETDIR/.s.PGSQL.$PGPORT.lock"
+			rmdir --ignore-fail-on-non-empty "$PGSOCKETDIR" 2>/dev/null || true
+			echo "Stopped and cleaned $PG_STORAGE PostgreSQL at $PGDATA" >&2
+		else
+			echo "Warning: Could not stop PostgreSQL at $PGDATA" >&2
+			exit 1
+		fi
 	else
 		echo "Nothing running at $PGDATA" >&2
 	fi
@@ -122,6 +141,6 @@ fi
 cat <<EOF
 export SYNAPSE_POSTGRES=1
 export SYNAPSE_POSTGRES_USER=postgres
-export SYNAPSE_POSTGRES_HOST=$PGSOCKETDIR
+export SYNAPSE_POSTGRES_HOST="$PGSOCKETDIR"
 export SYNAPSE_POSTGRES_PORT=$PGPORT
 EOF

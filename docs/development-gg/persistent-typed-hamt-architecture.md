@@ -244,9 +244,8 @@ rather than re-estimated.
 
 Re-run from scratch on `scripts-dev/benchmark_hamt_mdbx_vs_postgres.py` (mdbx
 and postgres are both still live in the tree and directly reproducible; fjall's
-crate/bindings were fully removed in `ab59dd8ba6`, so it can no longer be
-benchmarked -- its figures below are unverified historical data rather than
-newly measured results):
+crate/bindings were fully removed in `ab59dd8ba6`, so its figures below are
+unverified historical data rather than newly measured results):
 
 ```text
 =====================================================================================

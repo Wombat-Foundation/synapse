@@ -1588,6 +1588,19 @@ class FederationServer(FederationBase):
             if not new_lock:
                 return
 
+            # Re-fetch after acquiring the lock to avoid processing an event
+            # that another drainer already handled.
+            try:
+                next = await self._get_next_nonspam_staged_event_for_room(
+                    room_id, room_version
+                )
+            except BaseException:
+                await new_lock.release()
+                raise
+            if not next:
+                await new_lock.release()
+                return
+
             lock = new_lock
             origin, event = next
 

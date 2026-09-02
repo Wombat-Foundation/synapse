@@ -544,7 +544,16 @@ class Lock:
                 (self._lock_name, self._lock_key, self._token), None
             )
         else:
-            self._store._live_lock_tokens.pop((self._lock_name, self._lock_key), None)
+            # Only remove if we're still the current holder. A newer lock
+            # may have been acquired (e.g. after a timeout) and replaced us
+            # in the dictionary.
+            existing = self._store._live_lock_tokens.get(
+                (self._lock_name, self._lock_key)
+            )
+            if existing is self:
+                self._store._live_lock_tokens.pop(
+                    (self._lock_name, self._lock_key), None
+                )
 
         self._dropped = True
 

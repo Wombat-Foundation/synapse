@@ -892,7 +892,7 @@ pub(crate) fn lookup_from_node_map(
 fn structural_hash_from_bytes(hash_bytes: Vec<u8>) -> Result<StructuralHash, PyErr> {
     hash_bytes
         .try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("structural hash must be 16 bytes"))
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err("structural hash must be 32 bytes"))
 }
 
 #[pyfunction]
