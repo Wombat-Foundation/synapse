@@ -472,11 +472,15 @@ main() {
   : >"$staged_log_file"
   : >"$staged_results_file"
 
-  if [ "$RUN_TESTS" = "." ]; then
-    echo "Full run: results will replace $main_results_file"
-  else
-    echo "Partial run ($RUN_TESTS): results will merge into $main_results_file"
-  fi
+  echo ""
+  echo "running go test with:"
+  echo "\$COMPLEMENT_DIR: ${COMPLEMENT_DIR:-<auto>}"
+  echo "\$COMPLEMENT_BASE_IMAGE: $COMPLEMENT_BASE_IMAGE"
+  echo "\$staged_results_file (staging): $staged_results_file"
+  echo "\$main_results_file: $main_results_file"
+  echo "\$staged_log_file: $staged_log_file"
+  echo "\$RUN_TESTS: $RUN_TESTS"
+  echo ""
 
   # ── anchor_one: per-segment ^ anchoring so -run TestFoo doesn't match TestFooBar ──
   anchor_one() {
@@ -535,7 +539,7 @@ main() {
       done
       if [ "${#ours[@]}" -gt 0 ]; then
         echo "Cleaning up Complement containers spawned by this run..."
-        printf '%s\n' "${ours[@]}" | xargs -r docker rm -f &>/dev/null || true
+        printf '%s\n' "${ours[@]}" | xargs -r docker rm -f
       fi
     fi
   }
