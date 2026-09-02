@@ -448,10 +448,56 @@ main() {
           else
             available_complement_test_packages=("$matched_pkg")
           fi
+          local pkg_tag
+          pkg_tag="$(basename "$matched_pkg")"
+          if [[ "$pkg_tag" =~ ^msc[0-9]+ ]]; then
+            echo "Auto-enabling build tag for $pkg_tag"
+            for idx in "${!test_args[@]}"; do
+              if [[ "${test_args[$idx]}" =~ ^-tags= ]]; then
+                test_args[$idx]="${test_args[$idx]},$pkg_tag"
+                break
+              fi
+            done
+          fi
         fi
       fi
     fi
   fi
+
+  # Merge any user-supplied -tags flags from "$@" into test_args, then strip
+  # them from the forwarded args. Go uses the last -tags seen, so having both
+  # -tags=synapse_blacklist (ours) and -tags all (user's) means ours gets
+  # silently dropped. We collect all tag values into one canonical -tags= entry.
+  local -a filtered_args=()
+  local _i=1
+  while [ $_i -le $# ]; do
+    arg="${!_i}"
+    if [[ "$arg" == "-tags" ]]; then
+      _next=$((_i+1))
+      user_tags="${!_next}"
+      # Merge user tags into the existing -tags= entry in test_args
+      for idx in "${!test_args[@]}"; do
+        if [[ "${test_args[$idx]}" =~ ^-tags= ]]; then
+          test_args[$idx]="${test_args[$idx]},${user_tags}"
+          break
+        fi
+      done
+      _i=$((_i+2))  # skip both -tags and its value
+    elif [[ "$arg" =~ ^-tags=(.+) ]]; then
+      user_tags="${BASH_REMATCH[1]}"
+      for idx in "${!test_args[@]}"; do
+        if [[ "${test_args[$idx]}" =~ ^-tags= ]]; then
+          test_args[$idx]="${test_args[$idx]},${user_tags}"
+          break
+        fi
+      done
+      _i=$((_i+1))
+    else
+      filtered_args+=("$arg")
+      _i=$((_i+1))
+    fi
+  done
+  set -- "${filtered_args[@]}"
 
   # Auto-cleanup containers spawned by Complement on exit
   export COMPLEMENT_WRAPPER_TOKEN="${COMPLEMENT_WRAPPER_TOKEN:-"complement-$$-$(date +%s%N)"}"

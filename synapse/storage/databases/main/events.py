@@ -66,6 +66,10 @@ from synapse.storage.database import (
     LoggingTransaction,
     make_tuple_in_list_sql_clause,
 )
+from synapse.storage.databases.main.embedded_event_json import (
+    open_embedded_event_json_engine,
+    put_event_json_batch,
+)
 from synapse.storage.databases.main.event_federation import EventFederationStore
 from synapse.storage.databases.main.events_worker import EventCacheEntry
 from synapse.storage.databases.main.search import SearchEntry
@@ -2844,21 +2848,35 @@ class PersistEventsStore:
             d.pop("redacted_because", None)
             return d
 
+        event_json_rows = [
+            (
+                event.event_id,
+                event.room_id,
+                json_encoder.encode(event.internal_metadata.get_dict()),
+                json_encoder.encode(event_dict(event)),
+                event.format_version,
+            )
+            for event, _ in events_and_contexts
+        ]
+
         self.db_pool.simple_insert_many_txn(
             txn,
             table="event_json",
             keys=("event_id", "room_id", "internal_metadata", "json", "format_version"),
-            values=[
-                (
-                    event.event_id,
-                    event.room_id,
-                    json_encoder.encode(event.internal_metadata.get_dict()),
-                    json_encoder.encode(event_dict(event)),
-                    event.format_version,
-                )
-                for event, _ in events_and_contexts
-            ],
+            values=event_json_rows,
         )
+
+        # Mirror into the embedded engine if configured -- event_json is
+        # the highest-disk-usage, highest-cache-miss table in a busy
+        # homeserver (see scripts-dev/benchmark_event_json_storage.py);
+        # Postgres stays authoritative, this is a read fast path.
+        if open_embedded_event_json_engine(self.hs):
+            put_event_json_batch(
+                [
+                    (event_id, internal_metadata, json, format_version)
+                    for event_id, _room_id, internal_metadata, json, format_version in event_json_rows
+                ]
+            )
 
         self.db_pool.simple_insert_many_txn(
             txn,
