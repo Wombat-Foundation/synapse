@@ -641,7 +641,7 @@ main() {
     run_one_pattern "$_pattern"
     local _pexit=$?
     set -e
-    [ "$_pexit" -ne 0 ] && go_test_exit_code="$_pexit"
+    if [ "$_pexit" -ne 0 ]; then go_test_exit_code="$_pexit"; fi
   done
 
   # ── Merge / refresh results ledger ────────────────────────────────────────────
@@ -692,6 +692,14 @@ main() {
   # progress filter, which explicitly tolerates non-JSON lines, gotestfmt
   # does not. $GITHUB_STEP_SUMMARY is a separate file untouched by that
   # pipe, so it's always safe.
+  echo ""
+  echo ""
+  echo "complement logs saved at $staged_log_file"
+  echo "complement results staged at $staged_results_file"
+  echo "complement results merged into $main_results_file"
+  echo ""
+  echo ""
+
   if [ -z "${GITHUB_ACTIONS:-}" ]; then
     echo "COMPLEMENT_DURATION_SECONDS=${test_duration_seconds}"
   fi
