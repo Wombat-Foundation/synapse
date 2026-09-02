@@ -576,13 +576,33 @@ class PurgeEventsStore(StateGroupWorkerStore, CacheInvalidationWorkerStore):
             room_event_ids = [event_id for (event_id,) in txn]
 
         logger.info("[purge] removing from event_auth_chain_links")
-        txn.executemany(
-            """
-            DELETE FROM event_auth_chain_links WHERE
-            origin_chain_id = ? AND origin_sequence_number = ?
-            """,
-            referenced_chain_id_tuples,
-        )
+        if getattr(self, "_embedded_event_json_enabled", False):
+            # Exclusive by configured engine, not a dual-write -- see
+            # embedded_event_auth_chain_links.py. The `LEFT JOIN` above can
+            # yield `(None, None)` for events with no chain cover entry
+            # (e.g. non-state events); a raw SQL `WHERE origin_chain_id =
+            # NULL` matches nothing harmlessly, but building an mdbx key
+            # from `None` would crash, so filter those out explicitly.
+            from synapse.storage.databases.main.embedded_event_auth_chain_links import (
+                delete_chain_links_batch,
+            )
+
+            delete_chain_links_batch(
+                self._embedded_hamt_namespace,
+                [
+                    (chain_id, sequence_number)
+                    for chain_id, sequence_number in referenced_chain_id_tuples
+                    if chain_id is not None
+                ],
+            )
+        else:
+            txn.executemany(
+                """
+                DELETE FROM event_auth_chain_links WHERE
+                origin_chain_id = ? AND origin_sequence_number = ?
+                """,
+                referenced_chain_id_tuples,
+            )
 
         # Now we delete tables which lack an index on `room_id` but have one on `event_id`
         for table in purge_room_tables_with_event_id_index:

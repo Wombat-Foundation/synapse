@@ -944,6 +944,9 @@ class PersistEventsStore:
             event_to_room_id,
             event_to_types,
             event_to_auth_chain,
+            self._embedded_hamt_namespace
+            if getattr(self, "_embedded_event_json_enabled", False)
+            else None,
         )
 
     async def _get_events_which_are_prevs(self, event_ids: Iterable[str]) -> list[str]:
@@ -1237,7 +1240,14 @@ class PersistEventsStore:
         new_event_links: dict[str, NewEventChainLinks],
     ) -> None:
         if new_event_links:
-            self._persist_chain_cover_index(txn, self.db_pool, new_event_links)
+            self._persist_chain_cover_index(
+                txn,
+                self.db_pool,
+                new_event_links,
+                self._embedded_hamt_namespace
+                if getattr(self, "_embedded_event_json_enabled", False)
+                else None,
+            )
 
         # We only care about state events, so this if there are no state events.
         if not any(e.is_state() for e in events):
@@ -1270,6 +1280,7 @@ class PersistEventsStore:
         event_to_room_id: dict[str, str],
         event_to_types: dict[str, tuple[str, str]],
         event_to_auth_chain: dict[str, StrCollection],
+        embedded_hamt_namespace: str | None,
     ) -> None:
         """Calculate and persist the chain cover index for the given events.
 
@@ -1278,6 +1289,10 @@ class PersistEventsStore:
             event_to_types: Event ID to type and state_key of the event
             event_to_auth_chain: Event ID to list of auth event IDs of the
                 event (events with no auth events can be excluded).
+            embedded_hamt_namespace: the caller's resolved namespace when the
+                embedded engine is configured, `None` when it isn't -- a
+                `@classmethod` has no `self` of its own, so this can't be
+                recomputed here; see `embedded_event_auth_chain_links.py`.
         """
 
         new_event_links = cls._calculate_chain_cover_index(
@@ -1287,8 +1302,11 @@ class PersistEventsStore:
             event_to_room_id,
             event_to_types,
             event_to_auth_chain,
+            embedded_hamt_namespace,
         )
-        cls._persist_chain_cover_index(txn, db_pool, new_event_links)
+        cls._persist_chain_cover_index(
+            txn, db_pool, new_event_links, embedded_hamt_namespace
+        )
 
     @classmethod
     def _calculate_chain_cover_index(
@@ -1299,6 +1317,7 @@ class PersistEventsStore:
         event_to_room_id: dict[str, str],
         event_to_types: dict[str, tuple[str, str]],
         event_to_auth_chain: dict[str, StrCollection],
+        embedded_hamt_namespace: str | None,
     ) -> dict[str, NewEventChainLinks]:
         """Calculate the chain cover index for the given events.
 
@@ -1490,7 +1509,9 @@ class PersistEventsStore:
         chain_links = _LinkMap()
 
         for links in EventFederationStore._get_chain_links(
-            txn, {chain_id for chain_id, _ in chain_map.values()}
+            txn,
+            {chain_id for chain_id, _ in chain_map.values()},
+            embedded_hamt_namespace,
         ):
             for origin_chain_id, inner_links in links.items():
                 for (
@@ -1546,6 +1567,7 @@ class PersistEventsStore:
         txn: LoggingTransaction,
         db_pool: DatabasePool,
         new_event_links: dict[str, NewEventChainLinks],
+        embedded_hamt_namespace: str | None,
     ) -> None:
         db_pool.simple_insert_many_txn(
             txn,
@@ -1565,6 +1587,27 @@ class PersistEventsStore:
             values=new_event_links,
         )
 
+        chain_links = [
+            (
+                new_links.chain_id,
+                new_links.sequence_number,
+                target_chain_id,
+                target_sequence_number,
+            )
+            for new_links in new_event_links.values()
+            for (target_chain_id, target_sequence_number) in new_links.links
+        ]
+
+        if embedded_hamt_namespace is not None:
+            # Exclusive by configured engine, not a dual-write -- see
+            # embedded_event_auth_chain_links.py.
+            from synapse.storage.databases.main.embedded_event_auth_chain_links import (
+                put_chain_links_batch,
+            )
+
+            put_chain_links_batch(embedded_hamt_namespace, chain_links)
+            return
+
         db_pool.simple_insert_many_txn(
             txn,
             table="event_auth_chain_links",
@@ -1574,16 +1617,7 @@ class PersistEventsStore:
                 "target_chain_id",
                 "target_sequence_number",
             ),
-            values=[
-                (
-                    new_links.chain_id,
-                    new_links.sequence_number,
-                    target_chain_id,
-                    target_sequence_number,
-                )
-                for new_links in new_event_links.values()
-                for (target_chain_id, target_sequence_number) in new_links.links
-            ],
+            values=chain_links,
         )
 
     @staticmethod
@@ -3774,7 +3808,7 @@ class PersistEventsStore:
                     non_null_state_groups[event_id]
                     for event_id in new_event_ids
                     if event_id in non_null_state_groups
-                ]
+                ],
             )
         else:
             self.db_pool.simple_upsert_many_txn(

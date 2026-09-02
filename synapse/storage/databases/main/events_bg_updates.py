@@ -133,6 +133,9 @@ class EventsBackgroundUpdatesStore(
     EMBEDDED_EVENT_TO_STATE_GROUP_MIGRATION_UPDATE_NAME = (
         "event_to_state_group_embedded_migration"
     )
+    EMBEDDED_EVENT_AUTH_CHAIN_LINKS_MIGRATION_UPDATE_NAME = (
+        "event_auth_chain_links_embedded_migration"
+    )
 
     def __init__(
         self,
@@ -246,6 +249,16 @@ class EventsBackgroundUpdatesStore(
                 hs.run_as_background_process(
                     "enqueue_event_to_state_group_embedded_migration",
                     self._enqueue_event_to_state_group_embedded_migration_if_needed,
+                )
+
+            self.db_pool.updates.register_background_update_handler(
+                self.EMBEDDED_EVENT_AUTH_CHAIN_LINKS_MIGRATION_UPDATE_NAME,
+                self._background_migrate_event_auth_chain_links_to_embedded,
+            )
+            if hs.config.worker.run_background_tasks:
+                hs.run_as_background_process(
+                    "enqueue_event_auth_chain_links_embedded_migration",
+                    self._enqueue_event_auth_chain_links_embedded_migration_if_needed,
                 )
 
         ################################################################################
@@ -489,6 +502,105 @@ class EventsBackgroundUpdatesStore(
         await self.db_pool.updates._background_update_progress(
             self.EMBEDDED_EVENT_TO_STATE_GROUP_MIGRATION_UPDATE_NAME,
             {"last_event_id": rows[-1][0]},
+        )
+
+        return len(rows)
+
+    async def _enqueue_event_auth_chain_links_embedded_migration_if_needed(
+        self,
+    ) -> None:
+        """Same reasoning as `_enqueue_event_to_state_group_embedded_migration_if_needed`,
+        for `event_auth_chain_links` -- see `embedded_event_auth_chain_links.py`.
+        """
+        await self.db_pool.simple_upsert(
+            table="background_updates",
+            keyvalues={
+                "update_name": self.EMBEDDED_EVENT_AUTH_CHAIN_LINKS_MIGRATION_UPDATE_NAME
+            },
+            values={},
+            insertion_values={"progress_json": "{}"},
+            desc="enqueue_event_auth_chain_links_embedded_migration",
+        )
+        self.db_pool.updates.start_doing_background_updates()
+
+    async def _background_migrate_event_auth_chain_links_to_embedded(
+        self, progress: JsonDict, batch_size: int
+    ) -> int:
+        """Copy existing SQL `event_auth_chain_links` rows into the embedded
+        engine, for data written before `embedded_hamt_engine` was turned
+        on. New writes never need this; they already go straight to the
+        configured engine exclusively (see `_persist_chain_cover_index` in
+        events.py).
+
+        Unlike the `event_to_state_groups` migration, this table has no
+        single monotonic key column to page on -- `(origin_chain_id,
+        origin_sequence_number, target_chain_id, target_sequence_number)`
+        together are the primary key, so progress is a 4-tuple row-value
+        cursor. There's also no already-migrated pre-check needed here: an
+        mdbx `batch_put` is a plain overwrite with no counter to
+        double-count, so reprocessing a batch after a crash is naturally
+        idempotent (see `embedded_event_auth_chain_links.py`'s
+        `put_chain_links_batch`).
+
+        Existing SQL rows are left in place rather than deleted (same
+        reasoning as the `event_to_state_groups` migration).
+        """
+        progress_cursor = (
+            progress.get("origin_chain_id", -1),
+            progress.get("origin_sequence_number", -1),
+            progress.get("target_chain_id", -1),
+            progress.get("target_sequence_number", -1),
+        )
+
+        def get_batch_txn(
+            txn: LoggingTransaction,
+        ) -> list[tuple[int, int, int, int]]:
+            txn.execute(
+                """
+                SELECT origin_chain_id, origin_sequence_number,
+                       target_chain_id, target_sequence_number
+                FROM event_auth_chain_links
+                WHERE (origin_chain_id, origin_sequence_number,
+                       target_chain_id, target_sequence_number) > (?, ?, ?, ?)
+                ORDER BY origin_chain_id, origin_sequence_number,
+                         target_chain_id, target_sequence_number
+                LIMIT ?
+                """,
+                (*progress_cursor, batch_size),
+            )
+            return cast(list[tuple[int, int, int, int]], txn.fetchall())
+
+        rows = await self.db_pool.runInteraction(
+            f"{self.EMBEDDED_EVENT_AUTH_CHAIN_LINKS_MIGRATION_UPDATE_NAME}_select",
+            get_batch_txn,
+        )
+
+        if not rows:
+            await self.db_pool.updates._end_background_update(
+                self.EMBEDDED_EVENT_AUTH_CHAIN_LINKS_MIGRATION_UPDATE_NAME
+            )
+            return 0
+
+        from synapse.storage.databases.main.embedded_event_auth_chain_links import (
+            put_chain_links_batch,
+        )
+
+        put_chain_links_batch(self._embedded_hamt_namespace, rows)
+
+        (
+            last_origin_chain_id,
+            last_origin_sequence_number,
+            last_target_chain_id,
+            last_target_sequence_number,
+        ) = rows[-1]
+        await self.db_pool.updates._background_update_progress(
+            self.EMBEDDED_EVENT_AUTH_CHAIN_LINKS_MIGRATION_UPDATE_NAME,
+            {
+                "origin_chain_id": last_origin_chain_id,
+                "origin_sequence_number": last_origin_sequence_number,
+                "target_chain_id": last_target_chain_id,
+                "target_sequence_number": last_target_sequence_number,
+            },
         )
 
         return len(rows)
@@ -1352,6 +1464,9 @@ class EventsBackgroundUpdatesStore(
             event_to_room_id,
             event_to_types,
             cast(dict[str, StrCollection], event_to_auth_chain),
+            self._embedded_hamt_namespace
+            if getattr(self, "_embedded_event_json_enabled", False)
+            else None,
         )
 
         return _CalculateChainCover(
@@ -1408,13 +1523,24 @@ class EventsBackgroundUpdatesStore(
             # target_chain_id. Hopefully any purged events are due to a room
             # being fully purged and they will be removed from the origin_*
             # searches.
-            txn.executemany(
-                """
-                DELETE FROM event_auth_chain_links WHERE
-                origin_chain_id = ? AND origin_sequence_number = ?
-                """,
-                unreferenced_chain_id_tuples,
-            )
+            if getattr(self, "_embedded_event_json_enabled", False):
+                # Exclusive by configured engine, not a dual-write -- see
+                # embedded_event_auth_chain_links.py.
+                from synapse.storage.databases.main.embedded_event_auth_chain_links import (
+                    delete_chain_links_batch,
+                )
+
+                delete_chain_links_batch(
+                    self._embedded_hamt_namespace, unreferenced_chain_id_tuples
+                )
+            else:
+                txn.executemany(
+                    """
+                    DELETE FROM event_auth_chain_links WHERE
+                    origin_chain_id = ? AND origin_sequence_number = ?
+                    """,
+                    unreferenced_chain_id_tuples,
+                )
 
             progress = {
                 "current_event_id": event_id,

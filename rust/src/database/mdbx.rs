@@ -44,6 +44,13 @@ fn db() -> PyResult<&'static Database<NoWriteMap>> {
         .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("mdbx not opened"))
 }
 
+/// Same as `db()`, but with a plain `String` error instead of `PyErr` --
+/// for the `_sync` helper functions that don't touch a `Python<'_>` token
+/// at all (so their tests can run without an initialized interpreter).
+fn db_sync() -> Result<&'static Database<NoWriteMap>, String> {
+    DB.get().ok_or_else(|| "mdbx not opened".to_owned())
+}
+
 fn map_mdbx_err(e: impl ToString) -> PyErr {
     pyo3::exceptions::PyRuntimeError::new_err(e.to_string())
 }
@@ -218,31 +225,254 @@ pub fn batch_delete(py: Python<'_>, keys: Vec<Vec<u8>>) -> PyResult<()> {
     })
 }
 
+/// Scans keys starting with `prefix`, in key order, up to `limit` entries.
+///
+/// `limit` is not a hint -- a prefix can cover far more rows than any
+/// caller wants in one FFI round trip (e.g. an auth chain's outgoing
+/// links), so this always stops at `limit` even mid-prefix. That means a
+/// caller MUST be able to tell "there may be more" from "this was
+/// everything": when exactly `limit` rows come back, the last key in the
+/// result is returned as `Some(...)` alongside the rows so Python can
+/// pass it back in as `after` (an exclusive lower bound: the scan resumes
+/// strictly after this key, not from it again) to page through the rest,
+/// and get `None` once a page comes back short of `limit`, meaning the
+/// prefix is exhausted. Silently treating a full page as "that's all of
+/// them" would truncate the result with no error -- for auth chain links
+/// that means an incomplete chain and a wrong auth-difference computation
+/// with nothing to indicate the mistake, so this is deliberately not
+/// optional. The signal is the returned cursor, not the page length: a
+/// page can legitimately come back with exactly `limit` rows AND `None`
+/// (the prefix had exactly that many left) -- check the second return
+/// value, not `len(rows) == limit`.
+type ScanPrefixResult = (Vec<(Vec<u8>, Vec<u8>)>, Option<Vec<u8>>);
+
 #[pyfunction]
 pub fn scan_prefix(
     py: Python<'_>,
     prefix: Vec<u8>,
     limit: u32,
-) -> PyResult<Vec<(Vec<u8>, Vec<u8>)>> {
+    after: Option<Vec<u8>>,
+) -> PyResult<ScanPrefixResult> {
     py.detach(|| {
         let database = db()?;
         let txn = database.begin_ro_txn().map_err(map_mdbx_err)?;
         let table: Table = txn.open_table(None).map_err(map_mdbx_err)?;
         let mut cursor = txn.cursor(&table).map_err(map_mdbx_err)?;
         let mut results = Vec::new();
-        let iter = cursor.iter_from::<Vec<u8>, Vec<u8>>(&prefix);
+        let start = after.as_ref().unwrap_or(&prefix);
+        let iter = cursor.iter_from::<Vec<u8>, Vec<u8>>(start);
         for entry in iter {
-            if results.len() >= limit as usize {
-                break;
-            }
             let (k, v) = entry.map_err(map_mdbx_err)?;
+            // `iter_from` is inclusive of `start`; when resuming after a
+            // previous page, skip the boundary key itself so it isn't
+            // returned twice.
+            if let Some(after_key) = &after {
+                if &k == after_key {
+                    continue;
+                }
+            }
             if !k.starts_with(&prefix) {
                 break;
             }
+            if results.len() >= limit as usize {
+                let last_key = results.last().map(|(k, _): &(Vec<u8>, Vec<u8>)| k.clone());
+                return Ok((results, last_key));
+            }
             results.push((k, v));
         }
-        Ok(results)
+        Ok((results, None))
     })
+}
+
+/// Writes auth chain link edges: `(origin_chain_id, origin_sequence_number,
+/// target_chain_id, target_sequence_number)` per edge, value always empty.
+/// No read-modify-write (unlike the state_group refcount) -- two writers
+/// adding different edges for the same origin chain never touch the same
+/// key, so this is a plain batch insert. Key encoding lives in
+/// `database::core` so it's shared with the read/delete paths below and
+/// stays byte-for-byte in sync with them by construction (rather than by
+/// convention with a hand-duplicated Python encoder).
+/// Pure logic behind `put_auth_chain_links_batch`, without a `Python<'_>`
+/// token -- shared by the pyfunction (via `py.detach`) and this module's
+/// tests, which run without an initialized Python interpreter.
+fn put_auth_chain_links_sync(
+    namespace: &str,
+    links: &[(i64, i64, i64, i64)],
+) -> Result<(), String> {
+    let pairs: Vec<(Vec<u8>, Vec<u8>)> = links
+        .iter()
+        .map(
+            |&(
+                origin_chain_id,
+                origin_sequence_number,
+                target_chain_id,
+                target_sequence_number,
+            )| {
+                (
+                    core::auth_chain_link_key(
+                        namespace,
+                        origin_chain_id,
+                        origin_sequence_number,
+                        target_chain_id,
+                        target_sequence_number,
+                    ),
+                    Vec::new(),
+                )
+            },
+        )
+        .collect();
+    let _guard = WRITE_LOCK.lock().unwrap();
+    let database = db_sync()?;
+    let txn = database.begin_rw_txn().map_err(|e| e.to_string())?;
+    let table: Table = txn.open_table(None).map_err(|e| e.to_string())?;
+    for (k, v) in &pairs {
+        txn.put(&table, k, v, WriteFlags::UPSERT)
+            .map_err(|e| e.to_string())?;
+    }
+    txn.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Writes auth chain link edges: `(origin_chain_id, origin_sequence_number,
+/// target_chain_id, target_sequence_number)` per edge, value always empty.
+/// No read-modify-write (unlike the state_group refcount) -- two writers
+/// adding different edges for the same origin chain never touch the same
+/// key, so this is a plain batch insert. Key encoding lives in
+/// `database::core` so it's shared with the read/delete paths below and
+/// stays byte-for-byte in sync with them by construction (rather than by
+/// convention with a hand-duplicated Python encoder).
+#[pyfunction]
+pub fn put_auth_chain_links_batch(
+    py: Python<'_>,
+    namespace: String,
+    links: Vec<(i64, i64, i64, i64)>,
+) -> PyResult<()> {
+    py.detach(|| put_auth_chain_links_sync(&namespace, &links))
+        .map_err(map_mdbx_err)
+}
+
+/// Pure logic behind `delete_auth_chain_links_batch`, without a
+/// `Python<'_>` token -- see `put_auth_chain_links_sync`.
+fn delete_auth_chain_links_sync(namespace: &str, pairs: &[(i64, i64)]) -> Result<(), String> {
+    let _guard = WRITE_LOCK.lock().unwrap();
+    let database = db_sync()?;
+    let txn = database.begin_rw_txn().map_err(|e| e.to_string())?;
+    let table: Table = txn.open_table(None).map_err(|e| e.to_string())?;
+    for &(origin_chain_id, origin_sequence_number) in pairs {
+        let prefix =
+            core::auth_chain_origin_seq_prefix(namespace, origin_chain_id, origin_sequence_number);
+        let mut cursor = txn.cursor(&table).map_err(|e| e.to_string())?;
+        let iter = cursor.iter_from::<Vec<u8>, Vec<u8>>(&prefix);
+        let mut keys_to_delete = Vec::new();
+        for entry in iter {
+            let (k, _v) = entry.map_err(|e| e.to_string())?;
+            if !k.starts_with(&prefix) {
+                break;
+            }
+            keys_to_delete.push(k);
+        }
+        drop(cursor);
+        for k in keys_to_delete {
+            txn.del(&table, &k, None).map_err(|e| e.to_string())?;
+        }
+    }
+    txn.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Deletes every edge whose `(origin_chain_id, origin_sequence_number)`
+/// matches one of `pairs` -- the embedded-engine equivalent of `DELETE
+/// FROM event_auth_chain_links WHERE origin_chain_id = ? AND
+/// origin_sequence_number = ?`. Each pair may cover several edges (one
+/// origin can link to multiple targets), so this scans each pair's key
+/// range for the matching keys before deleting them, all within one
+/// held write transaction.
+#[pyfunction]
+pub fn delete_auth_chain_links_batch(
+    py: Python<'_>,
+    namespace: String,
+    pairs: Vec<(i64, i64)>,
+) -> PyResult<()> {
+    py.detach(|| delete_auth_chain_links_sync(&namespace, &pairs))
+        .map_err(map_mdbx_err)
+}
+
+/// `(origin_chain_id, edges)`, `edges` being `(origin_seq, target_chain_id,
+/// target_seq)` triples.
+type AuthChainLinksForChain = (i64, Vec<(i64, i64, i64)>);
+
+/// Pure logic behind `get_auth_chain_links_batch`, without a `Python<'_>`
+/// token -- see `put_auth_chain_links_sync`.
+fn get_auth_chain_links_sync(
+    namespace: &str,
+    chain_ids: Vec<i64>,
+) -> Result<Vec<AuthChainLinksForChain>, String> {
+    let database = db_sync()?;
+    let txn = database.begin_ro_txn().map_err(|e| e.to_string())?;
+    let table: Table = txn.open_table(None).map_err(|e| e.to_string())?;
+
+    let mut visited: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    let mut frontier: Vec<i64> = chain_ids;
+    let mut links: Vec<AuthChainLinksForChain> = Vec::new();
+
+    while let Some(chain_id) = frontier.pop() {
+        if !visited.insert(chain_id) {
+            continue;
+        }
+
+        let prefix = core::auth_chain_prefix(namespace, chain_id);
+        let mut cursor = txn.cursor(&table).map_err(|e| e.to_string())?;
+        let iter = cursor.iter_from::<Vec<u8>, Vec<u8>>(&prefix);
+        let mut edges = Vec::new();
+        for entry in iter {
+            let (k, _v) = entry.map_err(|e| e.to_string())?;
+            if !k.starts_with(&prefix) {
+                break;
+            }
+            let decoded = core::decode_auth_chain_link_suffix(&k, &prefix)?;
+            edges.push(decoded);
+        }
+        drop(cursor);
+
+        if edges.is_empty() {
+            continue;
+        }
+        for &(_origin_seq, target_chain_id, _target_seq) in &edges {
+            if !visited.contains(&target_chain_id) {
+                frontier.push(target_chain_id);
+            }
+        }
+        links.push((chain_id, edges));
+    }
+
+    Ok(links)
+}
+
+/// Fetches every edge out of every chain transitively reachable from
+/// `chain_ids` (following `target_chain_id`), the hot-path replacement for
+/// `_get_chain_links`'s `WITH RECURSIVE` walk (see
+/// `embedded_event_auth_chain_links.py`'s module docstring for why mdbx
+/// needs a Python/Rust BFS instead of a recursive query at all). Done
+/// entirely inside one read transaction/one FFI call -- state resolution
+/// calls this on every conflict, so paying per-chain FFI round trips here
+/// (as a naive `scan_prefix`-per-chain-from-Python loop would) is the kind
+/// of overhead this project keeps out of its hot paths.
+///
+/// Returns `(origin_chain_id, edges)` pairs -- the same shape
+/// `_get_chain_links` yields per batch in the SQL implementation, just
+/// materialized rather than a generator (the BFS below already visits
+/// every reachable chain in one pass, so there's no equivalent of SQL's
+/// per-1000-chain batching to preserve -- the 1000-chain batching in the
+/// Python caller only bounds how many *starting* chains one call covers,
+/// which this still respects since `chain_ids` is that same batch).
+#[pyfunction]
+pub fn get_auth_chain_links_batch(
+    py: Python<'_>,
+    namespace: String,
+    chain_ids: Vec<i64>,
+) -> PyResult<Vec<AuthChainLinksForChain>> {
+    py.detach(|| get_auth_chain_links_sync(&namespace, chain_ids))
+        .map_err(map_mdbx_err)
 }
 
 type PyRootRecord = (i64, Vec<u8>, Vec<u8>, String, Vec<u8>);
@@ -457,6 +687,9 @@ pub fn register_module(py: Python<'_>, parent: &Bound<'_, PyModule>) -> PyResult
     child.add_function(wrap_pyfunction!(materialize_state_hamt, &child)?)?;
     child.add_function(wrap_pyfunction!(materialize_state_hamts, &child)?)?;
     child.add_function(wrap_pyfunction!(lookup_state_hamts, &child)?)?;
+    child.add_function(wrap_pyfunction!(put_auth_chain_links_batch, &child)?)?;
+    child.add_function(wrap_pyfunction!(delete_auth_chain_links_batch, &child)?)?;
+    child.add_function(wrap_pyfunction!(get_auth_chain_links_batch, &child)?)?;
     parent.add_submodule(&child)?;
     py.import("sys")?
         .getattr("modules")?
@@ -588,5 +821,38 @@ mod tests {
         let mut expected = entries;
         expected.sort();
         assert_eq!(materialized, expected);
+    }
+
+    /// Covers `get_auth_chain_links_batch`'s BFS: seeding edges
+    /// 1->2->3 (3 has no outgoing edges) plus an unrelated 9->10 edge,
+    /// starting the walk from just {1} should return chains 1 and 2 (2's
+    /// edge discovered transitively) but not 3 (no outgoing edges of its
+    /// own to report) or 9/10 (unreached from the start set).
+    #[test]
+    fn auth_chain_links_bfs_follows_target_chain_transitively() {
+        ensure_open();
+        let namespace = "auth-chain-bfs-test-namespace";
+
+        put_auth_chain_links_sync(namespace, &[(1, 1, 2, 1), (2, 1, 3, 1), (9, 1, 10, 1)]).unwrap();
+
+        let links = get_auth_chain_links_sync(namespace, vec![1]).unwrap();
+        let mut by_chain: std::collections::HashMap<i64, Vec<(i64, i64, i64)>> =
+            links.into_iter().collect();
+
+        assert_eq!(by_chain.remove(&1), Some(vec![(1, 2, 1)]));
+        assert_eq!(by_chain.remove(&2), Some(vec![(1, 3, 1)]));
+        assert!(!by_chain.contains_key(&3));
+        assert!(!by_chain.contains_key(&9));
+
+        delete_auth_chain_links_sync(namespace, &[(1, 1)]).unwrap();
+        let links_after_delete = get_auth_chain_links_sync(namespace, vec![1]).unwrap();
+        // Chain 1's own edge is gone, but the walk can no longer reach
+        // chain 2 from chain 1 either -- matches this module's delete
+        // semantics (origin-only, no target-side cleanup, see
+        // `delete_auth_chain_links_batch`'s doc comment).
+        assert!(links_after_delete.is_empty());
+
+        let links_from_2 = get_auth_chain_links_sync(namespace, vec![2]).unwrap();
+        assert_eq!(links_from_2, vec![(2, vec![(1, 3, 1)])]);
     }
 }
