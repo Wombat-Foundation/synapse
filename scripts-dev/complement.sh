@@ -448,27 +448,24 @@ main() {
   done
 
   # ── Staged result / log files (timestamped, never overwrite) ────────────────
-  local repo_root
   repo_root="$(realpath "$(dirname "$0")/..")"
-  local results_dir="${RESULTS_DIR:-tests/complement}"
-  local main_results_file="${repo_root}/${results_dir}/results.jsonl"
-  local main_log_file="${repo_root}/${results_dir}/logs.jsonl"
+  results_dir="${RESULTS_DIR:-tests/complement}"
+  main_results_file="${repo_root}/${results_dir}/results.jsonl"
+  main_log_file="${repo_root}/${results_dir}/logs.jsonl"
   mkdir -p "$(dirname "$main_results_file")"
   touch "$main_results_file" "$main_log_file"
 
-  local run_suffix
   if [ "$RUN_TESTS" = "." ]; then
     run_suffix="all"
   else
     run_suffix="$(echo "$RUN_TESTS" | sed 's/[^a-zA-Z0-9]/_/g' | cut -c1-32)"
     run_suffix="${run_suffix:-all}"
   fi
-  local run_stamp
   run_stamp="$(date +%s%N)"
-  local staging_dir="${repo_root}/.tmp/complement"
+  staging_dir="${repo_root}/.tmp/complement"
   mkdir -p "$staging_dir"
-  local staged_log_file="${staging_dir}/logs.${run_suffix}.${run_stamp}.jsonl"
-  local staged_results_file="${staging_dir}/test_results.${run_suffix}.${run_stamp}.jsonl"
+  staged_log_file="${staging_dir}/logs.${run_suffix}.${run_stamp}.jsonl"
+  staged_results_file="${staging_dir}/test_results.${run_suffix}.${run_stamp}.jsonl"
   : >"$staged_log_file"
   : >"$staged_results_file"
 
@@ -505,7 +502,7 @@ main() {
 
   # Split top-level | into separate go test invocations (go test's -run re-splits
   # on every /, silently dropping one side of alternations with differing depth).
-  local -a ALT_PATTERNS=()
+  ALT_PATTERNS=()
   if [ "$RUN_TESTS" = "." ]; then
     ALT_PATTERNS=(".")
   else
@@ -636,98 +633,69 @@ main() {
     return "$_go_exit"
   }
 
-  # ── Run all patterns ──────────────────────────────────────────────────────────
-  local test_start_seconds=$SECONDS
-  local go_test_exit_code=0
-
-  for _pattern in "${ALT_PATTERNS[@]}"; do
-    set +e
-    run_one_pattern "$_pattern"
-    local _pexit=$?
-    set -e
-    if [ "$_pexit" -ne 0 ]; then go_test_exit_code="$_pexit"; fi
-  done
-
-  echo "DEBUG: tests done, go_test_exit_code=$go_test_exit_code" >&2
-
-  # ── Merge / refresh results ledger ────────────────────────────────────────────
-  local merge_script="${repo_root}/scripts-dev/merge_complement_results.py"
-  echo "DEBUG: staged_results_file=$staged_results_file exists=$( [ -f "$staged_results_file" ] && echo yes || echo no ) size=$( [ -f "$staged_results_file" ] && wc -c <"$staged_results_file" || echo 0 )" >&2
-  if [ -f "$staged_results_file" ] && [ -s "$staged_results_file" ]; then
-    if [ "$RUN_TESTS" = "." ]; then
-      # Full run: dedupe + sort staged, then replace main results outright.
-      python3 "$merge_script" --dedupe-in-place "$staged_results_file" \
-        || echo "WARN: dedupe failed; keeping raw rows" >&2
-      python3 "$merge_script" --sort-in-place "$staged_results_file" \
-        || echo "WARN: sort failed; keeping arrival order" >&2
-      cp "$staged_results_file" "$main_results_file"
-      echo "Refreshed $main_results_file from $(wc -l <"$staged_results_file" | tr -d ' ') results"
-    else
-      # Partial run: merge new results into ledger.
-      local tmp_merge
-      tmp_merge="$(mktemp "${main_results_file}.merge.XXXXXX")"
-      if python3 "$merge_script" "$main_results_file" "$staged_results_file" "$tmp_merge"; then
-        mv "$tmp_merge" "$main_results_file"
-        echo "Merged $(wc -l <"$staged_results_file" | tr -d ' ') results into $main_results_file"
-      else
-        echo "WARN: merge failed; appending staged results" >&2
-        cat "$staged_results_file" >>"$main_results_file"
-        rm -f "$tmp_merge"
-      fi
-    fi
-  elif [ -f "$staged_results_file" ]; then
-    echo "Warning: $staged_results_file exists but is empty" >&2
-  else
-    echo "Warning: $staged_results_file is missing" >&2
-  fi
-
-  # Log: point-in-time snapshot, straight copy (not merge).
-  if [ -f "$staged_log_file" ]; then
-    cp "$staged_log_file" "$main_log_file"
-  fi
-
-  local test_duration_seconds=$((SECONDS - test_start_seconds))
-
-  # Benchmark every run: print a clearly greppable duration line for local
-  # trend-watching, and add it to the GitHub Actions job summary when
-  # running in CI so each run's duration is visible/browsable in the
-  # Actions UI without any extra CLI archaeology.
-  #
-  # In CI, do NOT print to stdout/stderr: this script's combined
-  # stdout+stderr is piped (via `2>&1 | tee ... | ...`) into a log file that
-  # a downstream step feeds straight to `gotestfmt` for strict
-  # `go test -json` parsing (see .github/workflows/complement_tests.yml's
-  # "Sanity check Complement image" / "Run Complement Tests" steps). A
-  # stray non-JSON line there breaks gotestfmt's parser (exit code 2) even
-  # though go test itself passed -- unlike that workflow's own `jq`
-  # progress filter, which explicitly tolerates non-JSON lines, gotestfmt
-  # does not. $GITHUB_STEP_SUMMARY is a separate file untouched by that
-  # pipe, so it's always safe.
-  echo ""
-  echo ""
-  echo "complement logs saved at $staged_log_file"
-  echo "complement results staged at $staged_results_file"
-  echo "complement results merged into $main_results_file"
-  echo ""
-  echo ""
-
-  if [ -z "${GITHUB_ACTIONS:-}" ]; then
-    echo "COMPLEMENT_DURATION_SECONDS=${test_duration_seconds}"
-  fi
-  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
-    {
-      echo "### Complement duration"
-      echo "\`${test_duration_seconds}s\` (in_repo=\`${use_in_repo_tests:-0}\`)"
-    } >> "$GITHUB_STEP_SUMMARY"
-  fi
-
-  return "$go_test_exit_code"
+  return 0
 }
 
 main "$@"
-# For any non-zero exit code (indicating some sort of error happened), we want to exit
-# with that code.
-exit_code=$?
-if [ $exit_code -ne 0 ]; then
-    exit $exit_code
+
+# ── Run all patterns ──────────────────────────────────────────────────────────
+TEST_EXIT_CODE=0
+for _pattern in "${ALT_PATTERNS[@]}"; do
+  set +e
+  run_one_pattern "$_pattern"
+  _pexit=$?
+  set -e
+  if [ "$_pexit" -ne 0 ]; then
+    TEST_EXIT_CODE="$_pexit"
+  fi
+done
+
+# ── Merge / refresh results ledger ────────────────────────────────────────────
+merge_script="${repo_root}/scripts-dev/merge_complement_results.py"
+if [ -f "$staged_results_file" ] && [ -s "$staged_results_file" ]; then
+  if [ "$RUN_TESTS" = "." ]; then
+    python3 "$merge_script" --dedupe-in-place "$staged_results_file" \
+      || echo "WARN: dedupe of staged results failed ($staged_results_file); keeping raw rows" >&2
+    python3 "$merge_script" --sort-in-place "$staged_results_file" \
+      || echo "WARN: sort of staged results failed ($staged_results_file); keeping arrival order" >&2
+    cp "$staged_results_file" "$main_results_file" \
+      || { echo "MERGE FAILED: refreshing $main_results_file from staged results" >&2; exit 1; }
+    echo "refreshed $main_results_file from $(wc -l <"$staged_results_file") staged results"
+  else
+    tmp_merge="$(mktemp "${main_results_file}.merge.XXXXXX")"
+    if python3 "$merge_script" "$main_results_file" "$staged_results_file" "$tmp_merge"; then
+      mv "$tmp_merge" "$main_results_file" \
+        || { echo "MERGE FAILED: moving merged results into $main_results_file" >&2; exit 1; }
+      echo "merged $(wc -l <"$staged_results_file") staged results into $main_results_file"
+    else
+      echo "WARN: merge into $main_results_file failed; appending staged results" >&2
+      cat "$staged_results_file" >>"$main_results_file"
+      rm -f "$tmp_merge"
+    fi
+  fi
+else
+  echo "Warning: $staged_results_file is missing or empty. No results processed."
+  if [ "$TEST_EXIT_CODE" -eq 0 ]; then
+    TEST_EXIT_CODE=1
+  fi
 fi
+
+# Log: point-in-time snapshot, straight copy (not merge).
+if [ -f "$staged_log_file" ]; then
+  cp "$staged_log_file" "$main_log_file"
+  echo "refreshed $main_log_file from staged log"
+fi
+
+echo ""
+echo ""
+echo "complement logs saved at $staged_log_file"
+echo "complement results staged at $staged_results_file"
+echo "complement results merged into $main_results_file"
+echo ""
+echo ""
+
+if [ "$TEST_EXIT_CODE" -ne 0 ]; then
+  exit "$TEST_EXIT_CODE"
+fi
+
+exit 0
