@@ -63,7 +63,7 @@ COMPLEMENT_SYNAPSE_EDITABLE_IMAGE_PATH="$LOCAL_IMAGE_NAMESPACE/complement-synaps
 # Helper to emit annotations that collapse portions of the log in GitHub Actions
 echo_if_github() {
   if [[ -n "$GITHUB_WORKFLOW" ]]; then
-    printf '%s\n' "$*"
+    printf '%s\n' "$*" >&2
   fi
 }
 
@@ -168,7 +168,7 @@ main() {
   if [[ -z "$COMPLEMENT_DIR" ]]; then
     COMPLEMENT_REF=${COMPLEMENT_REF:-main}
     COMPLEMENT_REPO=${COMPLEMENT_REPO:-gamesguru/complement}
-    echo "COMPLEMENT_DIR not set. Fetching ${COMPLEMENT_REPO} at ${COMPLEMENT_REF}..."
+    echo "COMPLEMENT_DIR not set. Fetching ${COMPLEMENT_REPO} at ${COMPLEMENT_REF}..." >&2
 
     # Download the Complement checkout at the specified ref.
     wget -q -O "${COMPLEMENT_REF}.tar.gz" "https://github.com/${COMPLEMENT_REPO}/archive/${COMPLEMENT_REF}.tar.gz"
@@ -184,7 +184,7 @@ main() {
     # Extract the checkout.
     tar -xzf "${COMPLEMENT_REF}.tar.gz"
 
-    echo "Checkout available at '$COMPLEMENT_DIR'"
+    echo "Checkout available at '$COMPLEMENT_DIR'" >&2
   fi
 
   if [[ -z "$use_in_repo_tests" ]] && [[ "$(realpath "$COMPLEMENT_DIR")" == "$(realpath ./complement)" ]]; then
@@ -239,7 +239,7 @@ main() {
         && $CONTAINER_RUNTIME run --rm -v "$editable_mount" --entrypoint 'diff' "$COMPLEMENT_SYNAPSE_EDITABLE_IMAGE_PATH" --brief /editable-src/uv.lock /uv.lock.bak); then
         skip_docker_build=1
       else
-        echo "Editable Synapse image is stale. Will rebuild."
+        echo "Editable Synapse image is stale. Will rebuild." >&2
         unset skip_docker_build
       fi
     fi
@@ -302,13 +302,13 @@ main() {
 
     fi
   
-    echo "Docker images built."
+    echo "Docker images built." >&2
   else
-    echo "Skipping Docker image build as requested."
+    echo "Skipping Docker image build as requested." >&2
   fi
 
   if [ -n "$skip_complement_run" ]; then
-    echo "Docker images built; skipping Complement tests as requested."
+    echo "Docker images built; skipping Complement tests as requested." >&2
     return 0
   fi
 
@@ -491,15 +491,15 @@ main() {
   : >"$staged_log_file"
   : >"$staged_results_file"
 
-  echo ""
-  echo "running go test with:"
-  echo "\$COMPLEMENT_DIR: ${COMPLEMENT_DIR:-<auto>}"
-  echo "\$COMPLEMENT_BASE_IMAGE: $COMPLEMENT_BASE_IMAGE"
-  echo "\$staged_results_file (staging): $staged_results_file"
-  echo "\$main_results_file: $main_results_file"
-  echo "\$staged_log_file: $staged_log_file"
-  echo "\$RUN_TESTS: $RUN_TESTS"
-  echo ""
+  echo "" >&2
+  echo "running go test with:" >&2
+  echo "\$COMPLEMENT_DIR: ${COMPLEMENT_DIR:-<auto>}" >&2
+  echo "\$COMPLEMENT_BASE_IMAGE: $COMPLEMENT_BASE_IMAGE" >&2
+  echo "\$staged_results_file (staging): $staged_results_file" >&2
+  echo "\$main_results_file: $main_results_file" >&2
+  echo "\$staged_log_file: $staged_log_file" >&2
+  echo "\$RUN_TESTS: $RUN_TESTS" >&2
+  echo "" >&2
 
   # ── anchor_one: per-segment ^ anchoring so -run TestFoo doesn't match TestFooBar ──
   anchor_one() {
@@ -534,10 +534,10 @@ main() {
       ALT_PATTERNS+=("$(anchor_one "$alt")")
     done
     if [ "${#ALT_PATTERNS[@]}" -gt 1 ]; then
-      echo "Anchored run regexes (one go test invocation each):"
-      for alt in "${ALT_PATTERNS[@]}"; do echo "  $alt"; done
+      echo "Anchored run regexes (one go test invocation each):" >&2
+      for alt in "${ALT_PATTERNS[@]}"; do echo "  $alt" >&2; done
     else
-      echo "Anchored run regex: ${ALT_PATTERNS[0]}"
+      echo "Anchored run regex: ${ALT_PATTERNS[0]}" >&2
     fi
   fi
 
@@ -565,7 +565,7 @@ cleanup_complement_containers() {
       fi
     done
     if [ "${#ours[@]}" -gt 0 ]; then
-      echo "Cleaning up Complement containers spawned by this run..."
+      echo "Cleaning up Complement containers spawned by this run..." >&2
       printf '%s\n' "${ours[@]}" | xargs -r docker rm -f
     fi
   fi
@@ -576,7 +576,7 @@ record_result() {
   local action="$1" test_name="$2" elapsed="$3"
   jq -nc --arg Action "$action" --arg Test "$test_name" \
     '{Action: $Action, Test: $Test}' >>"$staged_results_file"
-  printf '%s\t%s\t%s\n' "${action^^}" "$test_name" "$elapsed"
+  printf '%s\t%s\t%s\n' "${action^^}" "$test_name" "$elapsed" >&2
 }
 
 # ── run_one_pattern: one go test invocation per -run alternative ─────────────
@@ -604,7 +604,7 @@ run_one_pattern() {
       )
       if [ "${#matched_pkgs[@]}" -gt 0 ]; then
         packages=("${matched_pkgs[@]}")
-        echo "Selected package(s) for $pattern: ${packages[*]}"
+        echo "Selected package(s) for $pattern: ${packages[*]}" >&2
       fi
     fi
   fi
@@ -684,13 +684,13 @@ if [ -f "$staged_results_file" ] && [ -s "$staged_results_file" ]; then
       || echo "WARN: sort of staged results failed ($staged_results_file); keeping arrival order" >&2
     cp "$staged_results_file" "$main_results_file" \
       || { echo "MERGE FAILED: refreshing $main_results_file from staged results" >&2; exit 1; }
-    echo "refreshed $main_results_file from $(wc -l <"$staged_results_file") staged results"
+    echo "refreshed $main_results_file from $(wc -l <"$staged_results_file") staged results" >&2
   else
     tmp_merge="$(mktemp "${main_results_file}.merge.XXXXXX")"
     if python3 "$merge_script" "$main_results_file" "$staged_results_file" "$tmp_merge"; then
       mv "$tmp_merge" "$main_results_file" \
         || { echo "MERGE FAILED: moving merged results into $main_results_file" >&2; exit 1; }
-      echo "merged $(wc -l <"$staged_results_file") staged results into $main_results_file"
+      echo "merged $(wc -l <"$staged_results_file") staged results into $main_results_file" >&2
     else
       echo "WARN: merge into $main_results_file failed; appending staged results" >&2
       cat "$staged_results_file" >>"$main_results_file"
@@ -698,7 +698,7 @@ if [ -f "$staged_results_file" ] && [ -s "$staged_results_file" ]; then
     fi
   fi
 else
-  echo "Warning: $staged_results_file is missing or empty. No results processed."
+  echo "Warning: $staged_results_file is missing or empty. No results processed." >&2
   if [ "$TEST_EXIT_CODE" -eq 0 ]; then
     TEST_EXIT_CODE=1
   fi
@@ -707,7 +707,7 @@ fi
 # Log: point-in-time snapshot, straight copy (not merge).
 if [ -f "$staged_log_file" ]; then
   cp "$staged_log_file" "$main_log_file"
-  echo "refreshed $main_log_file from staged log"
+  echo "refreshed $main_log_file from staged log" >&2
 fi
 
 _pass=$(grep -c '"pass"' "$staged_results_file" 2>/dev/null || true)
@@ -719,17 +719,17 @@ _skip=${_skip:-0}
 
 test_duration_seconds=$((SECONDS - test_start_seconds))
 
-echo ""
-echo "RESULTS: ${_pass} pass / ${_fail} fail / ${_skip} skip"
-echo "TIME: $(printf '%d:%02d' $((test_duration_seconds / 60)) $((test_duration_seconds % 60))) min"
-echo ""
-echo "complement logs saved at $staged_log_file"
-echo "complement results staged at $staged_results_file"
-echo "complement results merged into $main_results_file"
-echo ""
+echo "" >&2
+echo "RESULTS: ${_pass} pass / ${_fail} fail / ${_skip} skip" >&2
+echo "TIME: $(printf '%d:%02d' $((test_duration_seconds / 60)) $((test_duration_seconds % 60))) min" >&2
+echo "" >&2
+echo "complement logs saved at $staged_log_file" >&2
+echo "complement results staged at $staged_results_file" >&2
+echo "complement results merged into $main_results_file" >&2
+echo "" >&2
 
 if [ -z "${GITHUB_ACTIONS:-}" ]; then
-  echo "COMPLEMENT_DURATION_SECONDS=${test_duration_seconds}"
+  echo "COMPLEMENT_DURATION_SECONDS=${test_duration_seconds}" >&2
 fi
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
   {
