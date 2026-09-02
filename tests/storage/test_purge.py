@@ -429,6 +429,17 @@ class PurgeTests(HomeserverTestCase):
                 )
             )
 
+        # Record the count of state groups before running the background update.
+        state_groups_before_delete = self.get_success(
+            self.state_store.db_pool.simple_select_onecol(
+                table="state_groups",
+                keyvalues={"room_id": self.room_id},
+                retcol="id",
+                desc="test_purge_unreferenced_state_group",
+            )
+        )
+        state_group_count_before = len(state_groups_before_delete)
+
         # Insert and run the background update.
         self.get_success(
             self.store.db_pool.simple_insert(
@@ -481,8 +492,10 @@ class PurgeTests(HomeserverTestCase):
         )
         self.assertIsNone(row)
 
-        # We expect there to now only be one state group for the room, which is
-        # the state group of the last event (as the only outlier).
+        # After deleting the 3 unreferenced state groups
+        # (unreferenced_free_state_group, unreferenced_end_state_group,
+        # another_unreferenced_end_state_group), the remaining count should
+        # be 3 less than before the deletion ran.
         state_groups = self.get_success(
             self.state_store.db_pool.simple_select_onecol(
                 table="state_groups",
@@ -491,7 +504,9 @@ class PurgeTests(HomeserverTestCase):
                 desc="test_purge_unreferenced_state_group",
             )
         )
-        self.assertEqual(len(state_groups), 210)
+        # We manually created 6 state groups and 3 should have been deleted,
+        # plus whatever the helpers created. Assert the 3 were removed.
+        self.assertEqual(len(state_groups), state_group_count_before - 3)
 
 
 class PurgeLocalEventsTests(HomeserverTestCase):
