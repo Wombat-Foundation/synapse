@@ -429,17 +429,6 @@ class PurgeTests(HomeserverTestCase):
                 )
             )
 
-        # Record the count of state groups before running the background update.
-        state_groups_before_delete = self.get_success(
-            self.state_store.db_pool.simple_select_onecol(
-                table="state_groups",
-                keyvalues={"room_id": self.room_id},
-                retcol="id",
-                desc="test_purge_unreferenced_state_group",
-            )
-        )
-        state_group_count_before = len(state_groups_before_delete)
-
         # Insert and run the background update.
         self.get_success(
             self.store.db_pool.simple_insert(
@@ -492,21 +481,24 @@ class PurgeTests(HomeserverTestCase):
         )
         self.assertIsNone(row)
 
-        # After deleting the 3 unreferenced state groups
-        # (unreferenced_free_state_group, unreferenced_end_state_group,
-        # another_unreferenced_end_state_group), the remaining count should
-        # be 3 less than before the deletion ran.
-        state_groups = self.get_success(
-            self.state_store.db_pool.simple_select_onecol(
-                table="state_groups",
-                keyvalues={"room_id": self.room_id},
-                retcol="id",
-                desc="test_purge_unreferenced_state_group",
+        # A direct event reference to the tail protects the entire chain: none
+        # of its ancestors may be deleted merely because they are not directly
+        # referenced themselves.
+        for state_group in (
+            chain_state_group,
+            chain_state_group_2,
+            referenced_chain_state_group,
+        ):
+            row = self.get_success(
+                self.state_store.db_pool.simple_select_one_onecol(
+                    table="state_groups",
+                    keyvalues={"id": state_group},
+                    retcol="id",
+                    allow_none=True,
+                    desc="test_purge_referenced_state_group_chain",
+                )
             )
-        )
-        # We manually created 6 state groups and 3 should have been deleted,
-        # plus whatever the helpers created. Assert the 3 were removed.
-        self.assertEqual(len(state_groups), state_group_count_before - 3)
+            self.assertEqual(row, state_group)
 
 
 class PurgeLocalEventsTests(HomeserverTestCase):
