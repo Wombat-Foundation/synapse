@@ -77,10 +77,8 @@ pub fn node_key(
 }
 
 /// Per-namespace HAMT root key: `hamt:root:<namespace_hash_hex[..16]><state_group>`.
-/// Must match `_state_hamt_root_tikv_key` in `synapse/storage/databases/
-/// state/bg_updates.py` byte-for-byte -- this is the same key scheme TiKV
-/// uses, reused as-is for the embedded engines rather than inventing a
-/// second one.
+/// Must match `_state_hamt_root_key` in `synapse/storage/databases/
+/// state/bg_updates.py` byte-for-byte.
 pub fn root_key(namespace: &str, state_group: i64) -> Vec<u8> {
     let namespace_hash = Sha256::digest(namespace.as_bytes());
     let mut key = Vec::with_capacity(10 + 32 + 20);

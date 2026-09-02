@@ -744,8 +744,9 @@ fn apply_typed_state_updates_impl(
 ///
 /// Only safe to use where the caller cannot possibly supply a mismatched
 /// hash/bytes pair from an untrusted source, or where the room's
-/// `structural_key` genuinely isn't available (e.g. the TiKV materialize/audit
-/// paths, which are deliberately keyless -- see their doc comments). Wherever
+/// `structural_key` genuinely isn't available (e.g. the embedded-engine
+/// materialize/audit paths, which are deliberately keyless -- see their doc
+/// comments). Wherever
 /// `structural_key` is available, use [`decode_persisted_node_verified`]
 /// instead, which actually recomputes the hash from the decoded content and
 /// rejects a mismatch.

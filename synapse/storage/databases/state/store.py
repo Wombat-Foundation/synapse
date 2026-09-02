@@ -164,6 +164,9 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     f"Failed to open embedded mdbx engine at {self.embedded_hamt_path}"
                 ) from e
 
+            if hs.config.database.embedded_hamt_namespace:
+                self.hamt_namespace = hs.config.database.embedded_hamt_namespace
+
             if hs.config.worker.run_background_tasks:
                 hs.get_clock().looping_call(
                     self._drain_embedded_state_hamt_root_deletion_queue,
@@ -619,23 +622,23 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         for a state-resolution/merge result whose delta the caller already
         computed), this applies them via O(K log S) path-copying
         (`apply_flat_state_updates`) instead of rebuilding the whole tree
-        from `current_state_ids` -- for either backend (SQL or TiKV).
-        Otherwise (no prev root/lattice -- e.g. a room's first state
-        group -- or no delta given, i.e. the caller only has a full
+        from `current_state_ids` -- for either backend (SQL or the embedded
+        engine). Otherwise (no prev root/lattice -- e.g. a room's first
+        state group -- or no delta given, i.e. the caller only has a full
         current_state_ids map with no known relationship to prev_group)
         this falls back to a full rebuild, exactly as before.
 
         `local_nodes`: an optional cache of hash->node-bytes the caller
-        already holds in memory, consulted before hitting SQL/TiKV. This
-        matters for a caller (`store_state_deltas_for_batched`) that
-        persists a *chain* of state groups within one transaction: in TiKV
-        mode, node writes are deferred until just before the whole transaction
-        commits (one batched publish before the transaction commits),
-        so state group N+1's incremental update, which needs to read state
-        group N's just-written root node back, would otherwise find nothing
-        in TiKV yet. SQL mode doesn't need this (nodes are visible to later
-        reads in the same transaction), but checking `local_nodes` first is
-        harmless there too.
+        already holds in memory, consulted before hitting SQL/the embedded
+        engine. This matters for a caller (`store_state_deltas_for_batched`)
+        that persists a *chain* of state groups within one transaction:
+        both backends' writes are synchronous and in-transaction, but a
+        fresh read isn't guaranteed to see a row written earlier in the
+        *same* uncommitted transaction (true for SQL always, and for the
+        embedded engine depending on its own transaction semantics) -- so
+        state group N+1's incremental update, which needs to read state
+        group N's just-written root node back, uses this in-memory cache
+        rather than relying on that.
         """
         incremental = None
         if prev_state_group is not None and updates is not None:
@@ -792,10 +795,9 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         nodes: dict[bytes, bytes] = dict(local_nodes)
         nodes[prev_root_hash] = root_bytes
 
-        # Mirrors _lookup_state_hamt_from_postgres_txn /
-        # _lookup_state_hamt_from_tikv_txn's retry loop: each round trip
-        # surfaces one more tree level's worth of missing hashes, rather
-        # than fetching the whole reachable tree up front.
+        # Mirrors _lookup_state_hamt_from_postgres_txn's retry loop: each
+        # round trip surfaces one more tree level's worth of missing
+        # hashes, rather than fetching the whole reachable tree up front.
         while True:
             applied, missing = state_hamt.apply_flat_state_updates(
                 self._state_hamt_secret(),
@@ -983,9 +985,10 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         transaction: an embedded engine is a local call with no network
         round-trip to defer past commit, so there's no reason to route it
         through an async post-commit publish path.
-        `_fetch_hamt_roots_for_embedded_txn` (bg_updates.py) reads this
-        first and falls back to `state_hamt_roots` SQL only on a miss, the
-        same self-healing shape TiKV's read path already has.
+        `_fetch_hamt_roots_for_embedded_txn` (bg_updates.py) reads this and
+        falls back to `state_hamt_roots` SQL only inside the bounded
+        `EMBEDDED_HAMT_MIGRATION_UPDATE_NAME` window -- see that function's
+        docstring.
         """
         if not self.embedded_hamt_engine:
             return
@@ -1008,10 +1011,9 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         for it exactly as `_persist_state_hamt_txn` does for a
         newly-created group.
 
-        In SQL mode, roots are persisted into ``state_hamt_roots``.
-        In TiKV mode, roots and nodes are published to TiKV after the
-        SQL transaction commits, so that subsequent TiKV reads can
-        resolve pre-v95 groups without raising a corruption error.
+        Written via `_persist_state_hamt_txn`, so it goes to whichever
+        backend is exclusively configured (SQL's `state_hamt_roots`, or the
+        embedded engine) -- see that function.
 
         State groups are immutable once created -- nothing else ever
         writes to an *existing* group's root -- so backfilling one here
@@ -1142,8 +1144,9 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
 
         if prev_group is not None:
             # `state_group_edges` is lifecycle ancestry metadata for purge and
-            # deletion safety. The live state payload now lives in HAMT/TiKV,
-            # so this edge is only ancestry metadata.
+            # deletion safety. The live state payload now lives in the HAMT
+            # (SQL or the embedded engine), so this edge is only ancestry
+            # metadata.
             self.db_pool.simple_insert_txn(
                 txn,
                 table="state_group_edges",
@@ -1576,13 +1579,14 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             [(sg,) for sg in state_groups_to_delete],
         )
 
-        # The root pointer lives in per-instance SQL `state_hamt_roots` in
-        # both SQL and TiKV mode, so delete it there. The `state_hamt_nodes`
-        # objects themselves (and TiKV `hamt:node:*`) are content-addressed
-        # and may be shared by other, still-live roots, so they are
-        # intentionally retained rather than reference-counted/GC'd here.
-        # This trades some unreachable node storage for avoiding an unsafe
-        # delete of a node another root still points to.
+        # Delete the SQL root pointer -- a no-op when the embedded engine is
+        # exclusively configured (state_hamt_roots was never written for
+        # this group; see _persist_state_hamt_txn), harmless either way.
+        # The `state_hamt_nodes`/embedded-engine node objects themselves are
+        # content-addressed and may be shared by other, still-live roots, so
+        # they are intentionally retained rather than reference-counted/
+        # GC'd here. This trades some unreachable node storage for avoiding
+        # an unsafe delete of a node another root still points to.
         txn.execute_batch(
             "DELETE FROM state_hamt_roots WHERE state_group = ?",
             [(sg,) for sg in state_groups_to_delete],
@@ -1769,12 +1773,13 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         )
 
         # Delete SQL HAMT root pointers for exactly the state groups removed
-        # above. In SQL-HAMT mode, state_hamt_roots holds the authoritative
-        # root structural hash for each group and must be cleaned up. In TiKV
-        # mode the table is empty (roots are stored in TiKV, not SQL), so this
-        # is a no-op but is kept for correctness on mode transitions. Driving
-        # the delete from the RETURNING set (not an independent room_id subquery)
-        # ensures it covers the same groups as the TiKV batch_delete.
+        # above. In SQL mode, state_hamt_roots holds the authoritative root
+        # structural hash for each group and must be cleaned up. When the
+        # embedded engine is exclusively configured the table is empty for
+        # these groups, so this is a no-op but is kept for correctness on
+        # mode transitions. Driving the delete from the RETURNING set (not
+        # an independent room_id subquery) ensures it covers the same
+        # groups as the embedded-engine batch_delete above.
         logger.info("[purge] removing %s from state_hamt_roots", room_id)
         self.db_pool.simple_delete_many_txn(
             txn,

@@ -39,19 +39,19 @@ jobs:
             database: SQLite
 
           - arrangement: hybrid
-            database: SQLite (hybrid, tikv)
+            database: SQLite (hybrid, mdbx)
 
           - arrangement: monolith
             database: Postgres
 
           - arrangement: hybrid
-            database: Postgres (hybrid, tikv)
+            database: Postgres (hybrid, mdbx)
 
           - arrangement: workers
             database: Postgres
 
           - arrangement: workers
-            database: Postgres (hybrid, tikv)
+            database: Postgres (hybrid, mdbx)
 
     steps:
       - name: Checkout synapse codebase
@@ -81,10 +81,6 @@ jobs:
 
       - name: Prepare Complement's Prerequisites
         run: synapse/.ci/scripts/setup_complement_prerequisites.sh
-
-      - name: Start TiKV (PD & TiKV nodes)
-        if: ${{ contains(matrix.database, 'tikv') }}
-        run: synapse/.ci/scripts/start_tikv.sh
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -132,7 +128,8 @@ jobs:
         env:
           POSTGRES: ${{ (startsWith(matrix.database, 'Postgres')) && 1 || '' }}
           WORKERS: ${{ (matrix.arrangement == 'workers') && 1 || '' }}
-          SYNAPSE_TIKV_PD_ENDPOINTS: ${{ (contains(matrix.database, 'tikv')) && '172.17.0.1:2379' || '' }}
+          SYNAPSE_EMBEDDED_HAMT_ENGINE: ${{ (contains(matrix.database, 'mdbx')) && 'mdbx' || '' }}
+          SYNAPSE_EMBEDDED_HAMT_PATH: ${{ (contains(matrix.database, 'mdbx')) && '/data/embedded_hamt' || '' }}
 
       - name: Formatted sanity check Complement test logs
         # Always run this step if we attempted to run the Complement tests.
@@ -165,7 +162,8 @@ jobs:
         env:
           POSTGRES: ${{ (startsWith(matrix.database, 'Postgres')) && 1 || '' }}
           WORKERS: ${{ (matrix.arrangement == 'workers') && 1 || '' }}
-          SYNAPSE_TIKV_PD_ENDPOINTS: ${{ (contains(matrix.database, 'tikv')) && '172.17.0.1:2379' || '' }}
+          SYNAPSE_EMBEDDED_HAMT_ENGINE: ${{ (contains(matrix.database, 'mdbx')) && 'mdbx' || '' }}
+          SYNAPSE_EMBEDDED_HAMT_PATH: ${{ (contains(matrix.database, 'mdbx')) && '/data/embedded_hamt' || '' }}
           TEST_ONLY_IGNORE_POETRY_LOCKFILE: ${{ inputs.use_latest_deps && 1 || '' }}
           TEST_ONLY_SKIP_DEP_HASH_VERIFICATION: ${{ inputs.use_twisted_trunk  && 1 || '' }}
 
@@ -199,7 +197,8 @@ jobs:
         env:
           POSTGRES: ${{ (startsWith(matrix.database, 'Postgres')) && 1 || '' }}
           WORKERS: ${{ (matrix.arrangement == 'workers') && 1 || '' }}
-          SYNAPSE_TIKV_PD_ENDPOINTS: ${{ (contains(matrix.database, 'tikv')) && '172.17.0.1:2379' || '' }}
+          SYNAPSE_EMBEDDED_HAMT_ENGINE: ${{ (contains(matrix.database, 'mdbx')) && 'mdbx' || '' }}
+          SYNAPSE_EMBEDDED_HAMT_PATH: ${{ (contains(matrix.database, 'mdbx')) && '/data/embedded_hamt' || '' }}
           TEST_ONLY_IGNORE_POETRY_LOCKFILE: ${{ inputs.use_latest_deps && 1 || '' }}
           TEST_ONLY_SKIP_DEP_HASH_VERIFICATION: ${{ inputs.use_twisted_trunk  && 1 || '' }}
 

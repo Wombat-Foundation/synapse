@@ -90,10 +90,10 @@ fn main() {
     // node history on every call -- that would silently turn "incremental"
     // into O(total nodes ever created) and defeat the point of the
     // benchmark. Production only ever prefetches a *sparse* local cache
-    // (`_prefetch_tikv_hamt`) and lets the function report which specific
-    // node hashes it still needs (`ApplyOutcome::Missing`), fetching just
-    // those from persistent storage (`backing_store` here stands in for
-    // SQL/TiKV) and retrying. That fetch-on-demand loop is reproduced
+    // and lets the function report which specific node hashes it still
+    // needs (`ApplyOutcome::Missing`), fetching just those from persistent
+    // storage (`backing_store` here stands in for SQL/the embedded engine)
+    // and retrying. That fetch-on-demand loop is reproduced
     // below, starting from nothing but the current root.
     let mut incremental_totals: Vec<(usize, f64)> = Vec::new();
     let mut incremental_node_reads: Vec<(usize, usize)> = Vec::new();

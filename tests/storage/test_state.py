@@ -65,6 +65,16 @@ class StateStoreTestCase(HomeserverTestCase):
             )
         )
 
+    def _force_sql_only_hamt(self) -> None:
+        """Some tests assert pure-SQL HAMT behaviour specifically and must
+        stay deterministic regardless of SYNAPSE_TEST_EMBEDDED_HAMT_ENGINE
+        (the trial-mdbx CI job runs the *whole* suite through the embedded
+        engine by default -- see tests/utils.py's default_config -- so a
+        test that specifically wants SQL must force it off locally rather
+        than assume it's already off).
+        """
+        self.state_datastore.embedded_hamt_engine = None
+
     def inject_state_event(
         self, room: RoomID, sender: UserID, typ: str, state_key: str, content: JsonDict
     ) -> EventBase:
@@ -271,6 +281,7 @@ class StateStoreTestCase(HomeserverTestCase):
         from synapse.synapse_rust import mdbx_engine
 
         # Persist with no embedded engine configured -- goes to SQL only.
+        self._force_sql_only_hamt()
         event = self.inject_state_event(
             self.room, self.u_alice, EventTypes.Create, "", {}
         )
@@ -447,6 +458,7 @@ class StateStoreTestCase(HomeserverTestCase):
         )
 
     def test_state_group_hamt_corruption_does_not_fallback_to_sql(self) -> None:
+        self._force_sql_only_hamt()
         event = self.inject_state_event(
             self.room, self.u_alice, EventTypes.Create, "", {}
         )
@@ -500,6 +512,7 @@ class StateStoreTestCase(HomeserverTestCase):
         singular per-group SQL loop, and must return correct per-group
         results without mocking anything -- this exercises the real SQL HAMT
         node-sharing path end to end."""
+        self._force_sql_only_hamt()
         event1 = self.inject_state_event(
             self.room, self.u_alice, EventTypes.Create, "", {}
         )
@@ -555,6 +568,7 @@ class StateStoreTestCase(HomeserverTestCase):
         empty room and on search across an upgraded room + its predecessor --
         both cases resolve state for two rooms in the same batched call.
         """
+        self._force_sql_only_hamt()
         event1 = self.inject_state_event(
             self.room, self.u_alice, EventTypes.Create, "", {}
         )

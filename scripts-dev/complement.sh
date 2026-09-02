@@ -420,8 +420,11 @@ main() {
   # particularly tricky.
   export PASS_SYNAPSE_LOG_TESTING=1
 
-  if [[ -n "$SYNAPSE_TIKV_PD_ENDPOINTS" ]]; then
-    export PASS_SYNAPSE_TIKV_PD_ENDPOINTS="$SYNAPSE_TIKV_PD_ENDPOINTS"
+  if [[ -n "$SYNAPSE_EMBEDDED_HAMT_ENGINE" ]]; then
+    export PASS_SYNAPSE_EMBEDDED_HAMT_ENGINE="$SYNAPSE_EMBEDDED_HAMT_ENGINE"
+  fi
+  if [[ -n "$SYNAPSE_EMBEDDED_HAMT_PATH" ]]; then
+    export PASS_SYNAPSE_EMBEDDED_HAMT_PATH="$SYNAPSE_EMBEDDED_HAMT_PATH"
   fi
 
   # ── Run-filter and extra-tags from remaining args ───────────────────────────

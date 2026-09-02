@@ -24,6 +24,7 @@ import logging
 import os
 import signal
 import sys
+import uuid
 from types import FrameType, TracebackType
 from typing import (
     Literal,
@@ -93,6 +94,15 @@ POSTGRES_BASE_DB = "_synapse_unit_tests_base_%s" % (os.getpid(),)
 # When debugging a specific test, it's occasionally useful to write the
 # DB to disk and query it with the sqlite CLI.
 SQLITE_PERSIST_DB = os.environ.get("SYNAPSE_TEST_PERSIST_SQLITE_DB") is not None
+
+# When set, every test homeserver runs its HAMT state store through the
+# embedded engine (mdbx) instead of plain SQL -- the trial-mdbx CI job's
+# whole purpose, mirroring what SYNAPSE_TEST_TIKV_PD_ENDPOINTS used to do
+# for the (now-removed) TiKV backend. Unlike a real external TiKV cluster,
+# mdbx is just a local file, so no separate "is a server reachable" check
+# is needed here -- config/database.py opens it directly.
+EMBEDDED_HAMT_ENGINE = os.environ.get("SYNAPSE_TEST_EMBEDDED_HAMT_ENGINE")
+EMBEDDED_HAMT_PATH = os.environ.get("SYNAPSE_TEST_EMBEDDED_HAMT_PATH")
 
 # the dbname we will connect to in order to create the base database.
 POSTGRES_DBNAME_FOR_INITIAL_CREATE = "postgres"
@@ -256,6 +266,19 @@ def default_config(
         "caches": {"global_factor": 1, "sync_response_cache_duration": 0},
         "listeners": [{"port": 0, "type": "http"}],
     }
+
+    if EMBEDDED_HAMT_ENGINE and EMBEDDED_HAMT_PATH:
+        # Many test homeservers (each with their own fresh SQL database, so
+        # each restarting its state_group id sequence at 1) can share this
+        # one mdbx file across a whole trial worker process. Without a
+        # unique namespace per homeserver, two different tests' state_group
+        # 1 would collide on the same mdbx keys and silently read each
+        # other's data.
+        config_dict["embedded_hamt"] = {
+            "engine": EMBEDDED_HAMT_ENGINE,
+            "path": EMBEDDED_HAMT_PATH,
+            "namespace": f"trial-{os.getpid()}-{uuid.uuid4().hex}",
+        }
 
     if parse:
         config = HomeServerConfig()

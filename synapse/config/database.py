@@ -86,6 +86,12 @@ class DatabaseConfig(Config):
         self.databases: list[DatabaseConnectionConfig] = []
         self.embedded_hamt_engine: str | None = None
         self.embedded_hamt_path: str | None = None
+        # Optional explicit namespace for HAMT keys in the embedded engine
+        # (see StateGroupDataStore.hamt_namespace) -- defaults to the server
+        # name when unset. Only useful for isolating multiple homeservers
+        # that share one embedded-engine file (e.g. many trial test
+        # processes reusing one mdbx path), not a normal deployment concern.
+        self.embedded_hamt_namespace: str | None = None
 
     def read_config(self, config: JsonDict, **kwargs: Any) -> None:
         # We *experimentally* support specifying multiple databases via the
@@ -111,6 +117,7 @@ class DatabaseConfig(Config):
         if embedded_config:
             self.embedded_hamt_engine = embedded_config.get("engine")
             self.embedded_hamt_path = embedded_config.get("path")
+            self.embedded_hamt_namespace = embedded_config.get("namespace")
 
         env_engine = os.environ.get("SYNAPSE_EMBEDDED_HAMT_ENGINE")
         if env_engine:

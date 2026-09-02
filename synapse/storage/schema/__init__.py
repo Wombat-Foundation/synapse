@@ -190,8 +190,9 @@ Changes in SCHEMA_VERSION = 95
 
 
 SCHEMA_COMPAT_VERSION = (
-    # HAMT state roots are authoritative in TiKV, and delayed-event IDs are
-    # globally unique rather than scoped to a user localpart.
+    # HAMT state roots are authoritative in the embedded engine when one is
+    # configured, and delayed-event IDs are globally unique rather than
+    # scoped to a user localpart.
     95
 )
 """Limit on how far the synapse codebase can be rolled back without breaking db compat

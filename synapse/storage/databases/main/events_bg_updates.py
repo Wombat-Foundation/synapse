@@ -46,6 +46,7 @@ from synapse.storage.database import (
     make_tuple_comparison_clause,
 )
 from synapse.storage.databases.main.cache import CacheInvalidationWorkerStore
+from synapse.storage.databases.main.embedded_event_json import put_event_json_batch
 from synapse.storage.databases.main.events import (
     SLIDING_SYNC_RELEVANT_STATE_SET,
     PersistEventsStore,
@@ -2814,8 +2815,10 @@ class EventsBackgroundUpdatesStore(
         current_verify_key = get_verify_key(self.hs.signing_key)
 
         # Re-sign any events that need it.
-        # A list of event IDs and their newly signed event dicts.
-        resigned_events: list[tuple[str, JsonDict]] = []
+        # A list of (event_id, newly signed event dict, original EventBase --
+        # kept alongside for its internal_metadata/format_version, needed to
+        # mirror the resigned JSON into the embedded engine below).
+        resigned_events: list[tuple[str, JsonDict, EventBase]] = []
         for event in next_events:
             if not event_needs_resigning(event, self.hs.hostname, current_verify_key):
                 continue
@@ -2846,14 +2849,14 @@ class EventsBackgroundUpdatesStore(
                     continue
 
             event_dict = resign_event(event, self.hs.hostname, self.hs.signing_key)
-            resigned_events.append((event.event_id, event_dict))
+            resigned_events.append((event.event_id, event_dict, event))
 
         # Atomically write the new stream pos progress with the new signatures,
         # else we may update the pos and crash before writing the new
         # signatures, thus not re-signing at all!
         def _write_events_txn(
             txn: LoggingTransaction,
-            events_to_write: list[tuple[str, JsonDict]],
+            events_to_write: list[tuple[str, JsonDict, EventBase]],
             max_stream_pos: int,
         ) -> None:
             if events_to_write:
@@ -2861,13 +2864,30 @@ class EventsBackgroundUpdatesStore(
                     txn,
                     "event_json",
                     key_names=["event_id"],
-                    key_values=[[event_id] for event_id, _ in events_to_write],
+                    key_values=[[event_id] for event_id, _, _ in events_to_write],
                     value_names=["json"],
                     value_values=[
                         [json_encoder.encode(event_dict)]
-                        for _, event_dict in events_to_write
+                        for _, event_dict, _ in events_to_write
                     ],
                 )
+                # SQL is updated in place above -- if the embedded event_json
+                # engine is enabled, it must be updated to match, the same
+                # way _censor_event_txn does for censoring/expiry. Otherwise
+                # get_event would keep serving the pre-resign (stale
+                # signature) JSON forever from the embedded engine.
+                if getattr(self, "_embedded_event_json_enabled", False):
+                    put_event_json_batch(
+                        [
+                            (
+                                event_id,
+                                json_encoder.encode(event.internal_metadata.get_dict()),
+                                json_encoder.encode(event_dict),
+                                event.format_version,
+                            )
+                            for event_id, event_dict, event in events_to_write
+                        ]
+                    )
             # Always update the progress even if we re-sign nothing.
             self.db_pool.updates._background_update_progress_txn(
                 txn,
@@ -2881,7 +2901,7 @@ class EventsBackgroundUpdatesStore(
 
             # Invalidate the event cache for re-signed events so that other
             # workers also pick up the new signatures.
-            for event_id, _ in events_to_write:
+            for event_id, _, _ in events_to_write:
                 self.invalidate_get_event_cache_after_txn(txn, event_id)
                 self._send_invalidation_to_replication(
                     txn, "_get_event_cache", (event_id,)
