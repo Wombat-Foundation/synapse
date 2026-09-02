@@ -213,6 +213,21 @@ jobs:
         # custom `.ci/complement_package.gotpl` template to render the output.
         run: cat /tmp/gotest-in-repo-complement.log | gotestfmt -hide "successful-downloads,successful-tests,empty-packages"
 
+      - name: Print PostgreSQL statistics
+        if: ${{ always() && startsWith(matrix.database, 'Postgres') }}
+        run: |
+          if [ -d /tmp/complement-postgres-stats ]; then
+            echo "================================================================"
+            echo "          COMPLEMENT POSTGRESQL DIAGNOSTICS & STATS             "
+            echo "================================================================"
+            for f in /tmp/complement-postgres-stats/*.txt; do
+              [ -e "$f" ] || continue
+              echo "--- $f ---"
+              cat "$f"
+              echo
+            done
+          fi
+
       - name: Upload PostgreSQL statistics
         if: ${{ always() && startsWith(matrix.database, 'Postgres') }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
