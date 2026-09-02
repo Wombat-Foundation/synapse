@@ -528,12 +528,11 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
             state_filter.concrete_types() if not state_filter.has_wildcards() else None
         )
 
-        # An embedded engine (mdbx/fjall) only mirrors nodes, not root
-        # records (those stay in `state_hamt_roots`/`state_groups`), so
-        # there's no per-group "direct" fast path the way TiKV has -- every
-        # call goes through the small root-record SQL lookup regardless of
-        # group count, then Rust walks the tree. Always use the bulk path
-        # (it degrades to a single-root fetch fine for len(groups) == 1).
+        # The embedded engine (mdbx) mirrors both nodes and root records
+        # (`_store_state_hamt_root_embedded_txn`/`batch_get_state_hamt_roots`),
+        # falling back to `state_hamt_roots`/`state_groups` SQL only for a
+        # group it doesn't have. Always use the bulk path (it degrades to a
+        # single-root fetch fine for len(groups) == 1).
         use_embedded = not use_tikv and bool(
             getattr(self, "embedded_hamt_engine", None)
         )
@@ -1129,22 +1128,19 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         return results
 
     def _embedded_hamt_engine_module(self) -> ModuleType:
-        """Returns the `mdbx_engine`/`fjall_engine` PyO3 module configured
-        for this deployment (`embedded_hamt_engine` config). Nodes are
-        content-addressed and immutable, so either module's
-        `materialize_state_hamts`/`lookup_state_hamts` can walk the tree
-        itself in Rust -- unlike the SQL path above, no per-node round trip
-        back into Python is needed here.
+        """Returns the `mdbx_engine` PyO3 module configured for this
+        deployment (`embedded_hamt_engine` config). mdbx is the only
+        supported embedded engine (fjall was benchmarked and dropped, see
+        `database/mod.rs`'s doc comment). Nodes are content-addressed and
+        immutable, so `materialize_state_hamts`/`lookup_state_hamts` can
+        walk the tree itself in Rust -- unlike the SQL path above, no
+        per-node round trip back into Python is needed here.
         """
         engine = getattr(self, "embedded_hamt_engine", None)
         if engine == "mdbx":
             from synapse.synapse_rust import mdbx_engine
 
             return mdbx_engine
-        elif engine == "fjall":
-            from synapse.synapse_rust import fjall_engine
-
-            return fjall_engine
         raise RuntimeError(f"Unknown embedded_hamt_engine: {engine!r}")
 
     def _fetch_hamt_roots_for_embedded_txn(

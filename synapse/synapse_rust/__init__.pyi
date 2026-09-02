@@ -1,5 +1,4 @@
 from synapse.synapse_rust import (
-    fjall_engine as fjall_engine,
     mdbx_engine as mdbx_engine,
     state_hamt as state_hamt,
     tikv_engine as tikv_engine,

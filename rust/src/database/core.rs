@@ -1,14 +1,12 @@
-//! Generic HAMT node-store logic shared by every embedded single-process KV
-//! backend ([`crate::fjall_engine`], [`crate::mdbx_engine`]). Each backend
-//! implements only [`NodeStore`] (a thin point-lookup/write surface over its
-//! own storage primitive) and owns its own process-global handle + node
-//! cache; the BFS materialize/selective-lookup walk, the node-cache
-//! verify-on-hit logic, and the key-encoding scheme live here exactly once.
-//!
-//! `synapse/storage/databases/state/store.py` picks which backend module to
-//! call based on config (`embedded_hamt_engine = "fjall" | "mdbx"`); both
-//! expose an identical Python surface (see each module's `.pyi` stub) so the
-//! choice is a drop-in swap at the call site.
+//! Generic HAMT node-store logic backing the embedded single-process KV
+//! engine ([`crate::database::mdbx`]). The backend implements only
+//! [`NodeStore`] (a thin point-lookup/write surface over its own storage
+//! primitive) and owns its own process-global handle + node cache; the BFS
+//! materialize/selective-lookup walk, the node-cache verify-on-hit logic,
+//! and the key-encoding scheme live here. Kept separate from `mdbx.rs`
+//! (rather than folded together) mainly because it was shared with a
+//! second backend (fjall) that was benchmarked and dropped -- see
+//! `database/mod.rs`'s doc comment.
 
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;

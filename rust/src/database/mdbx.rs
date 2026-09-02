@@ -1,15 +1,17 @@
 //! Embedded, single-process (but natively multi-process-mmap-safe) HAMT
 //! node/root storage backed by [`libmdbx`] (a Rust wrapper over the real C
-//! libmdbx library). Unlike [`crate::database::fjall`], every worker
-//! process can open this database directly -- mdbx supports concurrent
-//! multi-process readers/writer via mmap and its own file locking, so no
-//! bridge daemon is needed as long as all processes share a filesystem
-//! (see the module-level architecture doc for the single-host assumption).
+//! libmdbx library). Every worker process can open this database directly
+//! -- mdbx supports concurrent multi-process readers/writer via mmap and
+//! its own file locking, so no bridge daemon is needed as long as all
+//! processes share a filesystem (see the module-level architecture doc for
+//! the single-host assumption). This was the deciding advantage over
+//! fjall (a pure-Rust LSM engine also benchmarked here, since dropped --
+//! see `database/mod.rs`'s doc comment): fjall's single-writer-process
+//! design would have needed a worker RPC bridge; mdbx needs none.
 //!
-//! The BFS materialize/selective-lookup walk and key encoding are shared
-//! with [`crate::database::fjall`] via [`crate::database::core`]; this
-//! module only implements [`core::NodeStore`] over an mdbx read
-//! transaction.
+//! The BFS materialize/selective-lookup walk and key encoding live in
+//! [`crate::database::core`]; this module only implements
+//! [`core::NodeStore`] over an mdbx read transaction.
 
 use std::sync::Mutex;
 

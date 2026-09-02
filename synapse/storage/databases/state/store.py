@@ -174,26 +174,26 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         self.embedded_hamt_engine = hs.config.database.embedded_hamt_engine
         self.embedded_hamt_path = hs.config.database.embedded_hamt_path
         if self.embedded_hamt_engine and self.embedded_hamt_path:
+            # mdbx is the only embedded engine: it beat fjall on every real
+            # benchmark (point reads, batch reads) and needs no worker-
+            # process bridge (native multi-process mmap access), so fjall
+            # was dropped rather than kept as a second maintained option.
+            if self.embedded_hamt_engine != "mdbx":
+                raise RuntimeError(
+                    f"Unknown embedded_hamt_engine: {self.embedded_hamt_engine!r} "
+                    "(only 'mdbx' is supported)"
+                )
             try:
-                if self.embedded_hamt_engine == "mdbx":
-                    from synapse.synapse_rust import mdbx_engine
+                from synapse.synapse_rust import mdbx_engine
 
-                    mdbx_engine.open_client(self.embedded_hamt_path)
-                    logger.info(
-                        "Opened embedded mdbx engine at %s for state HAMT offload",
-                        self.embedded_hamt_path,
-                    )
-                elif self.embedded_hamt_engine == "fjall":
-                    from synapse.synapse_rust import fjall_engine
-
-                    fjall_engine.open_client(self.embedded_hamt_path)
-                    logger.info(
-                        "Opened embedded fjall engine at %s for state HAMT offload",
-                        self.embedded_hamt_path,
-                    )
+                mdbx_engine.open_client(self.embedded_hamt_path)
+                logger.info(
+                    "Opened embedded mdbx engine at %s for state HAMT offload",
+                    self.embedded_hamt_path,
+                )
             except Exception as e:
                 raise RuntimeError(
-                    f"Failed to open embedded {self.embedded_hamt_engine} engine at {self.embedded_hamt_path}"
+                    f"Failed to open embedded mdbx engine at {self.embedded_hamt_path}"
                 ) from e
 
     @trace
@@ -976,10 +976,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             from synapse.synapse_rust import mdbx_engine
 
             mdbx_engine.put_state_hamt_nodes(self.tikv_namespace, room_prefix, nodes)
-        elif self.embedded_hamt_engine == "fjall":
-            from synapse.synapse_rust import fjall_engine
-
-            fjall_engine.put_state_hamt_nodes(self.tikv_namespace, room_prefix, nodes)
 
         txn.executemany(
             """
@@ -1022,10 +1018,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             from synapse.synapse_rust import mdbx_engine
 
             mdbx_engine.put(root_key, root_value)
-        elif self.embedded_hamt_engine == "fjall":
-            from synapse.synapse_rust import fjall_engine
-
-            fjall_engine.put(root_key, root_value)
 
     async def _background_backfill_state_hamt_roots(
         self, progress: dict, batch_size: int

@@ -1,15 +1,18 @@
 #!/usr/bin/env python
-"""Benchmarks Postgres (event_json, the real table) vs. mdbx vs. fjall for
-the event_json access pattern: an immutable blob keyed by event_id, pure
-point lookups (get_event), high write volume, no aggregation/joins against
-it -- the next candidate identified from the same criteria that made HAMT
-nodes a good embedded-engine fit (content-addressed, point-keyed, no SQL
-query shape needed against the table itself).
+"""Benchmarks Postgres (event_json, the real table) vs. mdbx for the
+event_json access pattern: an immutable blob keyed by event_id, pure point
+lookups (get_event), high write volume, no aggregation/joins against it --
+the next candidate identified from the same criteria that made HAMT nodes
+a good embedded-engine fit (content-addressed, point-keyed, no SQL query
+shape needed against the table itself). fjall was also benchmarked here
+originally but was dropped after losing to mdbx on every measurement (see
+scripts-dev/benchmark_hamt_mdbx.py and docs/development-gg/
+persistent-typed-hamt-architecture.md for the historical comparison).
 
 Unlike the HAMT benchmark, this needs no materialize/BFS walk -- event_json
 rows don't reference each other, so the plain put/get/batch_get/batch_put
-surface (already shared by mdbx_engine/fjall_engine) is the whole engine
-API surface needed here.
+surface (already exposed by mdbx_engine) is the whole engine API surface
+needed here.
 
 Keys: 44-byte strings, matching real event_id length (`$` + 43-char
 base64-ish hash, per the room version 4+ event ID format). Values: sizes
@@ -38,7 +41,7 @@ from typing import Callable
 import psycopg2
 import psycopg2.extras
 
-from synapse.synapse_rust import fjall_engine, mdbx_engine
+from synapse.synapse_rust import mdbx_engine
 
 CUMULATIVE_SIZES = (200_000, 2_000_000)
 READ_BATCH_SIZES = (1, 20, 100)
@@ -225,9 +228,7 @@ def run_embedded(name: str, engine: object) -> None:
 
 def main() -> None:
     print(f"cumulative sizes: {CUMULATIVE_SIZES}, event_json-shaped payloads\n")
-    print("--- fjall ---")
-    run_embedded("fjall", fjall_engine)
-    print("\n--- mdbx ---")
+    print("--- mdbx ---")
     run_embedded("mdbx", mdbx_engine)
     print("\n--- postgres ---")
     run_postgres()
