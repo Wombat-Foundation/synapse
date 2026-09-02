@@ -61,7 +61,10 @@ def rand_event_json(rng: random.Random) -> bytes:
         size = rng.randint(1000, 2000)
     else:
         size = rng.randint(3000, 6000)
-    return rng.randbytes(size)
+    # Real event JSON is printable text with no NUL bytes; base64-encoding
+    # random bytes gives a payload of the right size that's safe to store
+    # as Postgres TEXT (raw randbytes can contain 0x00, which TEXT rejects).
+    return base64.urlsafe_b64encode(rng.randbytes(size))[:size]
 
 
 def rand_rows(rng: random.Random, n: int) -> list[tuple[bytes, bytes]]:
