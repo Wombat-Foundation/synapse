@@ -1,18 +1,15 @@
 from collections.abc import Sequence
 
-def room_structural_key(server_secret: bytes, room_id: str) -> bytes: ...
+def room_structural_key(room_id: str) -> bytes: ...
 def room_hamt_prefix(
-    server_secret: bytes,
     room_id: str,
     msc4291_room_ids_as_hashes: bool,
 ) -> bytes: ...
 def build_root_handle(
-    server_secret: bytes,
     room_id: str,
     entries: Sequence[tuple[str, str, str]],
 ) -> tuple[tuple[bytes, bytes], list[tuple[bytes, bytes]]]: ...
 def build_root_handle_with_lattice(
-    server_secret: bytes,
     room_id: str,
     entries: Sequence[tuple[str, str, str]],
 ) -> tuple[bytes, bytes, bytes, list[tuple[bytes, bytes]]]:
@@ -27,7 +24,6 @@ def build_root_handle_with_lattice(
     """
 
 def apply_flat_state_updates(
-    server_secret: bytes,
     room_id: str,
     root_node_bytes: bytes,
     nodes: Sequence[tuple[bytes, bytes]],
@@ -68,7 +64,6 @@ def apply_flat_state_updates(
     """
 
 def build_typed_root(
-    server_secret: bytes,
     room_id: str,
     entries: Sequence[tuple[str, str, str]],
 ) -> tuple[bytes, bytes, bytes, list[tuple[bytes, bytes]]]:
@@ -86,7 +81,6 @@ def decode_typed_root(
     """Returns (structural_hash, state_group_id, directory)."""
 
 def build_typed_root_with_lattice(
-    server_secret: bytes,
     room_id: str,
     entries: Sequence[tuple[str, str, str]],
 ) -> tuple[bytes, bytes, bytes, bytes, list[tuple[bytes, bytes]]]:
@@ -100,7 +94,6 @@ def build_typed_root_with_lattice(
     """
 
 def apply_typed_state_updates(
-    server_secret: bytes,
     room_id: str,
     typed_root_bytes: bytes,
     nodes: Sequence[tuple[bytes, bytes]],
@@ -139,7 +132,6 @@ def materialize_state_entries(
     nodes: Sequence[tuple[bytes, bytes]],
 ) -> list[tuple[str, str, str]]: ...
 def lookup_state_entries(
-    server_secret: bytes,
     room_id: str,
     root_node_bytes: bytes,
     nodes: Sequence[tuple[bytes, bytes]],

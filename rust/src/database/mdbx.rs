@@ -548,15 +548,12 @@ pub fn put_state_hamt_nodes(
 }
 
 #[pyfunction]
-#[pyo3(
-    text_signature = "(namespace, room_prefix, root_structural_hash, server_secret, room_id, /)"
-)]
+#[pyo3(text_signature = "(namespace, room_prefix, root_structural_hash, room_id, /)")]
 pub fn materialize_state_hamt(
     py: Python<'_>,
     namespace: String,
     room_prefix: Vec<u8>,
     root_structural_hash: Vec<u8>,
-    server_secret: Vec<u8>,
     room_id: &str,
 ) -> PyResult<Option<StateEntries>> {
     let room_prefix: [u8; ROOM_PREFIX_LEN] = room_prefix.try_into().map_err(|_| {
@@ -567,10 +564,7 @@ pub fn materialize_state_hamt(
     let root_structural_hash: StructuralHash = root_structural_hash.try_into().map_err(|_| {
         pyo3::exceptions::PyValueError::new_err("root_structural_hash must be 32 bytes")
     })?;
-    let server_secret: [u8; 32] = server_secret
-        .try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("server_secret must be 32 bytes"))?;
-    let structural_key = room_structural_key_raw(&server_secret, room_id);
+    let structural_key = room_structural_key_raw(room_id);
     py.detach(|| {
         let database = db().map_err(|e| e.to_string())?;
         let txn = database.begin_ro_txn().map_err(|e| e.to_string())?;
@@ -593,16 +587,12 @@ pub fn materialize_state_hamt(
 }
 
 #[pyfunction]
-#[pyo3(text_signature = "(namespace, server_secret, roots, /)")]
+#[pyo3(text_signature = "(namespace, roots, /)")]
 pub fn materialize_state_hamts(
     py: Python<'_>,
     namespace: String,
-    server_secret: Vec<u8>,
     roots: Vec<(Vec<u8>, Vec<u8>, String)>,
 ) -> PyResult<Vec<StateEntries>> {
-    let server_secret: [u8; 32] = server_secret
-        .try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("server_secret must be 32 bytes"))?;
     let roots = roots
         .into_iter()
         .map(|(room_prefix, root_hash, room_id)| {
@@ -614,7 +604,7 @@ pub fn materialize_state_hamts(
             let root_hash: StructuralHash = root_hash.try_into().map_err(|_| {
                 pyo3::exceptions::PyValueError::new_err("root_structural_hash must be 32 bytes")
             })?;
-            let structural_key = room_structural_key_raw(&server_secret, &room_id);
+            let structural_key = room_structural_key_raw(&room_id);
             Ok((room_prefix, structural_key, root_hash))
         })
         .collect::<PyResult<Vec<_>>>()?;
@@ -768,7 +758,6 @@ mod tests {
     fn materialize_state_hamt_round_trips_through_mdbx() {
         ensure_open();
         let namespace = "test-namespace-materialize-mdbx";
-        let server_secret = [7u8; 32];
         let room_id = "!room:example.org";
         let room_prefix: [u8; ROOM_PREFIX_LEN] = [1, 2, 3, 4, 5, 6, 7, 8];
 
@@ -785,8 +774,7 @@ mod tests {
             ),
         ];
         let ((root_hash, _state_group_id), nodes) =
-            build_root_handle_and_nodes(&server_secret, room_id, entries.clone())
-                .expect("build HAMT");
+            build_root_handle_and_nodes(room_id, entries.clone()).expect("build HAMT");
 
         let database = DB.get().unwrap();
         let txn = database.begin_rw_txn().unwrap();
@@ -799,7 +787,7 @@ mod tests {
         txn.commit().unwrap();
 
         let root_hash: StructuralHash = root_hash;
-        let structural_key = room_structural_key_raw(&server_secret, room_id);
+        let structural_key = room_structural_key_raw(room_id);
 
         let txn = database.begin_ro_txn().unwrap();
         let table: Table = txn.open_table(None).unwrap();

@@ -676,7 +676,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
 
         root_structural_hash, _state_group_id, root_lattice, nodes = (
             state_hamt.build_root_handle_with_lattice(
-                self._state_hamt_secret(),
                 room_id,
                 self._build_state_hamt_entries(current_state_ids),
             )
@@ -805,7 +804,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         # hashes, rather than fetching the whole reachable tree up front.
         while True:
             applied, missing = state_hamt.apply_flat_state_updates(
-                self._state_hamt_secret(),
                 room_id,
                 root_bytes,
                 list(nodes.items()),
@@ -1054,7 +1052,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         from synapse.synapse_rust import state_hamt
 
         main_store = self.hs.get_datastores().main
-        secret = self._state_hamt_secret()
         room_prefixes: dict[str, bytes | None] = {}
         for _state_group, room_id in rows:
             if room_id in room_prefixes:
@@ -1073,7 +1070,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 room_prefixes[room_id] = None
                 continue
             room_prefixes[room_id] = state_hamt.room_hamt_prefix(
-                secret, room_id, room_version.msc4291_room_ids_as_hashes
+                room_id, room_version.msc4291_room_ids_as_hashes
             )
 
         # Once the embedded engine is exclusive, a group it already has a
@@ -1229,7 +1226,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         from synapse.synapse_rust import state_hamt
 
         room_prefix = state_hamt.room_hamt_prefix(
-            self._state_hamt_secret(),
             room_id,
             room_version.msc4291_room_ids_as_hashes,
         )
@@ -1416,7 +1412,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         from synapse.synapse_rust import state_hamt
 
         room_prefix = state_hamt.room_hamt_prefix(
-            self._state_hamt_secret(),
             room_id,
             room_version.msc4291_room_ids_as_hashes,
         )

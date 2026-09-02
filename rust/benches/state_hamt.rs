@@ -35,7 +35,6 @@ use synapse::state_hamt::{apply_flat_state_updates, build_root_handle_with_latti
 
 const S_MAX: usize = 4096;
 const CHECKPOINTS: &[usize] = &[16, 64, 256, 1024, 2048, 4096];
-const SERVER_SECRET: [u8; 32] = [7u8; 32];
 const ROOM_ID: &str = "!bench-cumulative-rebuild:example.com";
 
 /// One entry per step: a distinct `(event_type, state_key)` so every
@@ -69,7 +68,7 @@ fn main() {
         for i in 0..S_MAX {
             state.push(entry(i));
             let start = Instant::now();
-            build_root_handle_with_lattice(SERVER_SECRET.to_vec(), ROOM_ID, state.clone())
+            build_root_handle_with_lattice(ROOM_ID, state.clone())
                 .expect("full rebuild should succeed");
             cumulative += start.elapsed().as_secs_f64();
 
@@ -102,7 +101,7 @@ fn main() {
             std::collections::HashMap::new();
         let start = Instant::now();
         let (root_hash, _sg, lattice_bytes, nodes) =
-            build_root_handle_with_lattice(SERVER_SECRET.to_vec(), ROOM_ID, vec![entry(0)])
+            build_root_handle_with_lattice(ROOM_ID, vec![entry(0)])
                 .expect("initial build should succeed");
         let mut cumulative = start.elapsed().as_secs_f64();
         backing_store.extend(nodes);
@@ -120,7 +119,6 @@ fn main() {
                 vec![(root_hash.clone(), root_node_bytes.clone())];
             let (applied, node_reads) = loop {
                 let (applied, missing) = apply_flat_state_updates(
-                    SERVER_SECRET.to_vec(),
                     ROOM_ID,
                     root_node_bytes.clone(),
                     local_nodes.clone(),

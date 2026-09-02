@@ -23,7 +23,7 @@ use rezzy::{
     hamt::{HamtNode, NodeRef, PersistedInternalNode, RootHandle, StateGroupId, StructuralHash},
     LtHash,
 };
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 
 type HmacSha256 = Hmac<Sha256>;
 type RootHandleParts = ([u8; 32], [u8; 32]);
@@ -151,12 +151,10 @@ fn typed_root_hash(room_key: &[u8; 32], directory: &[(String, StructuralHash)]) 
 }
 
 fn build_typed_root_and_nodes(
-    server_secret: &[u8; 32],
     room_id: &str,
     entries: Vec<(String, String, String)>,
 ) -> Result<(TypedRoot, Vec<PersistedNodeBytes>), String> {
-    let (root, _lattice, nodes) =
-        build_typed_root_nodes_and_lattice(server_secret, room_id, entries)?;
+    let (root, _lattice, nodes) = build_typed_root_nodes_and_lattice(room_id, entries)?;
     Ok((root, nodes))
 }
 
@@ -166,11 +164,10 @@ fn build_typed_root_and_nodes(
 /// typed root via [`apply_typed_state_updates_impl`], mirroring
 /// [`build_root_handle_nodes_and_lattice`] for the flat path.
 fn build_typed_root_nodes_and_lattice(
-    server_secret: &[u8; 32],
     room_id: &str,
     entries: Vec<(String, String, String)>,
 ) -> Result<(TypedRoot, LtHash, Vec<PersistedNodeBytes>), String> {
-    let room_key = room_structural_key_raw(server_secret, room_id);
+    let room_key = room_structural_key_raw(room_id);
     let mut by_type: std::collections::BTreeMap<String, Vec<(String, String)>> =
         std::collections::BTreeMap::new();
     // The state-group identity is the unkeyed LtHash lattice over every
@@ -211,11 +208,9 @@ fn build_typed_root_nodes_and_lattice(
 }
 
 #[must_use]
-pub fn room_structural_key_raw(server_secret: &[u8; 32], room_id: &str) -> [u8; 32] {
-    let mut mac =
-        <HmacSha256 as Mac>::new_from_slice(server_secret).expect("HMAC can take key of any size");
-    mac.update(room_id.as_bytes());
-    mac.finalize().into_bytes().into()
+pub fn room_structural_key_raw(room_id: &str) -> [u8; 32] {
+    let hash = Sha256::digest(room_id.as_bytes());
+    hash.into()
 }
 
 /// Derive a fixed-width, room-scoped prefix used to lay out this room's HAMT
@@ -226,15 +221,14 @@ pub fn room_structural_key_raw(server_secret: &[u8; 32], room_id: &str) -> [u8; 
 /// For MSC4291-style room versions the room ID *is* `!` + base64url(hash(create
 /// event)) -- already a uniformly-distributed digest -- so we decode it directly
 /// rather than hashing it again. For pre-MSC4291 versions the room ID is an
-/// opaque, low-entropy string (`!<random localpart>:<server_name>`), so we reuse
-/// the same HMAC-SHA256 derivation as `room_structural_key_raw` and truncate.
+/// opaque, low-entropy string (`!<random localpart>:<server_name>`), so we
+/// SHA-256 it and truncate the digest.
 ///
 /// Callers must pass the real `room_version.msc4291_room_ids_as_hashes` flag
 /// (the official per-room-version marker) rather than comparing version
 /// numbers, since which versions get hash-based room IDs is not simply "v12
 /// and above" (e.g. experimental/Hydra versions).
 pub fn room_hamt_prefix_raw(
-    server_secret: &[u8; 32],
     room_id: &str,
     msc4291_room_ids_as_hashes: bool,
 ) -> Result<[u8; 8], String> {
@@ -265,7 +259,7 @@ pub fn room_hamt_prefix_raw(
         }
         prefix.copy_from_slice(&decoded[..PREFIX_LEN]);
     } else {
-        let full_key = room_structural_key_raw(server_secret, room_id);
+        let full_key = room_structural_key_raw(room_id);
         prefix.copy_from_slice(&full_key[..PREFIX_LEN]);
     }
 
@@ -296,12 +290,10 @@ fn collect_persisted_nodes(
 }
 
 pub(crate) fn build_root_handle_and_nodes(
-    server_secret: &[u8; 32],
     room_id: &str,
     entries: Vec<(String, String, String)>,
 ) -> Result<BuiltRoot, String> {
-    let (root_handle, lattice, nodes) =
-        build_root_handle_nodes_and_lattice(server_secret, room_id, entries)?;
+    let (root_handle, lattice, nodes) = build_root_handle_nodes_and_lattice(room_id, entries)?;
     let _ = lattice;
     Ok((root_handle_parts(&root_handle), nodes))
 }
@@ -312,11 +304,10 @@ pub(crate) fn build_root_handle_and_nodes(
 /// root via [`apply_flat_state_updates_impl`] without recomputing the
 /// lattice from scratch. See docs/development-gg/persistent-typed-hamt-architecture.md.
 fn build_root_handle_nodes_and_lattice(
-    server_secret: &[u8; 32],
     room_id: &str,
     entries: Vec<(String, String, String)>,
 ) -> Result<(RootHandle, LtHash, Vec<PersistedNodeBytes>), String> {
-    let structural_key = room_structural_key_raw(server_secret, room_id);
+    let structural_key = room_structural_key_raw(room_id);
     let mut lattice = LtHash::default();
     for (event_type, state_key, event_id) in &entries {
         lattice.insert(event_type, state_key, event_id);
@@ -451,14 +442,13 @@ enum ApplyOutcome {
 /// `updates` is `(event_type, state_key, new_event_id)`, where
 /// `new_event_id: None` means "remove this key".
 fn apply_flat_state_updates_impl(
-    server_secret: &[u8; 32],
     room_id: &str,
     root_node_bytes: &[u8],
     nodes: Vec<(Vec<u8>, Vec<u8>)>,
     lattice_bytes: &[u8],
     updates: Vec<(String, String, Option<String>)>,
 ) -> Result<ApplyOutcome, String> {
-    let structural_key = room_structural_key_raw(server_secret, room_id);
+    let structural_key = room_structural_key_raw(room_id);
     let mut lattice = lattice_from_bytes(lattice_bytes)?;
 
     let root_node = decode_persisted_node_with_key(root_node_bytes, &structural_key)?;
@@ -582,14 +572,13 @@ enum ApplyTypedOutcome {
 /// empty root to insert into, so a brand-new event type is not a special
 /// case requiring a different code path.
 fn apply_typed_state_updates_impl(
-    server_secret: &[u8; 32],
     room_id: &str,
     typed_root_bytes: &[u8],
     nodes: Vec<(Vec<u8>, Vec<u8>)>,
     lattice_bytes: &[u8],
     updates: Vec<(String, String, Option<String>)>,
 ) -> Result<ApplyTypedOutcome, String> {
-    let room_key = room_structural_key_raw(server_secret, room_id);
+    let room_key = room_structural_key_raw(room_id);
     let mut lattice = lattice_from_bytes(lattice_bytes)?;
 
     let typed_root = TypedRoot::decode_v1(typed_root_bytes)?;
@@ -896,42 +885,28 @@ fn structural_hash_from_bytes(hash_bytes: Vec<u8>) -> Result<StructuralHash, PyE
 }
 
 #[pyfunction]
-#[pyo3(text_signature = "(server_secret, room_id, /)")]
-pub fn room_structural_key(server_secret: Vec<u8>, room_id: &str) -> PyResult<Vec<u8>> {
-    let server_secret: [u8; 32] = server_secret
-        .try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("server_secret must be 32 bytes"))?;
-    Ok(room_structural_key_raw(&server_secret, room_id).to_vec())
+#[pyo3(text_signature = "(room_id, /)")]
+pub fn room_structural_key(room_id: &str) -> PyResult<Vec<u8>> {
+    Ok(room_structural_key_raw(room_id).to_vec())
 }
 
 /// See `room_hamt_prefix_raw` for the derivation. `msc4291_room_ids_as_hashes`
 /// must come from the caller's real `RoomVersion.msc4291_room_ids_as_hashes`.
 #[pyfunction]
-#[pyo3(text_signature = "(server_secret, room_id, msc4291_room_ids_as_hashes, /)")]
-pub fn room_hamt_prefix(
-    server_secret: Vec<u8>,
-    room_id: &str,
-    msc4291_room_ids_as_hashes: bool,
-) -> PyResult<Vec<u8>> {
-    let server_secret: [u8; 32] = server_secret
-        .try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("server_secret must be 32 bytes"))?;
-    room_hamt_prefix_raw(&server_secret, room_id, msc4291_room_ids_as_hashes)
+#[pyo3(text_signature = "(room_id, msc4291_room_ids_as_hashes, /)")]
+pub fn room_hamt_prefix(room_id: &str, msc4291_room_ids_as_hashes: bool) -> PyResult<Vec<u8>> {
+    room_hamt_prefix_raw(room_id, msc4291_room_ids_as_hashes)
         .map(|prefix| prefix.to_vec())
         .map_err(pyo3::exceptions::PyValueError::new_err)
 }
 
 #[pyfunction]
-#[pyo3(text_signature = "(server_secret, room_id, entries, /)")]
+#[pyo3(text_signature = "(room_id, entries, /)")]
 pub fn build_root_handle(
-    server_secret: Vec<u8>,
     room_id: &str,
     entries: Vec<(String, String, String)>,
 ) -> PyResult<PyBuiltRoot> {
-    let server_secret: [u8; 32] = server_secret
-        .try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("server_secret must be 32 bytes"))?;
-    let (root_handle_parts, nodes) = build_root_handle_and_nodes(&server_secret, room_id, entries)
+    let (root_handle_parts, nodes) = build_root_handle_and_nodes(room_id, entries)
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
 
     Ok((
@@ -944,18 +919,13 @@ pub fn build_root_handle(
 }
 
 #[pyfunction]
-#[pyo3(text_signature = "(server_secret, room_id, entries, /)")]
+#[pyo3(text_signature = "(room_id, entries, /)")]
 pub fn build_root_handle_with_lattice(
-    server_secret: Vec<u8>,
     room_id: &str,
     entries: Vec<(String, String, String)>,
 ) -> PyResult<PyBuiltRootWithLattice> {
-    let server_secret: [u8; 32] = server_secret
-        .try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("server_secret must be 32 bytes"))?;
-    let (root_handle, lattice, nodes) =
-        build_root_handle_nodes_and_lattice(&server_secret, room_id, entries)
-            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    let (root_handle, lattice, nodes) = build_root_handle_nodes_and_lattice(room_id, entries)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
 
     Ok((
         root_handle.structural_hash.to_vec(),
@@ -969,29 +939,17 @@ pub fn build_root_handle_with_lattice(
 }
 
 #[pyfunction]
-#[pyo3(
-    text_signature = "(server_secret, room_id, root_node_bytes, nodes, lattice_bytes, updates, /)"
-)]
+#[pyo3(text_signature = "(room_id, root_node_bytes, nodes, lattice_bytes, updates, /)")]
 pub fn apply_flat_state_updates(
-    server_secret: Vec<u8>,
     room_id: &str,
     root_node_bytes: Vec<u8>,
     nodes: Vec<(Vec<u8>, Vec<u8>)>,
     lattice_bytes: Vec<u8>,
     updates: Vec<PyStateUpdate>,
 ) -> PyResult<PyApplyOutcome> {
-    let server_secret: [u8; 32] = server_secret
-        .try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("server_secret must be 32 bytes"))?;
-    let outcome = apply_flat_state_updates_impl(
-        &server_secret,
-        room_id,
-        &root_node_bytes,
-        nodes,
-        &lattice_bytes,
-        updates,
-    )
-    .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    let outcome =
+        apply_flat_state_updates_impl(room_id, &root_node_bytes, nodes, &lattice_bytes, updates)
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
 
     Ok(match outcome {
         ApplyOutcome::Applied(applied) => (
@@ -1015,16 +973,12 @@ pub fn apply_flat_state_updates(
 }
 
 #[pyfunction]
-#[pyo3(text_signature = "(server_secret, room_id, entries, /)")]
+#[pyo3(text_signature = "(room_id, entries, /)")]
 pub fn build_typed_root(
-    server_secret: Vec<u8>,
     room_id: &str,
     entries: Vec<(String, String, String)>,
 ) -> PyResult<PyBuiltTypedRoot> {
-    let server_secret: [u8; 32] = server_secret
-        .try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("server_secret must be 32 bytes"))?;
-    let (root, nodes) = build_typed_root_and_nodes(&server_secret, room_id, entries)
+    let (root, nodes) = build_typed_root_and_nodes(room_id, entries)
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
     let root_bytes = root
         .encode_v1()
@@ -1041,18 +995,13 @@ pub fn build_typed_root(
 }
 
 #[pyfunction]
-#[pyo3(text_signature = "(server_secret, room_id, entries, /)")]
+#[pyo3(text_signature = "(room_id, entries, /)")]
 pub fn build_typed_root_with_lattice(
-    server_secret: Vec<u8>,
     room_id: &str,
     entries: Vec<(String, String, String)>,
 ) -> PyResult<PyBuiltTypedRootWithLattice> {
-    let server_secret: [u8; 32] = server_secret
-        .try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("server_secret must be 32 bytes"))?;
-    let (root, lattice, nodes) =
-        build_typed_root_nodes_and_lattice(&server_secret, room_id, entries)
-            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    let (root, lattice, nodes) = build_typed_root_nodes_and_lattice(room_id, entries)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
     let root_bytes = root
         .encode_v1()
         .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
@@ -1069,29 +1018,17 @@ pub fn build_typed_root_with_lattice(
 }
 
 #[pyfunction]
-#[pyo3(
-    text_signature = "(server_secret, room_id, typed_root_bytes, nodes, lattice_bytes, updates, /)"
-)]
+#[pyo3(text_signature = "(room_id, typed_root_bytes, nodes, lattice_bytes, updates, /)")]
 pub fn apply_typed_state_updates(
-    server_secret: Vec<u8>,
     room_id: &str,
     typed_root_bytes: Vec<u8>,
     nodes: Vec<(Vec<u8>, Vec<u8>)>,
     lattice_bytes: Vec<u8>,
     updates: Vec<PyStateUpdate>,
 ) -> PyResult<PyApplyTypedOutcome> {
-    let server_secret: [u8; 32] = server_secret
-        .try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("server_secret must be 32 bytes"))?;
-    let outcome = apply_typed_state_updates_impl(
-        &server_secret,
-        room_id,
-        &typed_root_bytes,
-        nodes,
-        &lattice_bytes,
-        updates,
-    )
-    .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+    let outcome =
+        apply_typed_state_updates_impl(room_id, &typed_root_bytes, nodes, &lattice_bytes, updates)
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
 
     Ok(match outcome {
         ApplyTypedOutcome::Applied(applied) => (
@@ -1131,7 +1068,7 @@ pub fn decode_typed_root(root_bytes: Vec<u8>) -> PyResult<PyDecodedTypedRoot> {
 
 /// Materialize a state group's entries from already-fetched node bytes.
 ///
-/// Unlike [`lookup_state_entries`], this takes no `server_secret`/`room_id`
+/// Unlike [`lookup_state_entries`], this takes no `room_id`
 /// and so cannot recompute (and therefore cannot verify) nodes' structural
 /// hashes against their content -- it trusts that `nodes` genuinely came from
 /// this room's Postgres `state_hamt_nodes` table, keyed by `structural_hash`.
@@ -1239,18 +1176,14 @@ fn lookup_state_entries_impl(
 }
 
 #[pyfunction]
-#[pyo3(text_signature = "(server_secret, room_id, root_node_bytes, nodes, keys, /)")]
+#[pyo3(text_signature = "(room_id, root_node_bytes, nodes, keys, /)")]
 pub fn lookup_state_entries(
-    server_secret: Vec<u8>,
     room_id: &str,
     root_node_bytes: Vec<u8>,
     nodes: Vec<(Vec<u8>, Vec<u8>)>,
     keys: Vec<(String, String)>,
 ) -> PyResult<PyStateLookup> {
-    let server_secret: [u8; 32] = server_secret
-        .try_into()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("server_secret must be 32 bytes"))?;
-    let structural_key = room_structural_key_raw(&server_secret, room_id);
+    let structural_key = room_structural_key_raw(room_id);
     let nodes = nodes
         .into_iter()
         .map(|(hash_bytes, node_bytes)| {
@@ -1276,7 +1209,7 @@ pub fn node_child_hashes(node_bytes: Vec<u8>) -> PyResult<Vec<Vec<u8>>> {
 
 /// Audits reachability across a batch of nodes spanning potentially many
 /// rooms at once, so (like [`materialize_state_entries`]) it has no
-/// `server_secret`/`room_id` and cannot verify nodes' structural hashes
+/// `room_id` and cannot verify nodes' structural hashes
 /// against their content.
 #[pyfunction]
 #[pyo3(text_signature = "(roots, universe, nodes, /)")]
@@ -1422,7 +1355,6 @@ mod tests {
         // rebuild of the resulting state produces, and write only a small,
         // depth-bounded number of new subtree nodes -- not O(S_T), and
         // definitely not O(S).
-        let server_secret = [31u8; 32];
         let room_id = "!room:test.example";
         let mut entries: Vec<(String, String, String)> = (0..300)
             .map(|i| {
@@ -1445,7 +1377,7 @@ mod tests {
         ));
 
         let (typed_root, lattice, nodes) =
-            build_typed_root_nodes_and_lattice(&server_secret, room_id, entries.clone())
+            build_typed_root_nodes_and_lattice(room_id, entries.clone())
                 .expect("initial typed root should build");
         let total_node_count = nodes.len();
         let typed_root_bytes = typed_root.encode_v1().expect("typed root should encode");
@@ -1454,7 +1386,6 @@ mod tests {
         let changed_key = "@user-150:test.example".to_owned();
         let applied = expect_applied_typed(
             apply_typed_state_updates_impl(
-                &server_secret,
                 room_id,
                 &typed_root_bytes,
                 nodes.iter().map(|(h, b)| (h.to_vec(), b.clone())).collect(),
@@ -1487,7 +1418,7 @@ mod tests {
             .expect("changed key must exist in original entries");
         rebuilt_entries[idx].2 = "$replaced-150".to_owned();
         let (rebuilt_typed_root, _, _) =
-            build_typed_root_nodes_and_lattice(&server_secret, room_id, rebuilt_entries.clone())
+            build_typed_root_nodes_and_lattice(room_id, rebuilt_entries.clone())
                 .expect("full typed rebuild should build");
 
         let applied_typed_root =
@@ -1515,7 +1446,6 @@ mod tests {
 
         let applied2 = expect_applied_typed(
             apply_typed_state_updates_impl(
-                &server_secret,
                 room_id,
                 &applied_typed_root_bytes,
                 combined_nodes
@@ -1539,7 +1469,7 @@ mod tests {
             "$join_rules".to_owned(),
         ));
         let (rebuilt_typed_root2, _, _) =
-            build_typed_root_nodes_and_lattice(&server_secret, room_id, rebuilt_entries2)
+            build_typed_root_nodes_and_lattice(room_id, rebuilt_entries2)
                 .expect("second full typed rebuild should build");
         let applied_typed_root2 = TypedRoot::decode_v1(&applied2.typed_root_bytes)
             .expect("second applied root should decode");
@@ -1553,7 +1483,6 @@ mod tests {
 
     #[test]
     fn apply_typed_state_updates_removes_empty_type_directory_entry() {
-        let server_secret = [33u8; 32];
         let room_id = "!room:test.example";
         let entries = vec![
             (
@@ -1567,9 +1496,8 @@ mod tests {
                 "$join_rules".to_owned(),
             ),
         ];
-        let (typed_root, lattice, nodes) =
-            build_typed_root_nodes_and_lattice(&server_secret, room_id, entries)
-                .expect("initial typed root should build");
+        let (typed_root, lattice, nodes) = build_typed_root_nodes_and_lattice(room_id, entries)
+            .expect("initial typed root should build");
         assert!(
             typed_root
                 .directory
@@ -1578,10 +1506,7 @@ mod tests {
             "initial directory should contain the removed event type"
         );
         let empty_subtree_hash = rezzy::hamt::build_hamt(
-            &typed_subtree_key(
-                &room_structural_key_raw(&server_secret, room_id),
-                "m.room.join_rules",
-            ),
+            &typed_subtree_key(&room_structural_key_raw(room_id), "m.room.join_rules"),
             Vec::<(String, String)>::new(),
         )
         .expect("empty typed subtree should build")
@@ -1589,7 +1514,6 @@ mod tests {
 
         let applied = expect_applied_typed(
             apply_typed_state_updates_impl(
-                &server_secret,
                 room_id,
                 &typed_root.encode_v1().expect("typed root should encode"),
                 nodes.iter().map(|(h, b)| (h.to_vec(), b.clone())).collect(),
@@ -1602,7 +1526,6 @@ mod tests {
             TypedRoot::decode_v1(&applied.typed_root_bytes).expect("applied root should decode");
 
         let (rebuilt_root, _, _) = build_typed_root_nodes_and_lattice(
-            &server_secret,
             room_id,
             vec![(
                 "m.room.create".to_owned(),
@@ -1632,7 +1555,6 @@ mod tests {
 
     #[test]
     fn apply_typed_state_updates_reports_missing_node_for_retry() {
-        let server_secret = [32u8; 32];
         let room_id = "!room:test.example";
         let entries: Vec<(String, String, String)> = (0..200)
             .map(|i| {
@@ -1643,13 +1565,11 @@ mod tests {
                 )
             })
             .collect();
-        let (typed_root, lattice, _nodes) =
-            build_typed_root_nodes_and_lattice(&server_secret, room_id, entries)
-                .expect("initial typed root should build");
+        let (typed_root, lattice, _nodes) = build_typed_root_nodes_and_lattice(room_id, entries)
+            .expect("initial typed root should build");
         let typed_root_bytes = typed_root.encode_v1().expect("typed root should encode");
 
         let outcome = apply_typed_state_updates_impl(
-            &server_secret,
             room_id,
             &typed_root_bytes,
             Vec::new(), // deliberately withhold the subtree root and every path node
@@ -1680,7 +1600,6 @@ mod tests {
         // Python reuse the existing lookup_state_entries-style retry loop
         // (see _lookup_state_hamt_from_postgres_txn) instead of a bespoke
         // error-handling path.
-        let server_secret = [23u8; 32];
         let room_id = "!room:test.example";
         let entries: Vec<(String, String, String)> = (0..200)
             .map(|i| {
@@ -1691,9 +1610,8 @@ mod tests {
                 )
             })
             .collect();
-        let (root_handle, lattice, nodes) =
-            build_root_handle_nodes_and_lattice(&server_secret, room_id, entries)
-                .expect("initial root should build");
+        let (root_handle, lattice, nodes) = build_root_handle_nodes_and_lattice(room_id, entries)
+            .expect("initial root should build");
         let root_bytes = nodes
             .iter()
             .find(|(hash, _)| *hash == root_handle.structural_hash)
@@ -1701,7 +1619,6 @@ mod tests {
             .expect("root node must be among the built nodes");
 
         let outcome = apply_flat_state_updates_impl(
-            &server_secret,
             room_id,
             &root_bytes,
             Vec::new(), // deliberately withhold every non-root node
@@ -1733,7 +1650,6 @@ mod tests {
         // depth-bounded number of new nodes — not O(S). This is what
         // separates the incremental update path from the "materialize full
         // state, rebuild everything" cost this whole design exists to avoid.
-        let server_secret = [21u8; 32];
         let room_id = "!room:test.example";
         let mut entries: Vec<(String, String, String)> = (0..300)
             .map(|i| {
@@ -1751,7 +1667,7 @@ mod tests {
         ));
 
         let (root_handle, lattice, nodes) =
-            build_root_handle_nodes_and_lattice(&server_secret, room_id, entries.clone())
+            build_root_handle_nodes_and_lattice(room_id, entries.clone())
                 .expect("initial root should build");
         let total_node_count = nodes.len();
         let root_bytes = nodes
@@ -1764,7 +1680,6 @@ mod tests {
         let changed_key = "@user-150:test.example".to_owned();
         let applied = expect_applied(
             apply_flat_state_updates_impl(
-                &server_secret,
                 room_id,
                 &root_bytes,
                 nodes.iter().map(|(h, b)| (h.to_vec(), b.clone())).collect(),
@@ -1796,9 +1711,8 @@ mod tests {
             .position(|(_, sk, _)| sk == &changed_key)
             .expect("changed key must exist in original entries");
         rebuilt_entries[idx].2 = "$replaced-150".to_owned();
-        let (rebuilt_parts, _) =
-            build_root_handle_and_nodes(&server_secret, room_id, rebuilt_entries.clone())
-                .expect("full rebuild should build");
+        let (rebuilt_parts, _) = build_root_handle_and_nodes(room_id, rebuilt_entries.clone())
+            .expect("full rebuild should build");
 
         assert_eq!(
             applied.structural_hash, rebuilt_parts.0,
@@ -1823,7 +1737,6 @@ mod tests {
 
         let applied2 = expect_applied(
             apply_flat_state_updates_impl(
-                &server_secret,
                 room_id,
                 &applied_root_bytes,
                 combined_nodes
@@ -1852,9 +1765,8 @@ mod tests {
             "@user-999:test.example".to_owned(),
             "$new-999".to_owned(),
         ));
-        let (rebuilt_parts2, _) =
-            build_root_handle_and_nodes(&server_secret, room_id, rebuilt_entries2)
-                .expect("second full rebuild should build");
+        let (rebuilt_parts2, _) = build_root_handle_and_nodes(room_id, rebuilt_entries2)
+            .expect("second full rebuild should build");
 
         assert_eq!(applied2.structural_hash, rebuilt_parts2.0);
         assert_eq!(applied2.state_group_id, rebuilt_parts2.1);
@@ -1862,7 +1774,6 @@ mod tests {
 
     #[test]
     fn apply_flat_state_updates_remove_matches_full_rebuild() {
-        let server_secret = [22u8; 32];
         let room_id = "!room:test.example";
         let entries: Vec<(String, String, String)> = (0..50)
             .map(|i| {
@@ -1875,7 +1786,7 @@ mod tests {
             .collect();
 
         let (root_handle, lattice, nodes) =
-            build_root_handle_nodes_and_lattice(&server_secret, room_id, entries.clone())
+            build_root_handle_nodes_and_lattice(room_id, entries.clone())
                 .expect("initial root should build");
         let root_bytes = nodes
             .iter()
@@ -1886,7 +1797,6 @@ mod tests {
         let removed_key = "@user-7:test.example".to_owned();
         let applied = expect_applied(
             apply_flat_state_updates_impl(
-                &server_secret,
                 room_id,
                 &root_bytes,
                 nodes.iter().map(|(h, b)| (h.to_vec(), b.clone())).collect(),
@@ -1900,9 +1810,8 @@ mod tests {
             .into_iter()
             .filter(|(_, sk, _)| sk != &removed_key)
             .collect();
-        let (rebuilt_parts, _) =
-            build_root_handle_and_nodes(&server_secret, room_id, rebuilt_entries)
-                .expect("full rebuild after removal should build");
+        let (rebuilt_parts, _) = build_root_handle_and_nodes(room_id, rebuilt_entries)
+            .expect("full rebuild after removal should build");
 
         assert_eq!(applied.structural_hash, rebuilt_parts.0);
         assert_eq!(applied.state_group_id, rebuilt_parts.1);
@@ -1922,12 +1831,11 @@ mod tests {
 
     #[test]
     fn structural_key_is_deterministic() {
-        let server_secret = [7u8; 32];
         let room_id = "!room:test.example";
 
-        let key1 = room_structural_key_raw(&server_secret, room_id);
-        let key2 = room_structural_key_raw(&server_secret, room_id);
-        let other_key = room_structural_key_raw(&server_secret, "!other:test.example");
+        let key1 = room_structural_key_raw(room_id);
+        let key2 = room_structural_key_raw(room_id);
+        let other_key = room_structural_key_raw("!other:test.example");
 
         assert_eq!(key1, key2);
         assert_ne!(key1, other_key);
@@ -1936,13 +1844,12 @@ mod tests {
 
     #[test]
     fn room_hamt_prefix_is_deterministic_and_room_scoped() {
-        let server_secret = [7u8; 32];
         let room_id = "!AbCdEfGhIjKlMnOpQr:test.example";
         let other_room_id = "!ZyXwVuTsRqPoNmLkJi:test.example";
 
-        let prefix1 = room_hamt_prefix_raw(&server_secret, room_id, false).unwrap();
-        let prefix2 = room_hamt_prefix_raw(&server_secret, room_id, false).unwrap();
-        let other_prefix = room_hamt_prefix_raw(&server_secret, other_room_id, false).unwrap();
+        let prefix1 = room_hamt_prefix_raw(room_id, false).unwrap();
+        let prefix2 = room_hamt_prefix_raw(room_id, false).unwrap();
+        let other_prefix = room_hamt_prefix_raw(other_room_id, false).unwrap();
 
         assert_eq!(prefix1, prefix2);
         assert_ne!(prefix1, other_prefix);
@@ -1952,13 +1859,11 @@ mod tests {
     #[test]
     fn room_hamt_prefix_decodes_msc4291_room_ids_without_rehashing() {
         use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-
-        let server_secret = [7u8; 32];
         // A 32-byte "create event reference hash", as msc4291 room IDs encode.
         let create_event_hash = [42u8; 32];
         let room_id = format!("!{}", URL_SAFE_NO_PAD.encode(create_event_hash));
 
-        let prefix = room_hamt_prefix_raw(&server_secret, &room_id, true).unwrap();
+        let prefix = room_hamt_prefix_raw(&room_id, true).unwrap();
 
         // The prefix should be exactly the leading 8 bytes of the decoded
         // hash -- i.e. derived directly from the room ID, not re-hashed
@@ -1968,13 +1873,11 @@ mod tests {
 
     #[test]
     fn room_hamt_prefix_rejects_invalid_msc4291_room_id() {
-        let server_secret = [7u8; 32];
-        assert!(room_hamt_prefix_raw(&server_secret, "!not-valid-base64!!!", true).is_err());
+        assert!(room_hamt_prefix_raw("!not-valid-base64!!!", true).is_err());
     }
 
     #[test]
     fn build_root_handle_returns_root_and_persisted_nodes() {
-        let server_secret = [11u8; 32];
         let room_id = "!room:test.example";
         let entries = vec![
             (
@@ -1987,8 +1890,7 @@ mod tests {
         ];
 
         let ((structural_hash, state_group_id), nodes) =
-            build_root_handle_and_nodes(&server_secret, room_id, entries)
-                .expect("HAMT root should build");
+            build_root_handle_and_nodes(room_id, entries).expect("HAMT root should build");
 
         assert_eq!(structural_hash.len(), 32);
         assert_eq!(state_group_id.len(), 32);
@@ -2000,7 +1902,6 @@ mod tests {
 
     #[test]
     fn typed_root_roundtrips_sorted_directory() {
-        let server_secret = [11u8; 32];
         let entries = vec![
             (
                 "m.room.member".to_owned(),
@@ -2009,8 +1910,8 @@ mod tests {
             ),
             ("m.room.create".to_owned(), "".to_owned(), "$2".to_owned()),
         ];
-        let (root, nodes) = build_typed_root_and_nodes(&server_secret, "!room:test", entries)
-            .expect("typed root should build");
+        let (root, nodes) =
+            build_typed_root_and_nodes("!room:test", entries).expect("typed root should build");
         assert_eq!(root.directory[0].0, "m.room.create");
         assert_eq!(root.directory[1].0, "m.room.member");
         assert!(!nodes.is_empty());
@@ -2028,7 +1929,6 @@ mod tests {
         // cross-server state-group identity. The keyed structural hashes are
         // expected to differ (flat vs. typed layouts are different local
         // structures); state_group_id must not.
-        let server_secret = [11u8; 32];
         let room_id = "!room:test.example";
         let entries = vec![
             (
@@ -2044,10 +1944,10 @@ mod tests {
             ),
         ];
 
-        let (flat_parts, _) = build_root_handle_and_nodes(&server_secret, room_id, entries.clone())
-            .expect("flat root should build");
-        let (typed_root, _) = build_typed_root_and_nodes(&server_secret, room_id, entries)
-            .expect("typed root should build");
+        let (flat_parts, _) =
+            build_root_handle_and_nodes(room_id, entries.clone()).expect("flat root should build");
+        let (typed_root, _) =
+            build_typed_root_and_nodes(room_id, entries).expect("typed root should build");
 
         let (_, flat_state_group_id) = flat_parts;
         assert_eq!(
@@ -2081,7 +1981,6 @@ mod tests {
 
     #[test]
     fn materialize_state_entries_roundtrips_root() {
-        let server_secret = [11u8; 32];
         let room_id = "!room:test.example";
         let entries = vec![
             (
@@ -2092,8 +1991,8 @@ mod tests {
             ("m.room.name".to_owned(), "".to_owned(), "$2".to_owned()),
         ];
 
-        let ((root_hash, _), nodes) = build_root_handle_and_nodes(&server_secret, room_id, entries)
-            .expect("HAMT root should build");
+        let ((root_hash, _), nodes) =
+            build_root_handle_and_nodes(room_id, entries).expect("HAMT root should build");
 
         let root_bytes = nodes
             .iter()
@@ -2122,7 +2021,6 @@ mod tests {
 
     #[test]
     fn lookup_state_entries_fetches_only_requested_paths() {
-        let server_secret = [11u8; 32];
         let room_id = "!room:test.example";
         let entries = (0..1_000)
             .map(|i| {
@@ -2133,8 +2031,8 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let ((root_hash, _), nodes) = build_root_handle_and_nodes(&server_secret, room_id, entries)
-            .expect("HAMT root should build");
+        let ((root_hash, _), nodes) =
+            build_root_handle_and_nodes(room_id, entries).expect("HAMT root should build");
         let all_nodes = nodes
             .into_iter()
             .map(|(hash, bytes)| {
@@ -2160,7 +2058,7 @@ mod tests {
                 "@missing:test.example".to_owned(),
             ),
         ];
-        let structural_key = room_structural_key_raw(&server_secret, room_id);
+        let structural_key = room_structural_key_raw(room_id);
 
         let (partial, missing) =
             lookup_from_node_map(&root_hash, &structural_key, &keys, &root_only)
@@ -2184,7 +2082,6 @@ mod tests {
 
     #[test]
     fn lookup_state_entries_rejects_substituted_reachable_flat_node() {
-        let server_secret = [11u8; 32];
         let room_id = "!room:test.example";
         let entries = (0..1_000)
             .map(|i| {
@@ -2195,8 +2092,7 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let ((root_hash, _), mut nodes) =
-            build_root_handle_and_nodes(&server_secret, room_id, entries).unwrap();
+        let ((root_hash, _), mut nodes) = build_root_handle_and_nodes(room_id, entries).unwrap();
         let root_bytes = nodes
             .iter()
             .find(|(hash, _)| *hash == root_hash)
@@ -2216,7 +2112,7 @@ mod tests {
             .expect("child should be persisted")
             .1 = root_bytes.clone();
 
-        let structural_key = room_structural_key_raw(&server_secret, room_id);
+        let structural_key = room_structural_key_raw(room_id);
         assert!(lookup_state_entries_impl(&structural_key, &root_bytes, nodes, &[]).is_err());
     }
 
@@ -2232,13 +2128,12 @@ mod tests {
         // real problem -- reproduced against real sytest/Complement failures
         // (cross-room backfill pagination, room-upgrade search) once
         // `lookup_state_entries` started verifying node hashes for real.
-        let server_secret = [77u8; 32];
         let room_id = "!room:test.example";
         let other_room_id = "!other:test.example";
 
         let entries = vec![("m.room.name".to_owned(), "".to_owned(), "$name".to_owned())];
-        let ((root_hash, _), nodes) = build_root_handle_and_nodes(&server_secret, room_id, entries)
-            .expect("HAMT root should build");
+        let ((root_hash, _), nodes) =
+            build_root_handle_and_nodes(room_id, entries).expect("HAMT root should build");
         let root_node_bytes = nodes
             .iter()
             .find(|(hash, _)| *hash == root_hash)
@@ -2251,7 +2146,7 @@ mod tests {
             "$other-name".to_owned(),
         )];
         let ((_other_root_hash, _), other_nodes) =
-            build_root_handle_and_nodes(&server_secret, other_room_id, other_entries)
+            build_root_handle_and_nodes(other_room_id, other_entries)
                 .expect("HAMT root should build");
 
         // Simulate the shared multi-room fetch pool: this room's own nodes,
@@ -2260,7 +2155,7 @@ mod tests {
         let combined_nodes: Vec<(StructuralHash, Vec<u8>)> =
             nodes.into_iter().chain(other_nodes).collect();
 
-        let structural_key = room_structural_key_raw(&server_secret, room_id);
+        let structural_key = room_structural_key_raw(room_id);
         let keys = vec![("m.room.name".to_owned(), "".to_owned())];
 
         let (entries, missing) =
@@ -2277,7 +2172,6 @@ mod tests {
 
     #[test]
     fn unreachable_node_hashes_reports_orphan_root() {
-        let server_secret = [11u8; 32];
         let room_id = "!room:test.example";
         let live_entries = vec![("m.room.name".to_owned(), "".to_owned(), "$live".to_owned())];
         let orphan_entries = vec![(
@@ -2286,12 +2180,10 @@ mod tests {
             "$orphan".to_owned(),
         )];
 
-        let ((_, _), live_nodes) =
-            build_root_handle_and_nodes(&server_secret, room_id, live_entries)
-                .expect("live HAMT root should build");
-        let ((_, _), orphan_nodes) =
-            build_root_handle_and_nodes(&server_secret, room_id, orphan_entries)
-                .expect("orphan HAMT root should build");
+        let ((_, _), live_nodes) = build_root_handle_and_nodes(room_id, live_entries)
+            .expect("live HAMT root should build");
+        let ((_, _), orphan_nodes) = build_root_handle_and_nodes(room_id, orphan_entries)
+            .expect("orphan HAMT root should build");
 
         let (live_root_hash, _live_root_bytes) = live_nodes
             .last()
@@ -2320,11 +2212,10 @@ mod tests {
 
     #[test]
     fn multi_room_selective_lookup_divergent_shapes() {
-        let server_secret = [33u8; 32];
         let room_id_1 = "!room1:test.example";
         let room_id_2 = "!room2:test.example";
-        let key_1 = room_structural_key_raw(&server_secret, room_id_1);
-        let key_2 = room_structural_key_raw(&server_secret, room_id_2);
+        let key_1 = room_structural_key_raw(room_id_1);
+        let key_2 = room_structural_key_raw(room_id_2);
 
         // Room 1: 50 member events (deep tree) + room name
         let mut entries_1 = vec![("m.room.name".to_owned(), "".to_owned(), "$name1".to_owned())];
@@ -2356,9 +2247,9 @@ mod tests {
         ];
 
         let ((root_hash_1, _), nodes_1) =
-            build_root_handle_and_nodes(&server_secret, room_id_1, entries_1).unwrap();
+            build_root_handle_and_nodes(room_id_1, entries_1).unwrap();
         let ((root_hash_2, _), nodes_2) =
-            build_root_handle_and_nodes(&server_secret, room_id_2, entries_2).unwrap();
+            build_root_handle_and_nodes(room_id_2, entries_2).unwrap();
 
         // Shared multi-room node map (simulating the shared node cache/fetcher)
         let mut combined_nodes: HashMap<StructuralHash, Arc<HamtNode<String, String>>> =

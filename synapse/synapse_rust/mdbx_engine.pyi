@@ -25,12 +25,10 @@ def materialize_state_hamt(
     namespace: str,
     room_prefix: bytes,
     root_structural_hash: bytes,
-    server_secret: bytes,
     room_id: str,
 ) -> list[tuple[str, str, str]] | None: ...
 def materialize_state_hamts(
     namespace: str,
-    server_secret: bytes,
     roots: list[tuple[bytes, bytes, str]],
 ) -> list[list[tuple[str, str, str]]]: ...
 def lookup_state_hamts(

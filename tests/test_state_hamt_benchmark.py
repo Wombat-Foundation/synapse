@@ -24,7 +24,7 @@ def test_state_hamt_benchmark_fixture_round_trips() -> None:
         (typ, state_key, event_id)
         for (typ, state_key), event_id in fixture.state.items()
     ]
-    root, nodes = state_hamt.build_root_handle(b"x" * 32, fixture.room_id, entries)
+    root, nodes = state_hamt.build_root_handle(fixture.room_id, entries)
     node_map = {bytes(node_hash): bytes(blob) for node_hash, blob in nodes}
     result = state_hamt.materialize_state_entries(
         node_map[bytes(root[0])],

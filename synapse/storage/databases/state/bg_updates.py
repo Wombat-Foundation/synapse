@@ -157,14 +157,6 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         if hasattr(self, "db_pool") and self.db_pool is not None:
             self.db_pool._hamt_namespace = value
 
-    def _state_hamt_secret(self) -> bytes:
-        # TODO: Remove this entirely when migrating to 256-bit content-derived
-        # IDs for HAMT nodes/roots. The keyed structural-hash layer is redundant:
-        # it makes storage depend on macaroon_secret_key, complicates rotation,
-        # and prevents deterministic reuse. The MDBX key can be namespaced by
-        # room plus the 256-bit node ID without a server secret.
-        return hashlib.sha256(self.hs.config.key.macaroon_secret_key).digest()
-
     @trace
     @tag_args
     def _count_state_group_hops_txn(
@@ -731,11 +723,8 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
             )
         root_bytes = bytes(root_node)
         nodes: dict[bytes, bytes] = {root_hash: root_bytes}
-        secret = self._state_hamt_secret()
-
         while True:
             entries, missing = state_hamt.lookup_state_entries(
-                secret,
                 room_id,
                 root_bytes,
                 list(nodes.items()),
@@ -813,7 +802,6 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
             retcols=("id", "room_id"),
         )
         room_ids = {int(group): room_id for group, room_id in room_id_rows}
-        secret = self._state_hamt_secret()
 
         def try_resolve_all() -> set[bytes]:
             """Attempt selective resolution for every group against the
@@ -823,7 +811,6 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
             still_missing: set[bytes] = set()
             for group, root_hash in roots.items():
                 entries, missing = state_hamt.lookup_state_entries(
-                    secret,
                     room_ids[group],
                     node_bytes_by_hash[root_hash],
                     list(node_bytes_by_hash.items()),
@@ -983,7 +970,6 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         ordered_groups = list(roots.keys())
         materialized = engine.materialize_state_hamts(
             self.hamt_namespace,
-            self._state_hamt_secret(),
             [roots[group] for group in ordered_groups],
         )
         for group, entries in zip(ordered_groups, materialized):
@@ -1016,7 +1002,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
     def _room_structural_key(self, room_id: str) -> bytes:
         from synapse.synapse_rust import state_hamt
 
-        return bytes(state_hamt.room_structural_key(self._state_hamt_secret(), room_id))
+        return bytes(state_hamt.room_structural_key(room_id))
 
 
 class StateBackgroundUpdateStore(StateGroupBackgroundUpdateStore):

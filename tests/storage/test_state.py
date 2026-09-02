@@ -1802,3 +1802,40 @@ class CurrentStateDeltaStreamTestCase(HomeserverTestCase):
             4,
             f"Returned {len(deltas)} rows, expected 4 even though it broke our limit: {deltas}",
         )
+
+
+class HAMTStructuralKeyRegressionTest(HomeserverTestCase):
+    """HAMT structural hashes must not depend on the macaroon secret."""
+
+    def test_hamt_roots_are_deterministic(self) -> None:
+        from synapse.synapse_rust import state_hamt
+
+        room_id = "!test:example.com"
+        entries = [
+            ("m.room.create", "", "ev1"),
+            ("m.room.name", "", "ev2"),
+            ("m.room.topic", "", "ev3"),
+            ("m.room.member", "@alice:example.com", "ev4"),
+        ]
+        hash_a, sg_a, lattice_a, nodes_a = state_hamt.build_root_handle_with_lattice(
+            room_id, entries
+        )
+        hash_b, sg_b, lattice_b, nodes_b = state_hamt.build_root_handle_with_lattice(
+            room_id, entries
+        )
+
+        self.assertEqual(hash_a, hash_b)
+        self.assertEqual(sg_a, sg_b)
+        self.assertEqual(lattice_a, lattice_b)
+        self.assertEqual(nodes_a, nodes_b)
+
+    def test_room_structural_key_is_sha256_of_room_id(self) -> None:
+        import hashlib
+
+        from synapse.synapse_rust import state_hamt
+
+        room_id = "!test:example.com"
+        self.assertEqual(
+            state_hamt.room_structural_key(room_id),
+            hashlib.sha256(room_id.encode()).digest(),
+        )
