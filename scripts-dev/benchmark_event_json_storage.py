@@ -146,12 +146,20 @@ def run_postgres() -> None:
         to_add = target - seen
         rows = rand_rows(rng, to_add)
         start = time.perf_counter()
+        # execute_values pages internally (page_size=1000) via separate
+        # cur.execute() calls; under autocommit=True each page is its own
+        # implicit transaction/commit, while the mdbx leg below does the
+        # whole chunk in a single batch_put transaction. Wrap in one
+        # explicit transaction so both sides pay one commit per chunk.
+        conn.autocommit = False
         psycopg2.extras.execute_values(
             cur,
             "INSERT INTO event_json (event_id, json) VALUES %s",
             [(k.decode(), v.decode("latin1")) for k, v in rows],
             page_size=1000,
         )
+        conn.commit()
+        conn.autocommit = True
         elapsed = time.perf_counter() - start
         seen = target
         print(

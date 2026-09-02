@@ -251,11 +251,11 @@ benchmarked and is omitted below rather than left stale):
 =====================================================================================
 Batch Size    fjall (in-process)*   libmdbx (direct mmap)    postgres    speedup**
 -------------------------------------------------------------------------------------
-batch = 1          14.2 us               2.1 us                65.7 us     30.9x
-batch = 5          79.0 us              10.2 us               134.9 us     13.2x
-batch = 10         77.5 us              18.9 us               186.0 us      9.8x
-commit (batch=5)      n/a               70.1 us               141.6 us      2.0x
-bulk-load rows/s      n/a             43,612 (see below)      58,202        --
+batch = 1          14.2 us               6.5 us                64.7 us      9.9x
+batch = 5          79.0 us              18.5 us               116.2 us      6.3x
+batch = 10         77.5 us              27.4 us               157.5 us      5.7x
+commit (batch=5)      n/a               64.2 us               119.3 us      1.9x
+bulk-load rows/s      n/a              192,129                 58,531       3.3x
 =====================================================================================
 * UNVERIFIED. batch=10 beating batch=5 here is non-monotonic and suspicious;
   these figures trace to the same doc commit (1725c043fb9) that also
@@ -269,7 +269,14 @@ bulk-load rows/s      n/a             43,612 (see below)      58,202        --
 
 (p50 latencies; see the script for p99 and full methodology. mdbx and postgres
 are reproducible: `eval "$(scripts-dev/start_test_postgres.sh)"; python3
-scripts-dev/benchmark_hamt_mdbx_vs_postgres.py`.)
+scripts-dev/benchmark_hamt_mdbx_vs_postgres.py`. Includes both fixes below:
+sorted `batch_put` and a single explicit transaction for the postgres
+bulk-load, so mdbx and postgres each pay exactly one commit for the whole
+corpus -- the postgres bulk-load number barely moved from the earlier,
+per-page-autocommit measurement (58,202 -> 58,531 rows/s) because
+`start_test_postgres.sh` already disables fsync/synchronous_commit on this
+RAM-disk cluster, so per-page commit overhead was already near-zero here; the
+methodology bug was real, its effect on these particular numbers wasn't.)
 
 fjall's read numbers are unverified (see note above) -- they come from the
 now-deleted `benchmark_hamt_storage_engines.py`, allegedly run before
@@ -282,58 +289,60 @@ in this repo's history (checked
 commit messages and every doc revision) and can no longer be measured now that
 the crate is gone -- marked `n/a` rather than guessed.
 
-### Bulk-load throughput fix (`73283299ed`)
+### Two methodology fixes behind these numbers
 
-The one leg mdbx originally _lost_: `batch_put` inserted content-addressed keys
-(structural hashes / event ids) in whatever random order they arrived, costing a
-B-tree search/possible page-split per row with no locality. `73283299ed` sorts
-each batch by key before insertion (the standard mdbx/LMDB bulk-load pattern,
-safe against a non-empty table -- unlike `WriteFlags::APPEND`, not used here
-since it additionally requires every key to sort above the table's current max,
-a guarantee a reused database doesn't give us). Re-measured via
-`scripts-dev/benchmark_hamt_mdbx.py` (3 runs, all in the ranges below; postgres
-column is unaffected by this fix and reproduced from the earlier table for
-direct comparison):
-
-```text
-=====================================================================
-Metric                    mdbx (before)   mdbx (after)   postgres
----------------------------------------------------------------------
-bulk-load (rows/s)             43,612        ~185,000      58,202
-read p50, batch=1                2.1 us          6.6 us     65.7 us
-read p50, batch=5               10.2 us         19.9 us    134.9 us
-read p50, batch=10              18.9 us         30.4 us    186.0 us
-commit p50, batch=5             70.1 us         68.1 us    141.6 us
-=====================================================================
-```
-
-mdbx now wins bulk-load too (previously postgres's only advantage), at the cost
-of a small, reproducible rise in point-read p50 at batch=1 (2.1us -> ~6.6us;
-still ~10x faster than postgres's 65.7us). That read-latency shift is not yet
+**Bulk-load throughput (`73283299ed`)**: the one leg mdbx originally _lost_.
+`batch_put` inserted content-addressed keys (structural hashes / event ids) in
+whatever random order they arrived, costing a B-tree search/possible
+page-split per row with no locality. Sorting each batch by key before
+insertion (the standard mdbx/LMDB bulk-load pattern, safe against a
+non-empty table -- unlike `WriteFlags::APPEND`, not used here since it
+additionally requires every key to sort above the table's current max, a
+guarantee a reused database doesn't give us) took mdbx from 43,612 to
+~185,000-192,000 rows/s across repeated runs, at the cost of a small,
+reproducible rise in point-read p50 at batch=1 (2.1us -> ~6.5-6.6us; still
+comfortably faster than postgres either way). That read-latency shift isn't
 fully root-caused -- current best guess is a benchmark-sampling artifact (the
 read benchmark's `keys_pool` is drawn in pre-sort key-generation order, not a
 random cross-section of the post-sort tree), not a real regression, but it
 hasn't been isolated further.
 
+**Postgres bulk-load commit granularity**: `execute_values(..., page_size=1000)`
+issues a separate `cur.execute()` per 1000-row page; under `conn.autocommit =
+True` each page was its own implicit transaction/commit -- 2,000 commits for
+the 2M-row corpus, vs. mdbx's `batch_put` doing the whole corpus in one
+transaction. Fixed by wrapping the postgres bulk-load in one explicit
+transaction (`conn.autocommit = False` around the load, single `conn.commit()`
+after) so both sides pay one commit for one corpus. As noted above, this
+particular test cluster already disables fsync/synchronous_commit, so the
+measured effect was within noise here -- but the asymmetry was real and would
+matter on a durable (non-RAM-disk) postgres instance, so it's fixed in the
+script regardless of whether it moved these specific numbers.
+
 ### `event_json` benchmark (mixed-size payloads, realistic event ids)
 
 Same conclusion, separately validated against the actual `event_json` access
 pattern (event-id keys, 65/25/10% small/medium/large JSON size mix, not the HAMT
-node bench's uniform 512B) via `scripts-dev/benchmark_event_json_storage.py`,
-which is still live and unmodified -- re-run just now at n=2,000,000 (steady
-state, after the 200k warm-up leg):
+node bench's uniform 512B) via `scripts-dev/benchmark_event_json_storage.py`
+-- carries both fixes above (sorted `batch_put`, single-transaction postgres
+bulk-load) -- re-run at n=2,000,000 (steady state, after the 200k warm-up leg):
 
 ```text
 n=2,000,000                mdbx        postgres     speedup
 ------------------------------------------------------------
-read(batch=1)               2.2us       58.7us      26.7x
-read(batch=20)              36.6us     222.2us       6.1x
-read(batch=100)            168.0us     661.4us       3.9x
-commit(batch=5)             57.7us     176.7us       3.1x
+bulk-load (rows/s, +1.8M)  99,100      54,684        1.8x
+read(batch=1)                2.3us      65.6us      28.5x
+read(batch=20)               43.3us    236.5us       5.5x
+read(batch=100)             185.2us    678.6us       3.7x
+commit(batch=5)              63.1us    168.6us       2.7x
 ```
 
 (p50 latencies. Reproduce with:
-`eval "$(scripts-dev/start_test_postgres.sh)"; python3 scripts-dev/benchmark_event_json_storage.py`.)
+`eval "$(scripts-dev/start_test_postgres.sh)"; python3 scripts-dev/benchmark_event_json_storage.py`.
+mdbx's bulk-load jumped from 24,158 to 99,100 rows/s on this workload from the
+same sort-before-insert fix as the HAMT-node bench, going from postgres's
+biggest lead to another mdbx win; postgres's own bulk-load number moved
+negligibly, 54,316 -> 54,684, for the same reason noted above.)
 
 ### Key Architectural Advantages of `libmdbx`:
 

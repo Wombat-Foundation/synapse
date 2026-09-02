@@ -138,12 +138,22 @@ def run_postgres() -> tuple[dict[int, tuple[float, float]], tuple[float, float]]
     print(f"\n=== postgres: corpus {CORPUS_SIZE:,} nodes x {NODE_SIZE}B ===")
     rows = rand_rows(rng, CORPUS_SIZE)
     start = time.perf_counter()
+    # execute_values pages internally (page_size=1000) via separate
+    # cur.execute() calls; under autocommit=True each of those pages is its
+    # own implicit transaction/commit -- 2,000 commits for a 2M-row corpus,
+    # vs. mdbx's batch_put doing the whole corpus in a single transaction.
+    # Wrap the whole bulk-load in one explicit transaction so the comparison
+    # is apples-to-apples (one commit each), not penalizing postgres with
+    # per-page commit overhead that mdbx's side doesn't pay either.
+    conn.autocommit = False
     psycopg2.extras.execute_values(
         cur,
         "INSERT INTO state_hamt_nodes (structural_hash, node_bytes) VALUES %s",
         [(psycopg2.Binary(h), psycopg2.Binary(v)) for h, v in rows],
         page_size=1000,
     )
+    conn.commit()
+    conn.autocommit = True
     elapsed = time.perf_counter() - start
     print(
         f"postgres bulk-load {CORPUS_SIZE:,} rows in {elapsed:6.2f}s ({CORPUS_SIZE / elapsed:,.0f} rows/s)"
