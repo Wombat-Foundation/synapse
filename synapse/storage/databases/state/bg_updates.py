@@ -1073,10 +1073,12 @@ class StateBackgroundUpdateStore(StateGroupBackgroundUpdateStore):
         # source database, including this backfill, before `synapse_port_db`
         # runs, so the port script cannot execute it directly -- it instead
         # re-inserts a pending entry into PostgreSQL's `background_updates`
-        # (see `_maybe_requeue_state_hamt_backfill`) when the source was
-        # TiKV-backed and no SQL roots were created.  Guard the registration
-        # so constructing that composed `Store` doesn't crash on the missing
-        # attribute.
+        # (see `_maybe_requeue_state_hamt_backfill`) when the source
+        # database is missing roots for some rooms (e.g. an interrupted
+        # source-side backfill, or -- historically -- a source that was
+        # TiKV-backed, back when that was a supported HAMT engine). Guard
+        # the registration so constructing that composed `Store` doesn't
+        # crash on the missing attribute.
         if hasattr(self, "_background_backfill_state_hamt_roots"):
             self.db_pool.updates.register_background_update_handler(
                 self.STATE_HAMT_BACKFILL_ROOTS_UPDATE_NAME,

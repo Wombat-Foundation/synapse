@@ -219,9 +219,7 @@ class StateStoreTestCase(HomeserverTestCase):
     def test_embedded_engine_writes_are_exclusive_not_dual(self) -> None:
         """Once `embedded_hamt_engine` is configured, new state groups are
         written to mdbx ONLY -- `state_hamt_roots`/`state_hamt_nodes` SQL
-        rows are not also inserted (see `_persist_state_hamt_txn`). This is
-        the opposite of the old TiKV-era "SQL mirror kept even when the
-        embedded engine is enabled" behaviour.
+        rows are not also inserted (see `_persist_state_hamt_txn`).
         """
         import shutil
         import tempfile

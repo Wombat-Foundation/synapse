@@ -90,8 +90,8 @@ pub fn root_key(namespace: &str, state_group: i64) -> Vec<u8> {
 
 /// One decoded HAMT root record: `(room_prefix, root_structural_hash,
 /// lattice, room_id)`. Mirrors `_decode_state_hamt_root`
-/// (bg_updates.py) byte-for-byte -- same v1 root record format
-/// `_encode_state_hamt_root` writes for TiKV, reused unchanged.
+/// (bg_updates.py) byte-for-byte -- the same v1 root record format
+/// `_encode_state_hamt_root` writes.
 pub struct RootRecord {
     pub room_prefix: Vec<u8>,
     pub root_hash: StructuralHash,

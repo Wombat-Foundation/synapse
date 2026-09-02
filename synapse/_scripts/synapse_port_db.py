@@ -230,10 +230,11 @@ IGNORED_TABLES = {
 # SQLite reports for a row, so these must be dropped before inserting into
 # Postgres or the insert fails with an undefined-column error.
 SQLITE_ONLY_COLUMNS: dict[str, set[str]] = {
-    # 95/03_state_hamt_pure_tikv.sql.postgres drops `published` since HAMT
-    # roots and nodes became authoritative in TiKV; the SQLite counterpart
-    # leaves it in place because older supported SQLite versions can't drop
-    # a column (see that migration's comment).
+    # 95/03_state_hamt_pure_tikv.sql.postgres drops `published` once HAMT
+    # roots and nodes stopped being authoritative in SQL for that
+    # deployment; the SQLite counterpart leaves it in place because older
+    # supported SQLite versions can't drop a column (see that migration's
+    # comment).
     "state_hamt_roots": {"published"},
 }
 
@@ -249,17 +250,19 @@ IGNORED_BACKGROUND_UPDATES = {
     # rerun here -- this script's composed `Store` mixes in `StateBackgroundUpdateStore`
     # directly rather than the full `StateGroupDataStore`, so it has no
     # `_persist_state_hamt_txn`/`_background_backfill_state_hamt_roots` to run it with.
-    # NOTE: when the source was TiKV-backed, the backfill completed without writing
-    # SQL roots; `_maybe_requeue_state_hamt_backfill` re-inserts the pending update
+    # NOTE: when the source's HAMT roots weren't all in SQL (e.g. missing
+    # for some rooms, or -- historically -- backed by a non-SQL engine),
+    # the backfill completed without writing SQL roots;
+    # `_maybe_requeue_state_hamt_backfill` re-inserts the pending update
     # into PostgreSQL so Synapse runs it on startup.
     "state_hamt_backfill_roots",
 }
 
-# If the SQLite source was TiKV-backed the backfill marked itself complete
-# without populating the SQL `state_hamt_roots` table (roots lived only in
-# TiKV).  After copying, PostgreSQL therefore has state_groups rows but no
-# HAMT root rows -- and the completed background-update entry (copied from
-# SQLite) means Synapse will never re-run the backfill.  We detect this
+# If the SQLite source's HAMT roots weren't all in SQL, the backfill marked
+# itself complete without populating the SQL `state_hamt_roots` table for
+# every room. After copying, PostgreSQL therefore has state_groups rows but
+# no HAMT root rows -- and the completed background-update entry (copied
+# from SQLite) means Synapse will never re-run the backfill. We detect this
 # condition and reset the background update so Synapse executes it on
 # startup.
 
@@ -1249,9 +1252,10 @@ class Porter:
         ):
             return
 
-        # Some source roots are absent (for example, because the source was
-        # TiKV-backed). Delete the completed entry copied from SQLite and
-        # re-insert it as pending so Synapse backfills every missing root.
+        # Some source roots are absent (e.g. an interrupted source-side
+        # backfill, or -- historically -- a non-SQL HAMT engine). Delete
+        # the completed entry copied from SQLite and re-insert it as
+        # pending so Synapse backfills every missing root.
         await self.postgres_store.db_pool.simple_delete(
             table="background_updates",
             keyvalues={"update_name": "state_hamt_backfill_roots"},

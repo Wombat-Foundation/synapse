@@ -97,10 +97,8 @@ SQLITE_PERSIST_DB = os.environ.get("SYNAPSE_TEST_PERSIST_SQLITE_DB") is not None
 
 # When set, every test homeserver runs its HAMT state store through the
 # embedded engine (mdbx) instead of plain SQL -- the trial-mdbx CI job's
-# whole purpose, mirroring what SYNAPSE_TEST_TIKV_PD_ENDPOINTS used to do
-# for the (now-removed) TiKV backend. Unlike a real external TiKV cluster,
-# mdbx is just a local file, so no separate "is a server reachable" check
-# is needed here -- config/database.py opens it directly.
+# whole purpose. mdbx is just a local file, so no "is a server reachable"
+# check is needed here -- config/database.py opens it directly.
 EMBEDDED_HAMT_ENGINE = os.environ.get("SYNAPSE_TEST_EMBEDDED_HAMT_ENGINE")
 EMBEDDED_HAMT_PATH = os.environ.get("SYNAPSE_TEST_EMBEDDED_HAMT_PATH")
 
