@@ -417,10 +417,66 @@ main() {
     export PASS_SYNAPSE_TIKV_PD_ENDPOINTS="$SYNAPSE_TIKV_PD_ENDPOINTS"
   fi
 
-  if [ -n "$skip_complement_run" ]; then
-    echo "Skipping Complement run as requested."
-    return 0
+  # Restrict test package sweep if user specified a specific -run TestPattern
+  local target_run=""
+  for ((i=1; i<=$#; i++)); do
+    if [[ "${!i}" == "-run" ]]; then
+      next_idx=$((i+1))
+      target_run="${!next_idx}"
+      break
+    elif [[ "${!i}" =~ ^-run=(.+) ]]; then
+      target_run="${BASH_REMATCH[1]}"
+      break
+    fi
+  done
+
+  if [ -n "$target_run" ] && [ "$target_run" != "." ]; then
+    local test_name_clean
+    test_name_clean="$(echo "$target_run" | sed -E 's/^\^//; s/\$$//; s/\/.*$//')"
+    if [[ "$test_name_clean" =~ ^Test[[:alnum:]_]+$ ]]; then
+      local base_dir="./complement"
+      if [ -z "$use_in_repo_tests" ]; then
+        base_dir="$COMPLEMENT_DIR"
+      fi
+      if command -v rg &>/dev/null; then
+        local matched_pkg
+        matched_pkg="$(cd "$base_dir" && rg -l --glob '*_test.go' "^func[[:space:]]+${test_name_clean}" tests 2>/dev/null | xargs -r -n1 dirname | sed 's#^#./#' | sort -u | head -n1 || true)"
+        if [ -n "$matched_pkg" ]; then
+          echo "Auto-discovered test package for '$target_run': $matched_pkg"
+          if [ -n "$use_in_repo_tests" ]; then
+            default_in_repo_complement_test_packages=("$matched_pkg")
+          else
+            available_complement_test_packages=("$matched_pkg")
+          fi
+        fi
+      fi
+    fi
   fi
+
+  # Auto-cleanup containers spawned by Complement on exit
+  export COMPLEMENT_WRAPPER_TOKEN="${COMPLEMENT_WRAPPER_TOKEN:-"complement-$$-$(date +%s%N)"}"
+  export PASS_COMPLEMENT_WRAPPER_TOKEN="$COMPLEMENT_WRAPPER_TOKEN"
+  export COMPLEMENT_SHARE_ENV_PREFIX=PASS_
+
+  cleanup_complement_containers() {
+    local containers container ours=()
+    if command -v docker &>/dev/null; then
+      mapfile -t containers < <(docker ps -aq --filter "name=complement" 2>/dev/null || true)
+      for container in "${containers[@]}"; do
+        if docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container" 2>/dev/null | grep -Fxq "COMPLEMENT_WRAPPER_TOKEN=$COMPLEMENT_WRAPPER_TOKEN"; then
+          ours+=("$container")
+        fi
+      done
+      if [ "${#ours[@]}" -gt 0 ]; then
+        echo "Cleaning up Complement containers spawned by this run..."
+        printf '%s\n' "${ours[@]}" | xargs -r docker rm -f &>/dev/null || true
+      fi
+    fi
+  }
+  trap cleanup_complement_containers EXIT
+
+  # Ensure default container spawn timeout is generous under load
+  export COMPLEMENT_SPAWN_HS_TIMEOUT_SECS=${COMPLEMENT_SPAWN_HS_TIMEOUT_SECS:-120}
 
   local test_start_seconds=$SECONDS
   local go_test_exit_code=0
@@ -429,14 +485,83 @@ main() {
   # Things are slightly ambiguous with the in-repo vs Complement tests.
   set -x
 
+  # Setup staged result ledger files
+  local repo_root
+  repo_root="$(realpath .)"
+  local results_dir="${RESULTS_DIR:-tests/complement}"
+  local main_results_file="$(realpath -m "$results_dir/results.jsonl")"
+  local main_log_file="$(realpath -m "$results_dir/logs.jsonl")"
+
+  mkdir -p "$(dirname "$main_results_file")"
+  touch "$main_results_file" "$main_log_file"
+
+  local run_stamp="$(date +%s%N)"
+  local staging_dir="$repo_root/.tmp/complement"
+  mkdir -p "$staging_dir"
+  local staged_log_file="$staging_dir/logs.${run_stamp}.jsonl"
+  local staged_results_file="$staging_dir/test_results.${run_stamp}.jsonl"
+  : >"$staged_log_file"
+  : >"$staged_results_file"
+
+  local -a run_pkgs=()
   if [ -n "$use_in_repo_tests" ]; then
-    # Run the suite of Complement tests in the `./complement` directory in this repo
     cd "./complement"
-    go test "${test_args[@]}" "$@" "${default_in_repo_complement_test_packages[@]}" || go_test_exit_code=$?
+    run_pkgs=("${default_in_repo_complement_test_packages[@]}")
   else
-    # Run the tests (from the Complement repo)!
     cd "$COMPLEMENT_DIR"
-    go test "${test_args[@]}" "$@" "${available_complement_test_packages[@]}" || go_test_exit_code=$?
+    run_pkgs=("${available_complement_test_packages[@]}")
+  fi
+
+  if [[ " $* " =~ " -json " ]]; then
+    stdbuf -oL go test -json "${test_args[@]}" "$@" "${run_pkgs[@]}" 2>&1 |
+      tee -a "$staged_log_file" |
+      stdbuf -oL jq -rR --unbuffered '
+        . as $raw
+        | (try fromjson catch $raw)
+        | if type != "object" then
+            $raw
+          elif (.Action == "pass" or .Action == "fail" or .Action == "skip") then
+            if .Test then
+              "\(.Action | ascii_upcase)\t\(.Test)\t\(.Elapsed // 0)s"
+            elif .Action == "fail" then
+              "FAIL PACKAGE \(.Package // "<unknown>") \(.Elapsed // 0)s"
+            else
+              empty
+            end
+          else
+            empty
+          end' || go_test_exit_code=$?
+  else
+    go test -json "${test_args[@]}" "$@" "${run_pkgs[@]}" 2>&1 |
+      tee -a "$staged_log_file" |
+      stdbuf -oL jq -rR --unbuffered '
+        . as $raw
+        | (try fromjson catch $raw)
+        | if type != "object" then
+            empty
+          elif (.Action == "pass" or .Action == "fail" or .Action == "skip") and .Test != null then
+            "\(.Action | ascii_upcase)\t\(.Test)\t\(.Elapsed // 0)s"
+          else
+            empty
+          end' || go_test_exit_code=$?
+  fi
+
+  # Extract pass/fail test records to staged_results_file
+  if [ -f "$staged_log_file" ]; then
+    jq -c 'select((.Action == "pass" or .Action == "fail" or .Action == "skip") and .Test != null) | {Action: .Action, Test: .Test}' "$staged_log_file" >>"$staged_results_file" 2>/dev/null || true
+  fi
+
+  # Merge staged results into main_results_file ledger
+  if [ -s "$staged_results_file" ] && [ -f "$repo_root/scripts-dev/merge_complement_results.py" ]; then
+    tmp_merge="$(mktemp "${main_results_file}.merge.XXXXXX")"
+    if python3 "$repo_root/scripts-dev/merge_complement_results.py" "$main_results_file" "$staged_results_file" "$tmp_merge"; then
+      mv "$tmp_merge" "$main_results_file"
+      echo "Merged staged test results into $main_results_file"
+    else
+      cat "$staged_results_file" >>"$main_results_file"
+      rm -f "$tmp_merge"
+    fi
+    cp "$staged_log_file" "$main_log_file"
   fi
 
   # We don't need to print out executed commands anymore
