@@ -960,6 +960,15 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         txn: LoggingTransaction,
         nodes: list[tuple[bytes, bytes]],
     ) -> None:
+        if self.embedded_hamt_engine == "mdbx":
+            from synapse.synapse_rust import mdbx_engine
+
+            mdbx_engine.batch_put(nodes)
+        elif self.embedded_hamt_engine == "fjall":
+            from synapse.synapse_rust import fjall_engine
+
+            fjall_engine.batch_put(nodes)
+
         txn.executemany(
             """
             INSERT INTO state_hamt_nodes (structural_hash, node_bytes)
