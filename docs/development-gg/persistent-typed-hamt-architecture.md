@@ -276,11 +276,20 @@ each batch by key before insertion (the standard mdbx/LMDB bulk-load pattern,
 safe against a non-empty table -- unlike `WriteFlags::APPEND`, not used here
 since it additionally requires every key to sort above the table's current max,
 a guarantee a reused database doesn't give us). Re-measured via
-`scripts-dev/benchmark_hamt_mdbx.py` (3 runs, stable):
+`scripts-dev/benchmark_hamt_mdbx.py` (3 runs, all in the ranges below; postgres
+column is unaffected by this fix and reproduced from the earlier table for
+direct comparison):
 
 ```text
-                        before      after       postgres
-bulk-load (rows/s)     43,612     ~185,000       58,202
+=====================================================================
+Metric                    mdbx (before)   mdbx (after)   postgres
+---------------------------------------------------------------------
+bulk-load (rows/s)             43,612        ~185,000      58,202
+read p50, batch=1                2.1 us          6.6 us     65.7 us
+read p50, batch=5               10.2 us         19.9 us    134.9 us
+read p50, batch=10              18.9 us         30.4 us    186.0 us
+commit p50, batch=5             70.1 us         68.1 us    141.6 us
+=====================================================================
 ```
 
 mdbx now wins bulk-load too (previously postgres's only advantage), at the cost
