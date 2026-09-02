@@ -248,6 +248,20 @@ commit (batch=5)  70.1 us               141.6 us      2.0x
 
 For reference, fjall's own numbers before removal (from the now-deleted `benchmark_hamt_storage_engines.py`, not reproducible today): batch=1 14.2us, batch=5 79.0us, batch=10 77.5us -- already slower than mdbx in-process, before accounting for the bridge a multi-process deployment would have additionally required.
 
+### `event_json` benchmark (mixed-size payloads, realistic event ids)
+
+Same conclusion, separately validated against the actual `event_json` access pattern (event-id keys, 65/25/10% small/medium/large JSON size mix, not the HAMT node bench's uniform 512B) via `scripts-dev/benchmark_event_json_storage.py`, which is still live and unmodified -- re-run just now at n=2,000,000 (steady state, after the 200k warm-up leg):
+
+```text
+n=2,000,000                mdbx        postgres     speedup
+------------------------------------------------------------
+read(batch=1)               2.2us       58.7us      26.7x
+read(batch=20)              36.6us     222.2us       6.1x
+read(batch=100)            168.0us     661.4us       3.9x
+commit(batch=5)             57.7us     176.7us       3.1x
+```
+(p50 latencies. Reproduce with: `eval "$(scripts-dev/start_test_postgres.sh)"; python3 scripts-dev/benchmark_event_json_storage.py`.)
+
 ### Key Architectural Advantages of `libmdbx`:
 1. **Direct Zero-Copy `mmap` Read Latency (~2.1us at batch=1)**:
    - Values are returned directly as borrowed `&[u8]` pointers in OS page cache without memory allocations, deserialization wrappers, or IPC overhead.
