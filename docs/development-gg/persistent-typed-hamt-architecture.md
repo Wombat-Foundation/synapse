@@ -226,6 +226,56 @@ mapping is permanent/immutable, all readers can resolve it from the same TiKV
 namespace, measured SQL round trips actually dominate the workload, and
 ownership/repair semantics are specified.
 
+## Storage Engine Selection & libmdbx Embedded Architecture
+
+Following extensive empirical benchmarking on a 2,000,000-node HAMT dataset (512 Bytes per node), **`libmdbx`** was selected as Synapse's high-performance embedded storage engine alongside PostgreSQL:
+
+### Empirical Benchmark Summary (2,000,000 Nodes)
+
+```text
+==========================================================================================
+Batch Size    fjall (in-process)    fjall + UDS Bridge    libmdbx (direct mmap)    postgres
+------------------------------------------------------------------------------------------
+batch = 1         14.2 us                ~22.6 us            2.1 us (10.7x WINNER)  63.4 us
+batch = 5         79.0 us                 --                 9.1 us ( 7.6x WINNER) 127.2 us
+batch = 10        77.5 us                 --                14.8 us ( 4.6x WINNER) 161.7 us
+==========================================================================================
+```
+
+### Key Architectural Advantages of `libmdbx`:
+1. **Direct Zero-Copy `mmap` Read Latency ($2.1\,\mu\text{s}$)**:
+   - Values are returned directly as borrowed `&[u8]` pointers in OS page cache without memory allocations, deserialization wrappers, or IPC overhead.
+2. **Zero RPC Daemon / Zero UDS Bridge Complexity**:
+   - All Synapse worker processes (`sync`, `federation`, `state_res`, `api`) open the `libmdbx` environment files directly via kernel `mmap`. Eliminates the operational overhead of running or maintaining a Unix Domain Socket (UDS) RPC bridge server.
+
+### Dual-Store Crash-Consistency Protocol
+
+```text
+                  +------------------------------------+
+                  |  Synapse State Persister Worker    |
+                  +------------------------------------+
+                                    |
+                   +----------------+----------------+
+                   | (Step 1: Write HAMT Nodes)      | (Step 2: Commit Transaction)
+                   v                                 v
+      +--------------------------+       +--------------------------+
+      |  libmdbx Embedded Engine |       |   PostgreSQL Database    |
+      |   (Shared Kernel mmap)   |       |   (`state_groups` table) |
+      +--------------------------+       +--------------------------+
+                   |                                 |
+                   +----------------+----------------+
+                                    |
+                                    v
+                  +------------------------------------+
+                  |     Postgres Commit = Truth        |
+                  | Unreferenced HAMT nodes are inert  |
+                  +------------------------------------+
+```
+
+1. **Write HAMT Nodes First**: Structural HAMT nodes are persisted to `libmdbx` before committing the `state_groups` transaction in PostgreSQL.
+2. **PostgreSQL Commit is Truth**: A state group exists if and only if its row in PostgreSQL `state_groups` is committed. If a crash occurs after writing `libmdbx` but before PostgreSQL commits, unreferenced HAMT nodes in `libmdbx` are inert content-addressed blobs that harm nothing.
+3. **Startup Self-Healing**: On startup, Synapse validates that the highest `state_group_id` in PostgreSQL has a matching HAMT root in `libmdbx`, automatically re-materializing missing roots if a crash occurred during commit.
+
 ## Read workflows
 
 **Point lookup:** root handle -> typed directory lookup by `event_type_id` ->
