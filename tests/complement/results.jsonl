@@ -635,6 +635,7 @@
 {"Action":"pass","Test":"TestPushSync/Setting_actions_for_a_push_rule_wakes_up_an_incremental_/sync"}
 {"Action":"pass","Test":"TestRedact"}
 {"Action":"pass","Test":"TestRedact/Event_content_is_redacted"}
+{"Action":"pass","Test":"TestRedisRestartRecovery"}
 {"Action":"pass","Test":"TestRegistration"}
 {"Action":"pass","Test":"TestRegistration/parallel"}
 {"Action":"pass","Test":"TestRegistration/parallel/GET_/register/available_returns_M_INVALID_USERNAME_for_invalid_user_name"}
