@@ -284,6 +284,7 @@ class PersistEventsStore:
         self.is_mine_id = hs.is_mine_id
 
         self._embedded_event_json_enabled = open_embedded_event_json_engine(hs)
+        self._embedded_hamt_engine = hs.config.database.embedded_hamt_engine
         self._embedded_hamt_namespace = (
             hs.config.database.embedded_hamt_namespace or hs.hostname
         )
@@ -945,7 +946,7 @@ class PersistEventsStore:
             event_to_types,
             event_to_auth_chain,
             self._embedded_hamt_namespace
-            if getattr(self, "_embedded_event_json_enabled", False)
+            if getattr(self, "_embedded_hamt_engine", None)
             else None,
         )
 
@@ -1245,7 +1246,7 @@ class PersistEventsStore:
                 self.db_pool,
                 new_event_links,
                 self._embedded_hamt_namespace
-                if getattr(self, "_embedded_event_json_enabled", False)
+                if getattr(self, "_embedded_hamt_engine", None)
                 else None,
             )
 

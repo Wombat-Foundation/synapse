@@ -748,7 +748,7 @@ class ReplicationCommandHandler:
             # Retrying an empty, non-advancing response would spin forever;
             # completing catch-up would incorrectly tell the stream handler
             # that it has reached cmd.new_token. Fail closed instead.
-            if not updates and missing_updates and current_token == previous_token:
+            if not updates and current_token == previous_token:
                 raise RuntimeError(
                     f"Replication stream {stream_name!r} returned an empty, "
                     f"non-advancing limited response at {current_token}"

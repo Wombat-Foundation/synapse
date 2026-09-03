@@ -90,7 +90,7 @@ def _discover_room_txn(txn: LoggingTransaction, room_id: str) -> dict[str, Any]:
     txn.execute(
         """
         SELECT COUNT(*) FROM msc4242_state_dag_edges
-        WHERE room_id = ?
+        WHERE room_id = ? AND prev_state_event_id IS NOT NULL
         """,
         (room_id,),
     )

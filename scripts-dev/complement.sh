@@ -167,7 +167,7 @@ main() {
   # Check for a user-specified Complement checkout
   if [[ -z "$COMPLEMENT_DIR" ]]; then
     COMPLEMENT_REF=${COMPLEMENT_REF:-main}
-    COMPLEMENT_REPO=${COMPLEMENT_REPO:-gamesguru/complement}
+    COMPLEMENT_REPO=${COMPLEMENT_REPO:-matrix-org/complement}
     echo "COMPLEMENT_DIR not set. Fetching ${COMPLEMENT_REPO} at ${COMPLEMENT_REF}..." >&2
 
     # Download the Complement checkout at the specified ref.
@@ -666,6 +666,7 @@ run_one_pattern() {
       >"$_events_fifo"
   ) &
   local _producer=$!
+  _active_producer=$_producer
 
   while IFS=$'\t' read -r _action _tname _elapsed; do
     [ -n "$_action" ] || continue
@@ -683,6 +684,7 @@ main "$@"
 
 test_start_seconds=$SECONDS
 TEST_EXIT_CODE=0
+_active_producer=""
 
 # Merges staged results into the main ledger and prints a summary. Called
 # from the EXIT trap below so it runs no matter how the script stops --
@@ -701,15 +703,21 @@ finish() {
         || echo "WARN: dedupe of staged results failed ($staged_results_file); keeping raw rows" >&2
       python3 "$merge_script" --sort-in-place "$staged_results_file" \
         || echo "WARN: sort of staged results failed ($staged_results_file); keeping arrival order" >&2
-      cp "$staged_results_file" "$main_results_file" \
-        || { echo "MERGE FAILED: refreshing $main_results_file from staged results" >&2; TEST_EXIT_CODE=1; }
-      echo "refreshed $main_results_file from $(wc -l <"$staged_results_file") staged results" >&2
+      if cp "$staged_results_file" "$main_results_file"; then
+        echo "refreshed $main_results_file from $(wc -l <"$staged_results_file") staged results" >&2
+      else
+        echo "MERGE FAILED: refreshing $main_results_file from staged results" >&2
+        TEST_EXIT_CODE=1
+      fi
     else
       tmp_merge="$(mktemp "${main_results_file}.merge.XXXXXX")"
       if python3 "$merge_script" "$main_results_file" "$staged_results_file" "$tmp_merge"; then
-        mv "$tmp_merge" "$main_results_file" \
-          || { echo "MERGE FAILED: moving merged results into $main_results_file" >&2; TEST_EXIT_CODE=1; }
-        echo "merged $(wc -l <"$staged_results_file") staged results into $main_results_file" >&2
+        if mv "$tmp_merge" "$main_results_file"; then
+          echo "merged $(wc -l <"$staged_results_file") staged results into $main_results_file" >&2
+        else
+          echo "MERGE FAILED: moving merged results into $main_results_file" >&2
+          TEST_EXIT_CODE=1
+        fi
       else
         echo "WARN: merge into $main_results_file failed; appending staged results" >&2
         cat "$staged_results_file" >>"$main_results_file"
@@ -718,7 +726,9 @@ finish() {
     fi
   else
     echo "Warning: $staged_results_file is missing or empty. No results processed." >&2
-    TEST_EXIT_CODE="${TEST_EXIT_CODE:-1}"
+    if [ "${TEST_EXIT_CODE:-0}" -eq 0 ]; then
+      TEST_EXIT_CODE=1
+    fi
   fi
 
   # Log: point-in-time snapshot, straight copy (not a merge -- no history to preserve).
@@ -760,7 +770,16 @@ trap finish EXIT
 # on Ctrl+C or a dropped terminal. `exit` from here still runs `finish` via
 # the EXIT trap, so these just need the right conventional exit code.
 trap 'exit 130' INT
-trap 'exit 143' TERM
+trap '
+  # Terminate any active go-test pipeline so it does not outlive
+  # container cleanup.  kill -- followed by wait is safe even when
+  # _active_producer is empty (wait on an unknown PID returns immediately).
+  if [ -n "$_active_producer" ]; then
+    kill -- "$_active_producer" 2>/dev/null || true
+    wait "$_active_producer" 2>/dev/null || true
+  fi
+  exit 143
+' TERM
 trap 'exit 129' HUP
 
 # ── Run all patterns ──────────────────────────────────────────────────────────
@@ -773,6 +792,11 @@ for _pattern in "${ALT_PATTERNS[@]}"; do
     TEST_EXIT_CODE="$_pexit"
   fi
 done
+
+# Run finish before selecting the final exit status so that persistence
+# failures (e.g. copy/move errors in the merge step) can update
+# TEST_EXIT_CODE and are not silently lost.
+finish
 
 if [ "$TEST_EXIT_CODE" -ne 0 ]; then
   exit "$TEST_EXIT_CODE"

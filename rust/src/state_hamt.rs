@@ -57,9 +57,10 @@ const TYPED_ROOT_FORMAT: u8 = 0x02;
 /// sorted by event type and points at one state_key -> event_id HAMT per type.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TypedRoot {
-    /// Local structural identity of the typed directory itself (server-keyed,
-    /// used only to skip an unchanged directory across reloads — never
-    /// compared across servers and never used as the state-group identity).
+    /// Local structural identity of the typed directory itself (room-keyed,
+    /// derived from the public room ID via HMAC-SHA256, used only to skip an
+    /// unchanged directory across reloads — never compared across servers and
+    /// never used as the state-group identity).
     pub structural_hash: StructuralHash,
     /// The cross-server, deduplicable state-group identifier: the unkeyed
     /// `LtHash` digest over the same logical `(event_type, state_key,

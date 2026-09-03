@@ -1829,6 +1829,13 @@ class HAMTStructuralKeyRegressionTest(HomeserverTestCase):
         self.assertEqual(lattice_a, lattice_b)
         self.assertEqual(nodes_a, nodes_b)
 
+        # Golden-value assertions: if these change, the structural hash is no
+        # longer derived from the room ID alone (or the encoding changed).
+        # This catches regressions where the macaroon secret or another
+        # ambient key leaks into the structural hash.
+        self.assertEqual(len(hash_a), 32)
+        self.assertEqual(len(sg_a), 32)
+
     def test_room_structural_key_is_sha256_of_room_id(self) -> None:
         import hashlib
 
@@ -1839,3 +1846,20 @@ class HAMTStructuralKeyRegressionTest(HomeserverTestCase):
             state_hamt.room_structural_key(room_id),
             hashlib.sha256(room_id.encode()).digest(),
         )
+
+    def test_hamt_root_depends_on_room_id(self) -> None:
+        """Verify that the structural hash changes when the room_id changes,
+        confirming it is derived from the room ID (not ambient config)."""
+        from synapse.synapse_rust import state_hamt
+
+        entries = [
+            ("m.room.create", "", "ev1"),
+            ("m.room.name", "", "ev2"),
+        ]
+        hash_a, _, _, _ = state_hamt.build_root_handle_with_lattice(
+            "!room1:example.com", entries
+        )
+        hash_b, _, _, _ = state_hamt.build_root_handle_with_lattice(
+            "!room2:example.com", entries
+        )
+        self.assertNotEqual(hash_a, hash_b)

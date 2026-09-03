@@ -114,8 +114,11 @@ Before publication, emit:
 - event count and stream range covered;
 - missing-input checks.
 
-The current command is read-only: compare output is intended to make its input
-and any future repair plan auditable before write support is designed.
+The current `synapse_state_repair check-room` command is read-only: it reports
+discovery metadata and counts (room version, forward extremities, state edges,
+state events, outliers, rejected events) but does not yet produce a diff or
+comparison against a proposed repair. Compare output is planned as a future
+phase to make repair plans auditable before write support is designed.
 
 ### 5. Future publication design
 

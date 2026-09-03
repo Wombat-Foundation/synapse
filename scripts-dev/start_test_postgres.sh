@@ -92,6 +92,10 @@ if [ -e "$PGSOCKETDIR" ] && [ ! -d "$PGSOCKETDIR" ]; then
 	echo "PostgreSQL socket path exists but is not a directory: $PGSOCKETDIR" >&2
 	exit 1
 fi
+if [ -L "$PGSOCKETDIR" ]; then
+	echo "PostgreSQL socket path is a symlink: $PGSOCKETDIR" >&2
+	exit 1
+fi
 install -d -m 700 "$PGSOCKETDIR"
 if [ ! -O "$PGSOCKETDIR" ]; then
 	echo "PostgreSQL socket directory is not owned by this user: $PGSOCKETDIR" >&2
