@@ -19,6 +19,7 @@
 #
 
 import os
+
 import yaml
 
 from synapse.config._base import RootConfig

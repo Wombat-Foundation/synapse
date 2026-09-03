@@ -13,6 +13,7 @@
 //! [`crate::database::core`]; this module only implements
 //! [`core::NodeStore`] over an mdbx read transaction.
 
+use std::fs;
 use std::sync::Mutex;
 
 use libmdbx::{
@@ -74,6 +75,13 @@ fn open_client_sync(path: &str) -> Result<(), String> {
     if DB.get().is_some() {
         return Ok(());
     }
+    // mdbx opens (or creates) the data files inside `path`, but doesn't
+    // create `path` itself -- a config pointing at a not-yet-existing
+    // directory (the common case for a fresh deployment or a default like
+    // `/data/embedded_hamt`) would otherwise fail here instead of just
+    // working, crashing the whole server at startup on a plain ENOENT.
+    fs::create_dir_all(path)
+        .map_err(|e| format!("failed to create embedded mdbx directory {path:?}: {e}"))?;
     let opts = DatabaseOptions {
         // Big enough ceiling for a real HAMT corpus; mdbx grows the mmap
         // lazily so this isn't pre-allocated disk usage.
