@@ -772,11 +772,13 @@ trap finish EXIT
 trap 'exit 130' INT
 trap '
   # Terminate any active go-test pipeline so it does not outlive
-  # container cleanup.  kill -- followed by wait is safe even when
-  # _active_producer is empty (wait on an unknown PID returns immediately).
+  # container cleanup.  Signal the whole process group (negative PID)
+  # so go test, tee, and jq are all stopped.  Clear _active_producer
+  # after a successful wait to avoid signaling a recycled PID later.
   if [ -n "$_active_producer" ]; then
-    kill -- "$_active_producer" 2>/dev/null || true
+    kill -- -"$_active_producer" 2>/dev/null || true
     wait "$_active_producer" 2>/dev/null || true
+    _active_producer=""
   fi
   exit 143
 ' TERM
