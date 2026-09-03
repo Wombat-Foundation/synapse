@@ -432,17 +432,15 @@ main() {
 
   if [[ -n "$SYNAPSE_EMBEDDED_HAMT_ENGINE" ]]; then
     export PASS_SYNAPSE_EMBEDDED_HAMT_ENGINE="$SYNAPSE_EMBEDDED_HAMT_ENGINE"
+    # SYNAPSE_EMBEDDED_HAMT_PATH is read inside the Complement container, not
+    # on the host -- a caller who just wants to turn mdbx on shouldn't have
+    # to know or care about that. Default it to a path that's always
+    # writable there (the image's WORKDIR) rather than making them supply an
+    # in-container path themselves.
+    SYNAPSE_EMBEDDED_HAMT_PATH="${SYNAPSE_EMBEDDED_HAMT_PATH:-/data/embedded_hamt}"
   fi
   if [[ -n "$SYNAPSE_EMBEDDED_HAMT_PATH" ]]; then
     export PASS_SYNAPSE_EMBEDDED_HAMT_PATH="$SYNAPSE_EMBEDDED_HAMT_PATH"
-  fi
-
-  # Fail fast: engine without path means every container will crash at
-  # startup with ConfigError, but complement waits 2 min per test anyway.
-  if [[ -n "$SYNAPSE_EMBEDDED_HAMT_ENGINE" && -z "$SYNAPSE_EMBEDDED_HAMT_PATH" ]]; then
-    echo "ERROR: SYNAPSE_EMBEDDED_HAMT_ENGINE=$SYNAPSE_EMBEDDED_HAMT_ENGINE is set but SYNAPSE_EMBEDDED_HAMT_PATH is not." >&2
-    echo "Set SYNAPSE_EMBEDDED_HAMT_PATH or unset SYNAPSE_EMBEDDED_HAMT_ENGINE." >&2
-    exit 1
   fi
 
   # ── Run-filter and extra-tags from remaining args ───────────────────────────
