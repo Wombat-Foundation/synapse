@@ -627,7 +627,7 @@ class EventPushActionsWorkerStore(ReceiptsWorkerStore, StreamWorkerStore, SQLBas
                 ) AS receipts USING (thread_id)
                 WHERE room_id = ? AND user_id = ?
                 AND (
-                    (last_receipt_stream_ordering IS NULL AND stream_ordering > COALESCE(threaded_receipt_stream_ordering, ?))
+                    (last_receipt_stream_ordering IS NULL AND threaded_receipt_stream_ordering IS NULL AND stream_ordering > ?)
                     OR last_receipt_stream_ordering = COALESCE(threaded_receipt_stream_ordering, ?)
                 ) AND (notif_count != 0 OR COALESCE(unread_count, 0) != 0)
             """,
