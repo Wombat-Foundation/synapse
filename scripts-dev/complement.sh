@@ -669,9 +669,110 @@ run_one_pattern() {
 
 main "$@"
 
-# ── Run all patterns ──────────────────────────────────────────────────────────
 test_start_seconds=$SECONDS
 TEST_EXIT_CODE=0
+
+# ── Merge / refresh results ledger, then print a summary ─────────────────────
+# Runs on normal completion AND on Ctrl+C / SIGTERM (see trap below), so an
+# interrupted run still merges whatever was staged so far and reports it,
+# instead of silently discarding it.
+_reported=""
+merge_and_report() {
+  [ -n "$_reported" ] && return 0
+  _reported=1
+
+  merge_script="${repo_root}/scripts-dev/merge_complement_results.py"
+  if [ -f "$staged_results_file" ] && [ -s "$staged_results_file" ]; then
+    if [ "$RUN_TESTS" = "." ]; then
+      python3 "$merge_script" --dedupe-in-place "$staged_results_file" \
+        || echo "WARN: dedupe of staged results failed ($staged_results_file); keeping raw rows" >&2
+      python3 "$merge_script" --sort-in-place "$staged_results_file" \
+        || echo "WARN: sort of staged results failed ($staged_results_file); keeping arrival order" >&2
+      if cp "$staged_results_file" "$main_results_file"; then
+        echo "refreshed $main_results_file from $(wc -l <"$staged_results_file") staged results" >&2
+      else
+        echo "MERGE FAILED: refreshing $main_results_file from staged results" >&2
+        [ "$TEST_EXIT_CODE" -eq 0 ] && TEST_EXIT_CODE=1
+      fi
+    else
+      tmp_merge="$(mktemp "${main_results_file}.merge.XXXXXX")"
+      if python3 "$merge_script" "$main_results_file" "$staged_results_file" "$tmp_merge"; then
+        if mv "$tmp_merge" "$main_results_file"; then
+          echo "merged $(wc -l <"$staged_results_file") staged results into $main_results_file" >&2
+        else
+          echo "MERGE FAILED: moving merged results into $main_results_file" >&2
+          [ "$TEST_EXIT_CODE" -eq 0 ] && TEST_EXIT_CODE=1
+        fi
+      else
+        echo "WARN: merge into $main_results_file failed; appending staged results" >&2
+        cat "$staged_results_file" >>"$main_results_file"
+        rm -f "$tmp_merge"
+      fi
+    fi
+  else
+    echo "Warning: $staged_results_file is missing or empty. No results processed." >&2
+    if [ "$TEST_EXIT_CODE" -eq 0 ]; then
+      TEST_EXIT_CODE=1
+    fi
+  fi
+
+  # Log: point-in-time snapshot, straight copy (not merge).
+  if [ -f "$staged_log_file" ]; then
+    cp "$staged_log_file" "$main_log_file"
+    echo "refreshed $main_log_file from staged log" >&2
+  fi
+
+  _pass=$(grep -c '"pass"' "$staged_results_file" 2>/dev/null || true)
+  _fail=$(grep -c '"fail"' "$staged_results_file" 2>/dev/null || true)
+  _skip=$(grep -c '"skip"' "$staged_results_file" 2>/dev/null || true)
+  _pass=${_pass:-0}
+  _fail=${_fail:-0}
+  _skip=${_skip:-0}
+
+  test_duration_seconds=$((SECONDS - test_start_seconds))
+
+  echo "" >&2
+  echo "RESULTS: ${_pass} pass / ${_fail} fail / ${_skip} skip" >&2
+  echo "TIME: $(printf '%d:%02d' $((test_duration_seconds / 60)) $((test_duration_seconds % 60))) min" >&2
+  echo "" >&2
+  echo "complement logs saved at $staged_log_file" >&2
+  echo "complement results staged at $staged_results_file" >&2
+  echo "complement results merged into $main_results_file" >&2
+  echo "" >&2
+
+  if [ -z "${GITHUB_ACTIONS:-}" ]; then
+    echo "COMPLEMENT_DURATION_SECONDS=${test_duration_seconds}" >&2
+  fi
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    {
+      echo "### Complement results"
+      echo "**${_pass}** pass / **${_fail}** fail / **${_skip}** skip"
+      echo ""
+      echo "Duration: \`${test_duration_seconds}s\` (in_repo=\`${use_in_repo_tests:-0}\`)"
+    } >> "$GITHUB_STEP_SUMMARY"
+  fi
+}
+
+# A Ctrl+C or kill mid-run would otherwise skip straight to the container-
+# cleanup EXIT trap, discarding everything staged so far even though it was
+# already durably written incrementally. Merge and report it instead, then
+# exit with the conventional 128+signal code.
+_on_interrupt() {
+  local _sig="$1"
+  echo "" >&2
+  echo "Interrupted (SIG${_sig}) -- merging staged results before exiting." >&2
+  TEST_EXIT_CODE="${TEST_EXIT_CODE:-1}"
+  merge_and_report
+  case "$_sig" in
+    INT) exit 130 ;;
+    TERM) exit 143 ;;
+    *) exit 1 ;;
+  esac
+}
+trap '_on_interrupt INT' INT
+trap '_on_interrupt TERM' TERM
+
+# ── Run all patterns ──────────────────────────────────────────────────────────
 for _pattern in "${ALT_PATTERNS[@]}"; do
   set +e
   run_one_pattern "$_pattern"
@@ -682,71 +783,7 @@ for _pattern in "${ALT_PATTERNS[@]}"; do
   fi
 done
 
-# ── Merge / refresh results ledger ────────────────────────────────────────────
-merge_script="${repo_root}/scripts-dev/merge_complement_results.py"
-if [ -f "$staged_results_file" ] && [ -s "$staged_results_file" ]; then
-  if [ "$RUN_TESTS" = "." ]; then
-    python3 "$merge_script" --dedupe-in-place "$staged_results_file" \
-      || echo "WARN: dedupe of staged results failed ($staged_results_file); keeping raw rows" >&2
-    python3 "$merge_script" --sort-in-place "$staged_results_file" \
-      || echo "WARN: sort of staged results failed ($staged_results_file); keeping arrival order" >&2
-    cp "$staged_results_file" "$main_results_file" \
-      || { echo "MERGE FAILED: refreshing $main_results_file from staged results" >&2; exit 1; }
-    echo "refreshed $main_results_file from $(wc -l <"$staged_results_file") staged results" >&2
-  else
-    tmp_merge="$(mktemp "${main_results_file}.merge.XXXXXX")"
-    if python3 "$merge_script" "$main_results_file" "$staged_results_file" "$tmp_merge"; then
-      mv "$tmp_merge" "$main_results_file" \
-        || { echo "MERGE FAILED: moving merged results into $main_results_file" >&2; exit 1; }
-      echo "merged $(wc -l <"$staged_results_file") staged results into $main_results_file" >&2
-    else
-      echo "WARN: merge into $main_results_file failed; appending staged results" >&2
-      cat "$staged_results_file" >>"$main_results_file"
-      rm -f "$tmp_merge"
-    fi
-  fi
-else
-  echo "Warning: $staged_results_file is missing or empty. No results processed." >&2
-  if [ "$TEST_EXIT_CODE" -eq 0 ]; then
-    TEST_EXIT_CODE=1
-  fi
-fi
-
-# Log: point-in-time snapshot, straight copy (not merge).
-if [ -f "$staged_log_file" ]; then
-  cp "$staged_log_file" "$main_log_file"
-  echo "refreshed $main_log_file from staged log" >&2
-fi
-
-_pass=$(grep -c '"pass"' "$staged_results_file" 2>/dev/null || true)
-_fail=$(grep -c '"fail"' "$staged_results_file" 2>/dev/null || true)
-_skip=$(grep -c '"skip"' "$staged_results_file" 2>/dev/null || true)
-_pass=${_pass:-0}
-_fail=${_fail:-0}
-_skip=${_skip:-0}
-
-test_duration_seconds=$((SECONDS - test_start_seconds))
-
-echo "" >&2
-echo "RESULTS: ${_pass} pass / ${_fail} fail / ${_skip} skip" >&2
-echo "TIME: $(printf '%d:%02d' $((test_duration_seconds / 60)) $((test_duration_seconds % 60))) min" >&2
-echo "" >&2
-echo "complement logs saved at $staged_log_file" >&2
-echo "complement results staged at $staged_results_file" >&2
-echo "complement results merged into $main_results_file" >&2
-echo "" >&2
-
-if [ -z "${GITHUB_ACTIONS:-}" ]; then
-  echo "COMPLEMENT_DURATION_SECONDS=${test_duration_seconds}" >&2
-fi
-if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
-  {
-    echo "### Complement results"
-    echo "**${_pass}** pass / **${_fail}** fail / **${_skip}** skip"
-    echo ""
-    echo "Duration: \`${test_duration_seconds}s\` (in_repo=\`${use_in_repo_tests:-0}\`)"
-  } >> "$GITHUB_STEP_SUMMARY"
-fi
+merge_and_report
 
 if [ "$TEST_EXIT_CODE" -ne 0 ]; then
   exit "$TEST_EXIT_CODE"
