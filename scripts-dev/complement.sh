@@ -647,7 +647,7 @@ run_one_pattern() {
 
   local _go_exit=0
   set +e
-  (
+  setsid (
     set -o pipefail
     if [ -n "$use_in_repo_tests" ]; then
       cd "${repo_root}/complement"

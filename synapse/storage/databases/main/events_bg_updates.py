@@ -1523,7 +1523,7 @@ class EventsBackgroundUpdatesStore(
             # target_chain_id. Hopefully any purged events are due to a room
             # being fully purged and they will be removed from the origin_*
             # searches.
-            if getattr(self, "_embedded_event_json_enabled", False):
+            if getattr(self, "_embedded_hamt_engine", None):
                 # Exclusive by configured engine, not a dual-write -- see
                 # embedded_event_auth_chain_links.py.
                 from synapse.storage.databases.main.embedded_event_auth_chain_links import (
@@ -3120,18 +3120,18 @@ class EventsBackgroundUpdatesStore(
                 # way _censor_event_txn does for censoring/expiry. Otherwise
                 # get_event would keep serving the pre-resign (stale
                 # signature) JSON forever from the embedded engine.
-            if getattr(self, "_embedded_hamt_engine", None):
-                put_event_json_batch(
-                    [
-                        (
-                            event_id,
-                            json_encoder.encode(event.internal_metadata.get_dict()),
-                            json_encoder.encode(event_dict),
-                            event.format_version,
-                        )
-                        for event_id, event_dict, event in events_to_write
-                    ]
-                )
+                if getattr(self, "_embedded_event_json_enabled", False):
+                    put_event_json_batch(
+                        [
+                            (
+                                event_id,
+                                json_encoder.encode(event.internal_metadata.get_dict()),
+                                json_encoder.encode(event_dict),
+                                event.format_version,
+                            )
+                            for event_id, event_dict, event in events_to_write
+                        ]
+                    )
             # Always update the progress even if we re-sign nothing.
             self.db_pool.updates._background_update_progress_txn(
                 txn,

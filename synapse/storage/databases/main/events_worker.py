@@ -241,6 +241,7 @@ class EventsWorkerStore(SQLBaseStore):
         super().__init__(database, db_conn, hs)
 
         self._embedded_event_json_enabled = open_embedded_event_json_engine(hs)
+        self._embedded_hamt_engine = hs.config.database.embedded_hamt_engine
         # Namespaces event_to_state_group/refcount keys in the embedded
         # engine -- see embedded_event_to_state_group.py's module docstring.
         # Independent from (but must agree with) the state datastore's own
