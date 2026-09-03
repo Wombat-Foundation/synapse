@@ -684,14 +684,13 @@ main "$@"
 test_start_seconds=$SECONDS
 TEST_EXIT_CODE=0
 
-# ── Merge / refresh results ledger, then print a summary ─────────────────────
-# Runs on normal completion AND on Ctrl+C / SIGTERM (see trap below), so an
-# interrupted run still merges whatever was staged so far and reports it,
-# instead of silently discarding it.
+# Merges staged results into the main ledger and prints a summary. Called
+# from the EXIT trap below so it runs no matter how the script stops --
+# reaching the end, an explicit `exit`, a `set -e` abort, or a signal --
+# instead of only on the happy path. Guarded against running twice (a
+# signal's `exit` still triggers this same trap).
 _reported=""
-merge_and_report() {
-  # Called from _final_exit (below) on every exit path, so guard against
-  # running twice -- e.g. a signal handler's `exit` still runs this trap.
+finish() {
   [ -n "$_reported" ] && return 0
   _reported=1
 
@@ -702,21 +701,15 @@ merge_and_report() {
         || echo "WARN: dedupe of staged results failed ($staged_results_file); keeping raw rows" >&2
       python3 "$merge_script" --sort-in-place "$staged_results_file" \
         || echo "WARN: sort of staged results failed ($staged_results_file); keeping arrival order" >&2
-      if cp "$staged_results_file" "$main_results_file"; then
-        echo "refreshed $main_results_file from $(wc -l <"$staged_results_file") staged results" >&2
-      else
-        echo "MERGE FAILED: refreshing $main_results_file from staged results" >&2
-        [ "$TEST_EXIT_CODE" -eq 0 ] && TEST_EXIT_CODE=1
-      fi
+      cp "$staged_results_file" "$main_results_file" \
+        || { echo "MERGE FAILED: refreshing $main_results_file from staged results" >&2; TEST_EXIT_CODE=1; }
+      echo "refreshed $main_results_file from $(wc -l <"$staged_results_file") staged results" >&2
     else
       tmp_merge="$(mktemp "${main_results_file}.merge.XXXXXX")"
       if python3 "$merge_script" "$main_results_file" "$staged_results_file" "$tmp_merge"; then
-        if mv "$tmp_merge" "$main_results_file"; then
-          echo "merged $(wc -l <"$staged_results_file") staged results into $main_results_file" >&2
-        else
-          echo "MERGE FAILED: moving merged results into $main_results_file" >&2
-          [ "$TEST_EXIT_CODE" -eq 0 ] && TEST_EXIT_CODE=1
-        fi
+        mv "$tmp_merge" "$main_results_file" \
+          || { echo "MERGE FAILED: moving merged results into $main_results_file" >&2; TEST_EXIT_CODE=1; }
+        echo "merged $(wc -l <"$staged_results_file") staged results into $main_results_file" >&2
       else
         echo "WARN: merge into $main_results_file failed; appending staged results" >&2
         cat "$staged_results_file" >>"$main_results_file"
@@ -725,12 +718,10 @@ merge_and_report() {
     fi
   else
     echo "Warning: $staged_results_file is missing or empty. No results processed." >&2
-    if [ "$TEST_EXIT_CODE" -eq 0 ]; then
-      TEST_EXIT_CODE=1
-    fi
+    TEST_EXIT_CODE="${TEST_EXIT_CODE:-1}"
   fi
 
-  # Log: point-in-time snapshot, straight copy (not merge).
+  # Log: point-in-time snapshot, straight copy (not a merge -- no history to preserve).
   if [ -f "$staged_log_file" ]; then
     cp "$staged_log_file" "$main_log_file"
     echo "refreshed $main_log_file from staged log" >&2
@@ -739,14 +730,10 @@ merge_and_report() {
   _pass=$(grep -c '"pass"' "$staged_results_file" 2>/dev/null || true)
   _fail=$(grep -c '"fail"' "$staged_results_file" 2>/dev/null || true)
   _skip=$(grep -c '"skip"' "$staged_results_file" 2>/dev/null || true)
-  _pass=${_pass:-0}
-  _fail=${_fail:-0}
-  _skip=${_skip:-0}
-
   test_duration_seconds=$((SECONDS - test_start_seconds))
 
   echo "" >&2
-  echo "RESULTS: ${_pass} pass / ${_fail} fail / ${_skip} skip" >&2
+  echo "RESULTS: ${_pass:-0} pass / ${_fail:-0} fail / ${_skip:-0} skip" >&2
   echo "TIME: $(printf '%d:%02d' $((test_duration_seconds / 60)) $((test_duration_seconds % 60))) min" >&2
   echo "" >&2
   echo "complement logs saved at $staged_log_file" >&2
@@ -754,52 +741,27 @@ merge_and_report() {
   echo "complement results merged into $main_results_file" >&2
   echo "" >&2
 
-  if [ -z "${GITHUB_ACTIONS:-}" ]; then
-    echo "COMPLEMENT_DURATION_SECONDS=${test_duration_seconds}" >&2
-  fi
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     {
       echo "### Complement results"
-      echo "**${_pass}** pass / **${_fail}** fail / **${_skip}** skip"
+      echo "**${_pass:-0}** pass / **${_fail:-0}** fail / **${_skip:-0}** skip"
       echo ""
       echo "Duration: \`${test_duration_seconds}s\` (in_repo=\`${use_in_repo_tests:-0}\`)"
     } >> "$GITHUB_STEP_SUMMARY"
   fi
-}
 
-# Every way this script can stop -- reaching the end normally, an explicit
-# `exit`, a `set -e` abort on some command failing, or a trapped signal --
-# now funnels through this one EXIT trap. merge_and_report is idempotent
-# (guarded by _reported), so calling it here is the single source of truth:
-# no call site can forget it, and no exit path can silently skip it. This
-# replaces the EXIT trap `main` installed earlier (cleanup_complement_containers
-# alone).
-_final_exit() {
-  merge_and_report
   cleanup_complement_containers
 }
-trap _final_exit EXIT
+trap finish EXIT
 
-# Bash only runs the EXIT trap for a signal if that signal is itself
-# trapped -- an untrapped INT/TERM/HUP kills the process directly and skips
-# EXIT entirely, which is exactly how a dropped terminal (SIGHUP) or Ctrl+C
-# used to discard everything staged so far. These handlers just record the
-# right exit code and `exit`; _final_exit above does the actual merge.
-_on_interrupt() {
-  local _sig="$1"
-  echo "" >&2
-  echo "Interrupted (SIG${_sig}) -- merging staged results before exiting." >&2
-  TEST_EXIT_CODE="${TEST_EXIT_CODE:-1}"
-  case "$_sig" in
-    INT) exit 130 ;;
-    TERM) exit 143 ;;
-    HUP) exit 129 ;;
-    *) exit 1 ;;
-  esac
-}
-trap '_on_interrupt INT' INT
-trap '_on_interrupt TERM' TERM
-trap '_on_interrupt HUP' HUP
+# Bash only runs the EXIT trap for a signal that's itself trapped -- an
+# untrapped INT/TERM/HUP kills the process directly and skips EXIT (and
+# `finish` above) entirely. This is what used to discard everything staged
+# on Ctrl+C or a dropped terminal. `exit` from here still runs `finish` via
+# the EXIT trap, so these just need the right conventional exit code.
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 # ── Run all patterns ──────────────────────────────────────────────────────────
 for _pattern in "${ALT_PATTERNS[@]}"; do
