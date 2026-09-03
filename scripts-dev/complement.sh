@@ -685,6 +685,13 @@ TEST_EXIT_CODE=0
 # instead of silently discarding it.
 _reported=""
 merge_and_report() {
+  # Diagnostic canary: on GH Actions, the main/in-repo runs' output has gone
+  # completely silent between the last test line and process exit -- no
+  # RESULTS:, no refreshed, no MERGE FAILED, nothing -- while the sanity
+  # check's identical-in-spirit call always prints fine. This line, printed
+  # as the very first thing in the function, unconditionally, tells us
+  # whether merge_and_report is even being entered at all in that case.
+  echo "MERGE_AND_REPORT_ENTERED pid=$$ reported=${_reported:-<unset>}" >&2
   [ -n "$_reported" ] && return 0
   _reported=1
 
