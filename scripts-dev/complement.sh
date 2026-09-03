@@ -561,6 +561,11 @@ main() {
   export PASS_COMPLEMENT_WRAPPER_TOKEN="$COMPLEMENT_WRAPPER_TOKEN"
   export COMPLEMENT_SHARE_ENV_PREFIX=PASS_
   export COMPLEMENT_SPAWN_HS_TIMEOUT_SECS=${COMPLEMENT_SPAWN_HS_TIMEOUT_SECS:-120}
+  # Placeholder until merge_and_report exists below; replaced with the real
+  # combined EXIT trap once it's defined, so merging is never optional --
+  # it happens on literal end-of-script, an explicit `exit`, a `set -e`
+  # abort, or any trapped signal, from one single codepath instead of being
+  # duplicated across call sites that can drift out of sync.
   trap cleanup_complement_containers EXIT
 
   return 0
@@ -767,24 +772,39 @@ merge_and_report() {
   fi
 }
 
-# A Ctrl+C or kill mid-run would otherwise skip straight to the container-
-# cleanup EXIT trap, discarding everything staged so far even though it was
-# already durably written incrementally. Merge and report it instead, then
-# exit with the conventional 128+signal code.
+# Every way this script can stop -- reaching the end normally, an explicit
+# `exit`, a `set -e` abort on some command failing, or a trapped signal --
+# now funnels through this one EXIT trap. merge_and_report is idempotent
+# (guarded by _reported), so calling it here is the single source of truth:
+# no call site can forget it, and no exit path can silently skip it. This
+# replaces the EXIT trap `main` installed earlier (cleanup_complement_containers
+# alone).
+_final_exit() {
+  merge_and_report
+  cleanup_complement_containers
+}
+trap _final_exit EXIT
+
+# Bash only runs the EXIT trap for a signal if that signal is itself
+# trapped -- an untrapped INT/TERM/HUP kills the process directly and skips
+# EXIT entirely, which is exactly how a dropped terminal (SIGHUP) or Ctrl+C
+# used to discard everything staged so far. These handlers just record the
+# right exit code and `exit`; _final_exit above does the actual merge.
 _on_interrupt() {
   local _sig="$1"
   echo "" >&2
   echo "Interrupted (SIG${_sig}) -- merging staged results before exiting." >&2
   TEST_EXIT_CODE="${TEST_EXIT_CODE:-1}"
-  merge_and_report
   case "$_sig" in
     INT) exit 130 ;;
     TERM) exit 143 ;;
+    HUP) exit 129 ;;
     *) exit 1 ;;
   esac
 }
 trap '_on_interrupt INT' INT
 trap '_on_interrupt TERM' TERM
+trap '_on_interrupt HUP' HUP
 
 # ── Run all patterns ──────────────────────────────────────────────────────────
 for _pattern in "${ALT_PATTERNS[@]}"; do
@@ -796,8 +816,6 @@ for _pattern in "${ALT_PATTERNS[@]}"; do
     TEST_EXIT_CODE="$_pexit"
   fi
 done
-
-merge_and_report
 
 if [ "$TEST_EXIT_CODE" -ne 0 ]; then
   exit "$TEST_EXIT_CODE"
