@@ -194,6 +194,14 @@ jobs:
       - name: Upload Complement logs
         # The runner writes raw Go JSON and its result ledger separately for
         # each run, while printing compact progress live in the job log.
+        #
+        # main/*.jsonl (and the other two named dirs) are only populated by a
+        # single `cp` after the whole `go test` invocation returns -- if the
+        # process is killed or the runner dies before that point, those files
+        # stay empty even though every event up to the cutoff was already
+        # durably written, incrementally, to the `.tmp/complement/*.jsonl`
+        # staged files as it went. Upload those too so a mid-run failure
+        # still leaves real diagnostics instead of nothing.
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: ${{ always() }}
         with:
@@ -207,3 +215,5 @@ jobs:
             synapse/tests/complement/main/results.jsonl
             synapse/tests/complement/in-repo/logs.jsonl
             synapse/tests/complement/in-repo/results.jsonl
+            synapse/.tmp/complement/*.jsonl
+          if-no-files-found: warn

@@ -401,33 +401,22 @@ class PurgeTests(HomeserverTestCase):
                 current_state_ids=None,
             )
         )
-        if self.state_store.embedded_hamt_engine == "mdbx":
-            # event_to_state_groups is embedded-exclusive in this mode -- a
-            # raw SQL insert (as below) would never reach the mdbx refcount
-            # get_referenced_state_groups actually reads, making this state
-            # group look unreferenced regardless of what this test intends.
-            from synapse.storage.databases.main.embedded_event_to_state_group import (
-                increment_state_group_refcounts_batch,
-                put_event_to_state_group_batch,
+        # get_referenced_state_groups() always queries the plain SQL
+        # event_to_state_groups table here, regardless of embedded_hamt_engine:
+        # it only reads the embedded mdbx refcount store when
+        # _embedded_event_json_enabled is true, which is a separate, currently
+        # hard-disabled feature (see embedded_event_json.py). A real SQL
+        # insert is required to make this state group look referenced, even
+        # when the state HAMT itself is on the embedded engine.
+        self.get_success(
+            self.store.db_pool.simple_insert(
+                "event_to_state_groups",
+                {
+                    "event_id": "$new_event",
+                    "state_group": referenced_chain_state_group,
+                },
             )
-
-            namespace = self.store._embedded_hamt_namespace
-            put_event_to_state_group_batch(
-                namespace, [("$new_event", referenced_chain_state_group)]
-            )
-            increment_state_group_refcounts_batch(
-                namespace, [referenced_chain_state_group]
-            )
-        else:
-            self.get_success(
-                self.store.db_pool.simple_insert(
-                    "event_to_state_groups",
-                    {
-                        "event_id": "$new_event",
-                        "state_group": referenced_chain_state_group,
-                    },
-                )
-            )
+        )
 
         # Insert and run the background update.
         self.get_success(
