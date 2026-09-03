@@ -430,6 +430,15 @@ main() {
   # particularly tricky.
   export PASS_SYNAPSE_LOG_TESTING=1
 
+  # SYNAPSE_MDBX=1 is the concise production on-switch (see
+  # config/database.py) but was never actually forwarded into the
+  # container here -- treat it the same as SYNAPSE_EMBEDDED_HAMT_ENGINE=mdbx
+  # so it does something locally too.
+  if [[ -n "${SYNAPSE_MDBX:-}" && -z "$SYNAPSE_EMBEDDED_HAMT_ENGINE" ]]; then
+    SYNAPSE_EMBEDDED_HAMT_ENGINE="mdbx"
+    SYNAPSE_EMBEDDED_HAMT_PATH="${SYNAPSE_EMBEDDED_HAMT_PATH:-${SYNAPSE_MDBX_PATH:-}}"
+  fi
+
   if [[ -n "$SYNAPSE_EMBEDDED_HAMT_ENGINE" ]]; then
     export PASS_SYNAPSE_EMBEDDED_HAMT_ENGINE="$SYNAPSE_EMBEDDED_HAMT_ENGINE"
     # SYNAPSE_EMBEDDED_HAMT_PATH is read inside the Complement container, not
