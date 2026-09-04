@@ -304,17 +304,31 @@ class StateStoreTestCase(HomeserverTestCase):
         # do_next_background_update to dispatch to; this test flips the
         # config after construction (same pattern the other embedded-engine
         # tests here use), so no handler was ever registered for this store
-        # instance -- exercise _enqueue_embedded_hamt_migration_if_needed
-        # (real production code, still worth covering) then drive the
-        # handler directly rather than through the dispatcher.
+        # instance. Exercise _enqueue_embedded_hamt_migration_if_needed
+        # (real production code, still worth covering), but do not start its
+        # poller: it would race this test's direct handler invocation and
+        # repeatedly fail to dispatch the unregistered handler. Drive the
+        # handler directly instead.
         tmpdir = tempfile.mkdtemp(prefix="test-hamt-migration-mdbx-")
         self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
         mdbx_engine.open_client(tmpdir)
         self.state_datastore.embedded_hamt_engine = "mdbx"
         self.state_datastore.embedded_hamt_path = tmpdir
 
-        self.get_success(
-            self.state_datastore._enqueue_embedded_hamt_migration_if_needed()
+        with patch.object(
+            self.store.db_pool.updates, "start_doing_background_updates"
+        ) as start_background_updates:
+            self.get_success(
+                self.state_datastore._enqueue_embedded_hamt_migration_if_needed()
+            )
+        start_background_updates.assert_called_once_with()
+
+        # `_background_migrate_state_hamt_to_embedded` ends the update after
+        # its final batch, which normally follows the poller selecting it.
+        # Model that selection explicitly rather than relying on a concurrently
+        # running poller to set this private dispatcher state.
+        self.store.db_pool.updates._current_background_update = (
+            self.state_datastore.EMBEDDED_HAMT_MIGRATION_UPDATE_NAME
         )
         progress: dict = {}
         while True:
