@@ -1525,15 +1525,17 @@ class EventsBackgroundUpdatesStore(
             # target_chain_id. Hopefully any purged events are due to a room
             # being fully purged and they will be removed from the origin_*
             # searches.
-            if getattr(self, "_embedded_hamt_engine", None):
+            from synapse.storage.databases.main.embedded_event_auth_chain_links import (
+                delete_chain_links_batch,
+                resolve_namespace,
+            )
+
+            embedded_hamt_namespace = resolve_namespace(self)
+            if embedded_hamt_namespace is not None:
                 # Exclusive by configured engine, not a dual-write -- see
                 # embedded_event_auth_chain_links.py.
-                from synapse.storage.databases.main.embedded_event_auth_chain_links import (
-                    delete_chain_links_batch,
-                )
-
                 delete_chain_links_batch(
-                    self._embedded_hamt_namespace, unreferenced_chain_id_tuples
+                    embedded_hamt_namespace, unreferenced_chain_id_tuples
                 )
             else:
                 txn.executemany(
