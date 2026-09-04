@@ -23,7 +23,6 @@
 
 import itertools
 import logging
-from json import JSONDecodeError
 from typing import (
     TYPE_CHECKING,
     AbstractSet,
@@ -1559,19 +1558,20 @@ class FederationClient(FederationBase):
             min_depth: Minimum depth of events to return.
             timeout: Max time to wait in ms
         """
+        latest_event_ids = [e.event_id for e in latest_events]
         try:
             try:
                 content = await self.transport_layer.get_missing_events(
                     destination=destination,
                     room_id=room_id,
                     earliest_events=earliest_events_ids,
-                    latest_events=[e.event_id for e in latest_events],
+                    latest_events=latest_event_ids,
                     limit=limit,
                     min_depth=min_depth,
                     timeout=timeout,
                 )
             except RequestSendFailed as e:
-                if not isinstance(e.inner_exception, JSONDecodeError):
+                if not isinstance(e.inner_exception, ValueError):
                     raise
 
                 logger.warning(
@@ -1582,7 +1582,7 @@ class FederationClient(FederationBase):
                     destination=destination,
                     room_id=room_id,
                     earliest_events=earliest_events_ids,
-                    latest_events=[e.event_id for e in latest_events],
+                    latest_events=latest_event_ids,
                     limit=limit,
                     min_depth=min_depth,
                     timeout=timeout,

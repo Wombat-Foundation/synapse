@@ -22,6 +22,7 @@
 import atexit
 import logging
 import os
+import shutil
 import signal
 import sys
 import tempfile
@@ -101,20 +102,23 @@ SQLITE_PERSIST_DB = os.environ.get("SYNAPSE_TEST_PERSIST_SQLITE_DB") is not None
 # embedded engine (mdbx) instead of plain SQL -- the trial-mdbx CI job's
 # whole purpose. mdbx is just a local file, so no "is a server reachable"
 # check is needed here -- config/database.py opens it directly.
+#
+# Deliberately *not* falling back to the bare deployment switches
+# (SYNAPSE_EMBEDDED_HAMT_ENGINE / SYNAPSE_EMBEDDED_HAMT_PATH / SYNAPSE_MDBX):
+# unit tests inherit the process environment, and a shell configured for
+# running a real homeserver (e.g. SYNAPSE_EMBEDDED_HAMT_PATH pointing at a
+# production mdbx store) must not have `trial` silently open and mutate
+# that store. Only the SYNAPSE_TEST_-prefixed, test-only variables are
+# honoured here. SYNAPSE_TEST_MDBX is a shorthand alias for the common case
+# of just wanting the mdbx engine, without spelling out the engine name.
 EMBEDDED_HAMT_ENGINE = os.environ.get("SYNAPSE_TEST_EMBEDDED_HAMT_ENGINE")
-if EMBEDDED_HAMT_ENGINE is None:
-    # Unit tests inherit the process environment. If the normal deployment
-    # switch is present, run it against the test-local temporary store rather
-    # than requiring every test invocation to also provide a path.
-    EMBEDDED_HAMT_ENGINE = os.environ.get("SYNAPSE_EMBEDDED_HAMT_ENGINE")
-if EMBEDDED_HAMT_ENGINE is None and os.environ.get("SYNAPSE_MDBX"):
+if EMBEDDED_HAMT_ENGINE is None and os.environ.get("SYNAPSE_TEST_MDBX"):
     EMBEDDED_HAMT_ENGINE = "mdbx"
 
 EMBEDDED_HAMT_PATH = os.environ.get("SYNAPSE_TEST_EMBEDDED_HAMT_PATH")
-if EMBEDDED_HAMT_PATH is None:
-    EMBEDDED_HAMT_PATH = os.environ.get("SYNAPSE_EMBEDDED_HAMT_PATH")
 if EMBEDDED_HAMT_PATH is None and EMBEDDED_HAMT_ENGINE:
     EMBEDDED_HAMT_PATH = tempfile.mkdtemp()
+    atexit.register(shutil.rmtree, EMBEDDED_HAMT_PATH, ignore_errors=True)
 
 # the dbname we will connect to in order to create the base database.
 POSTGRES_DBNAME_FOR_INITIAL_CREATE = "postgres"

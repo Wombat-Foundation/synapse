@@ -659,6 +659,12 @@ run_one_pattern() {
 
   local _go_exit=0
   set +e
+  # Enable job control just for this launch so the subshell (and the
+  # go test/tee/jq pipeline it forks) gets its own process group. That
+  # lets the INT/TERM/HUP traps below kill the whole group with
+  # `kill -- -PGID` instead of only the subshell PID, which would leave
+  # go test/tee/jq running as orphans past container cleanup.
+  set -m
   (
     set -o pipefail
     if [ -n "$use_in_repo_tests" ]; then
@@ -678,6 +684,7 @@ run_one_pattern() {
       >"$_events_fifo"
   ) &
   local _producer=$!
+  set +m
   _active_producer=$_producer
 
   while IFS=$'\t' read -r _action _tname _elapsed; do
@@ -787,7 +794,9 @@ trap finish EXIT
 # signaling a recycled PID later.
 _kill_active_producer() {
   if [ -n "$_active_producer" ]; then
-    kill -- "$_active_producer" 2>/dev/null || true
+    # Negative PID targets the whole process group (see `set -m` above),
+    # so go test/tee/jq are all signaled, not just the subshell.
+    kill -- "-$_active_producer" 2>/dev/null || kill -- "$_active_producer" 2>/dev/null || true
     wait "$_active_producer" 2>/dev/null || true
     _active_producer=""
   fi
