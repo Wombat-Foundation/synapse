@@ -852,7 +852,7 @@
 {"Action":"pass","Test":"TestServerNotices/Alice_is_invited_to_the_server_alert_room"}
 {"Action":"pass","Test":"TestServerNotices/Sending_a_notice_with_a_transactionID_is_idempotent"}
 {"Action":"pass","Test":"TestStateIdsFallbackFetchesFullAuthChain"}
-{"Action":"fail","Test":"TestStateIdsFallbackRecoversAfterMalformedGetMissingEventsResponse"}
+{"Action":"pass","Test":"TestStateIdsFallbackRecoversAfterMalformedGetMissingEventsResponse"}
 {"Action":"pass","Test":"TestSync"}
 {"Action":"pass","Test":"TestSync/parallel"}
 {"Action":"pass","Test":"TestSync/parallel/Can_sync_a_joined_room"}
