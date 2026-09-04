@@ -313,7 +313,7 @@ class EventFederationWorkerStore(
         chains: dict[int, int] = {}
         embedded_hamt_namespace = (
             self._embedded_hamt_namespace
-            if getattr(self, "_embedded_event_json_enabled", False)
+            if getattr(self, "_embedded_hamt_engine", None)
             else None
         )
         for links in self._get_chain_links(
@@ -732,7 +732,7 @@ class EventFederationWorkerStore(
         # (We need to take a copy of `seen_chains` as the function mutates it)
         embedded_hamt_namespace = (
             self._embedded_hamt_namespace
-            if getattr(self, "_embedded_event_json_enabled", False)
+            if getattr(self, "_embedded_hamt_engine", None)
             else None
         )
         for links in self._get_chain_links(
