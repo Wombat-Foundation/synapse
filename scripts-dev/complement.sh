@@ -647,7 +647,7 @@ run_one_pattern() {
 
   local _go_exit=0
   set +e
-  setsid (
+  (
     set -o pipefail
     if [ -n "$use_in_repo_tests" ]; then
       cd "${repo_root}/complement"
@@ -772,11 +772,10 @@ trap finish EXIT
 trap 'exit 130' INT
 trap '
   # Terminate any active go-test pipeline so it does not outlive
-  # container cleanup.  Signal the whole process group (negative PID)
-  # so go test, tee, and jq are all stopped.  Clear _active_producer
-  # after a successful wait to avoid signaling a recycled PID later.
+  # container cleanup.  Clear _active_producer after a successful wait
+  # to avoid signaling a recycled PID later.
   if [ -n "$_active_producer" ]; then
-    kill -- -"$_active_producer" 2>/dev/null || true
+    kill -- "$_active_producer" 2>/dev/null || true
     wait "$_active_producer" 2>/dev/null || true
     _active_producer=""
   fi
