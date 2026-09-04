@@ -311,9 +311,11 @@ class EventFederationWorkerStore(
 
         # A map from chain ID to max sequence number *reachable* from any event ID.
         chains: dict[int, int] = {}
-        # Keep auth-chain links SQL-backed. The MDBX link backend is disabled
-        # pending an end-to-end lifecycle implementation.
-        embedded_hamt_namespace = None
+        embedded_hamt_namespace = (
+            self._embedded_hamt_namespace
+            if getattr(self, "_embedded_event_json_enabled", False)
+            else None
+        )
         for links in self._get_chain_links(
             txn, set(event_chains.keys()), embedded_hamt_namespace
         ):
@@ -728,7 +730,11 @@ class EventFederationWorkerStore(
         # are reachable from any event.
 
         # (We need to take a copy of `seen_chains` as the function mutates it)
-        embedded_hamt_namespace = None
+        embedded_hamt_namespace = (
+            self._embedded_hamt_namespace
+            if getattr(self, "_embedded_event_json_enabled", False)
+            else None
+        )
         for links in self._get_chain_links(
             txn, set(seen_chains), embedded_hamt_namespace
         ):
