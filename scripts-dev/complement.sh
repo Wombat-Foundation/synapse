@@ -601,7 +601,13 @@ record_result() {
     '{Action: $Action, Test: $Test}' >>"$staged_results_file"
 
   if [ "$action" != "skip" ]; then
-    printf '%s\t%s\t%s\n' "${action^^}" "$test_name" "$elapsed" >&2
+    # Truncate only the printed name (the full name is still recorded
+    # above) so a long subtest path doesn't wrap the summary line.
+    local _display_name="$test_name"
+    if [ "${#_display_name}" -gt 80 ]; then
+      _display_name="${_display_name:0:79}…"
+    fi
+    printf '%s\t%s\t%s\n' "${action^^}" "$_display_name" "$elapsed" >&2
   fi
 }
 
