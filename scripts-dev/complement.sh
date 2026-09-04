@@ -681,6 +681,7 @@ run_one_pattern() {
 
   wait "$_producer"
   _go_exit=$?
+  _active_producer=""
   set -e
   rm -rf "$_events_dir"
   return "$_go_exit"

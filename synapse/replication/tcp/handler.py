@@ -722,9 +722,18 @@ class ReplicationCommandHandler:
         # `current_token == cmd.prev_token` as "nothing missing" would skip
         # the catch-up fetch below and leave those caches silently stale,
         # even though the id gen (and hence `now_token`) has moved on.
+        #
+        # A `prev_token > new_token` POSITION is itself a reset (see above).
+        # If we're already sat at `current_token == cmd.new_token`, there is
+        # no delta left to fetch -- the reset has already been applied from
+        # our point of view -- regardless of how `prev_token` compares, so we
+        # must not fall through to the `get_updates_since` loop below (that
+        # would ask for an empty, non-advancing range and hit the "fail
+        # closed" check further down).
         missing_updates = not (
             cmd.prev_token == cmd.new_token == current_token
             or cmd.prev_token < current_token <= cmd.new_token
+            or current_token == cmd.new_token
         )
         while missing_updates:
             # Note: There may very well not be any new updates, but we check to
