@@ -167,7 +167,7 @@ main() {
   # Check for a user-specified Complement checkout
   if [[ -z "$COMPLEMENT_DIR" ]]; then
     COMPLEMENT_REF=${COMPLEMENT_REF:-main}
-    COMPLEMENT_REPO=${COMPLEMENT_REPO:-matrix-org/complement}
+    COMPLEMENT_REPO=${COMPLEMENT_REPO:-gamesguru/complement}
     echo "COMPLEMENT_DIR not set. Fetching ${COMPLEMENT_REPO} at ${COMPLEMENT_REF}..." >&2
 
     # Download the Complement checkout at the specified ref.
