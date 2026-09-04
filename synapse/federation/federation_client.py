@@ -23,6 +23,7 @@
 
 import itertools
 import logging
+from json import JSONDecodeError
 from typing import (
     TYPE_CHECKING,
     AbstractSet,
@@ -1559,15 +1560,34 @@ class FederationClient(FederationBase):
             timeout: Max time to wait in ms
         """
         try:
-            content = await self.transport_layer.get_missing_events(
-                destination=destination,
-                room_id=room_id,
-                earliest_events=earliest_events_ids,
-                latest_events=[e.event_id for e in latest_events],
-                limit=limit,
-                min_depth=min_depth,
-                timeout=timeout,
-            )
+            try:
+                content = await self.transport_layer.get_missing_events(
+                    destination=destination,
+                    room_id=room_id,
+                    earliest_events=earliest_events_ids,
+                    latest_events=[e.event_id for e in latest_events],
+                    limit=limit,
+                    min_depth=min_depth,
+                    timeout=timeout,
+                )
+            except RequestSendFailed as e:
+                if not isinstance(e.inner_exception, JSONDecodeError):
+                    raise
+
+                logger.warning(
+                    "Retrying /get_missing_events from %s after malformed JSON",
+                    destination,
+                )
+                content = await self.transport_layer.get_missing_events(
+                    destination=destination,
+                    room_id=room_id,
+                    earliest_events=earliest_events_ids,
+                    latest_events=[e.event_id for e in latest_events],
+                    limit=limit,
+                    min_depth=min_depth,
+                    timeout=timeout,
+                )
+
             received_time = self._clock.time_msec()
 
             room_version = await self.store.get_room_version(room_id)

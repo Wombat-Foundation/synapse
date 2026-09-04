@@ -368,9 +368,12 @@ main() {
   # (The prefix is stripped off before reaching the container.)
   export COMPLEMENT_SHARE_ENV_PREFIX=PASS_
 
-  # * -tags=synapse_blacklist: Enable the `synapse_blacklist` build tag, which is
-  #   necessary for `runtime.Synapse` checks/skips to work in the tests
-  test_tags="synapse_blacklist"
+  # Identify Synapse to Complement's runtime skip registry by default. Set
+  # COMPLEMENT_NO_BLACKLIST=1 to run a diagnostic pass without that registry.
+  test_tags=""
+  if [ -z "${COMPLEMENT_NO_BLACKLIST:-}" ]; then
+    test_tags="synapse_blacklist"
+  fi
 
   # It takes longer than 10m to run the whole suite.
   test_timeout="60m"
@@ -472,10 +475,10 @@ main() {
       _i=$((_i+1))
     elif [[ "$_arg" == "-tags" ]]; then
       local _next=$((_i+1))
-      test_tags="${test_tags},${!_next}"
+      test_tags="${test_tags:+${test_tags},}${!_next}"
       _i=$((_i+2))
     elif [[ "$_arg" =~ ^-tags=(.+) ]]; then
-      test_tags="${test_tags},${BASH_REMATCH[1]}"
+      test_tags="${test_tags:+${test_tags},}${BASH_REMATCH[1]}"
       _i=$((_i+1))
     else
       extra_args+=("$_arg")
