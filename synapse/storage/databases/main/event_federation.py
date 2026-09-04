@@ -311,11 +311,11 @@ class EventFederationWorkerStore(
 
         # A map from chain ID to max sequence number *reachable* from any event ID.
         chains: dict[int, int] = {}
-        embedded_hamt_namespace = (
-            self._embedded_hamt_namespace
-            if getattr(self, "_embedded_hamt_engine", None)
-            else None
+        from synapse.storage.databases.main.embedded_event_auth_chain_links import (
+            resolve_namespace,
         )
+
+        embedded_hamt_namespace = resolve_namespace(self)
         for links in self._get_chain_links(
             txn, set(event_chains.keys()), embedded_hamt_namespace
         ):
@@ -730,11 +730,11 @@ class EventFederationWorkerStore(
         # are reachable from any event.
 
         # (We need to take a copy of `seen_chains` as the function mutates it)
-        embedded_hamt_namespace = (
-            self._embedded_hamt_namespace
-            if getattr(self, "_embedded_hamt_engine", None)
-            else None
+        from synapse.storage.databases.main.embedded_event_auth_chain_links import (
+            resolve_namespace,
         )
+
+        embedded_hamt_namespace = resolve_namespace(self)
         for links in self._get_chain_links(
             txn, set(seen_chains), embedded_hamt_namespace
         ):

@@ -1457,6 +1457,10 @@ class EventsBackgroundUpdatesStore(
         #
         # Annoyingly we need to gut wrench into the persit event store so that
         # we can reuse the function to calculate the chain cover for rooms.
+        from synapse.storage.databases.main.embedded_event_auth_chain_links import (
+            resolve_namespace,
+        )
+
         PersistEventsStore._add_chain_cover_index(
             txn,
             self.db_pool,
@@ -1464,9 +1468,7 @@ class EventsBackgroundUpdatesStore(
             event_to_room_id,
             event_to_types,
             cast(dict[str, StrCollection], event_to_auth_chain),
-            self._embedded_hamt_namespace
-            if getattr(self, "_embedded_hamt_engine", None)
-            else None,
+            resolve_namespace(self),
         )
 
         return _CalculateChainCover(

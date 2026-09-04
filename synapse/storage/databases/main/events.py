@@ -938,6 +938,10 @@ class PersistEventsStore:
         }
         event_to_room_id = {e.event_id: e.room_id for e in state_events}
 
+        from synapse.storage.databases.main.embedded_event_auth_chain_links import (
+            resolve_namespace,
+        )
+
         return self._calculate_chain_cover_index(
             txn,
             self.db_pool,
@@ -945,9 +949,7 @@ class PersistEventsStore:
             event_to_room_id,
             event_to_types,
             event_to_auth_chain,
-            self._embedded_hamt_namespace
-            if getattr(self, "_embedded_hamt_engine", None)
-            else None,
+            resolve_namespace(self),
         )
 
     async def _get_events_which_are_prevs(self, event_ids: Iterable[str]) -> list[str]:
@@ -1241,13 +1243,15 @@ class PersistEventsStore:
         new_event_links: dict[str, NewEventChainLinks],
     ) -> None:
         if new_event_links:
+            from synapse.storage.databases.main.embedded_event_auth_chain_links import (
+                resolve_namespace,
+            )
+
             self._persist_chain_cover_index(
                 txn,
                 self.db_pool,
                 new_event_links,
-                self._embedded_hamt_namespace
-                if getattr(self, "_embedded_hamt_engine", None)
-                else None,
+                resolve_namespace(self),
             )
 
         # We only care about state events, so this if there are no state events.

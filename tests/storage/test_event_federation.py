@@ -801,13 +801,15 @@ class EventFederationWorkerStoreTestCase(tests.unittest.HomeserverTestCase):
         # rather than always writing straight to the SQL table, otherwise
         # this test would only ever check the SQL backend under the
         # trial-mdbx CI job's `embedded_hamt_engine` config.
-        if getattr(self.store, "_embedded_hamt_engine", None):
-            from synapse.storage.databases.main.embedded_event_auth_chain_links import (
-                put_chain_links_batch,
-            )
+        from synapse.storage.databases.main.embedded_event_auth_chain_links import (
+            put_chain_links_batch,
+            resolve_namespace,
+        )
 
+        embedded_hamt_namespace = resolve_namespace(self.store)
+        if embedded_hamt_namespace is not None:
             put_chain_links_batch(
-                self.store._embedded_hamt_namespace,
+                embedded_hamt_namespace,
                 [
                     (
                         link.origin_chain_and_seq[0],

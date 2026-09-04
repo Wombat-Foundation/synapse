@@ -49,6 +49,24 @@ origin_* searches").
 from __future__ import annotations
 
 
+def resolve_namespace(store: object) -> str | None:
+    """The namespace to pass to `put_chain_links_batch`/`get_chain_links_batch`
+    for `store`, or `None` if it should use SQL instead.
+
+    This is the same `_embedded_hamt_namespace if _embedded_hamt_engine else
+    None` check every chain-links call site needs; factored out here so it's
+    defined once rather than re-typed at each of them. `getattr` (not a
+    direct attribute access) because this is called from `@classmethod`s and
+    other contexts where `store` isn't guaranteed to have set these -- see
+    `events.py`/`events_worker.py`'s `__init__` for where they normally are.
+    """
+    return (
+        store._embedded_hamt_namespace  # type: ignore[attr-defined]
+        if getattr(store, "_embedded_hamt_engine", None)
+        else None
+    )
+
+
 def put_chain_links_batch(
     namespace: str, links: list[tuple[int, int, int, int]]
 ) -> None:

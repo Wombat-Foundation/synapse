@@ -490,11 +490,11 @@ class EventChainStoreTestCase(HomeserverTestCase):
         # `event_auth_chain_links` directly) so this test exercises whichever
         # backend -- SQL or the embedded mdbx engine -- is actually
         # configured, instead of only ever checking the SQL table.
-        embedded_hamt_namespace = (
-            self.store._embedded_hamt_namespace
-            if getattr(self.store, "_embedded_hamt_engine", None)
-            else None
+        from synapse.storage.databases.main.embedded_event_auth_chain_links import (
+            resolve_namespace,
         )
+
+        embedded_hamt_namespace = resolve_namespace(self.store)
 
         def _fetch_links_txn(
             txn: LoggingTransaction,
