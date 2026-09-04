@@ -34,6 +34,9 @@ from synapse.rest import admin
 from synapse.rest.client import login, room
 from synapse.server import HomeServer
 from synapse.storage.database import LoggingTransaction
+from synapse.storage.databases.main.embedded_event_auth_chain_links import (
+    resolve_namespace,
+)
 from synapse.storage.databases.main.events import _LinkMap
 from synapse.storage.types import Cursor
 from synapse.types import create_requester
@@ -490,10 +493,6 @@ class EventChainStoreTestCase(HomeserverTestCase):
         # `event_auth_chain_links` directly) so this test exercises whichever
         # backend -- SQL or the embedded mdbx engine -- is actually
         # configured, instead of only ever checking the SQL table.
-        from synapse.storage.databases.main.embedded_event_auth_chain_links import (
-            resolve_namespace,
-        )
-
         embedded_hamt_namespace = resolve_namespace(self.store)
 
         def _fetch_links_txn(
