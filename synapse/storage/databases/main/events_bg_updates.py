@@ -1464,9 +1464,7 @@ class EventsBackgroundUpdatesStore(
             event_to_room_id,
             event_to_types,
             cast(dict[str, StrCollection], event_to_auth_chain),
-            self._embedded_hamt_namespace
-            if getattr(self, "_embedded_hamt_engine", None)
-            else None,
+            None,
         )
 
         return _CalculateChainCover(
@@ -1523,24 +1521,13 @@ class EventsBackgroundUpdatesStore(
             # target_chain_id. Hopefully any purged events are due to a room
             # being fully purged and they will be removed from the origin_*
             # searches.
-            if getattr(self, "_embedded_hamt_engine", None):
-                # Exclusive by configured engine, not a dual-write -- see
-                # embedded_event_auth_chain_links.py.
-                from synapse.storage.databases.main.embedded_event_auth_chain_links import (
-                    delete_chain_links_batch,
-                )
-
-                delete_chain_links_batch(
-                    self._embedded_hamt_namespace, unreferenced_chain_id_tuples
-                )
-            else:
-                txn.executemany(
-                    """
-                    DELETE FROM event_auth_chain_links WHERE
-                    origin_chain_id = ? AND origin_sequence_number = ?
-                    """,
-                    unreferenced_chain_id_tuples,
-                )
+            txn.executemany(
+                """
+                DELETE FROM event_auth_chain_links WHERE
+                origin_chain_id = ? AND origin_sequence_number = ?
+                """,
+                unreferenced_chain_id_tuples,
+            )
 
             progress = {
                 "current_event_id": event_id,

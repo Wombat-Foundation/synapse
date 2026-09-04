@@ -945,9 +945,7 @@ class PersistEventsStore:
             event_to_room_id,
             event_to_types,
             event_to_auth_chain,
-            self._embedded_hamt_namespace
-            if getattr(self, "_embedded_hamt_engine", None)
-            else None,
+            None,
         )
 
     async def _get_events_which_are_prevs(self, event_ids: Iterable[str]) -> list[str]:
@@ -1245,9 +1243,7 @@ class PersistEventsStore:
                 txn,
                 self.db_pool,
                 new_event_links,
-                self._embedded_hamt_namespace
-                if getattr(self, "_embedded_hamt_engine", None)
-                else None,
+                None,
             )
 
         # We only care about state events, so this if there are no state events.
