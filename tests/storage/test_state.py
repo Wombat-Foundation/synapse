@@ -1846,9 +1846,16 @@ class HAMTStructuralKeyRegressionTest(HomeserverTestCase):
         # Golden-value assertions: if these change, the structural hash is no
         # longer derived from the room ID alone (or the encoding changed).
         # This catches regressions where the macaroon secret or another
-        # ambient key leaks into the structural hash.
-        self.assertEqual(len(hash_a), 32)
-        self.assertEqual(len(sg_a), 32)
+        # ambient key leaks into the structural hash -- a mere length check
+        # would pass regardless of what fed the hash, so pin the exact bytes.
+        self.assertEqual(
+            hash_a.hex(),
+            "8dd913b7c06b71b0922167cc5468e40b83617ebbf3789483c05afb312343c32a",
+        )
+        self.assertEqual(
+            sg_a.hex(),
+            "cbd967fa5a267868fd32c3701ef0e9c7afb78b0ace049003701393ee59f903a8",
+        )
 
     def test_room_structural_key_is_sha256_of_room_id(self) -> None:
         import hashlib

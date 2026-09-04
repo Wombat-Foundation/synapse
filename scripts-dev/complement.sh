@@ -776,19 +776,19 @@ trap finish EXIT
 # `finish` above) entirely. This is what used to discard everything staged
 # on Ctrl+C or a dropped terminal. `exit` from here still runs `finish` via
 # the EXIT trap, so these just need the right conventional exit code.
-trap 'exit 130' INT
-trap '
-  # Terminate any active go-test pipeline so it does not outlive
-  # container cleanup.  Clear _active_producer after a successful wait
-  # to avoid signaling a recycled PID later.
+# Terminate any active go-test pipeline so it does not outlive container
+# cleanup. Clear _active_producer after a successful wait to avoid
+# signaling a recycled PID later.
+_kill_active_producer() {
   if [ -n "$_active_producer" ]; then
     kill -- "$_active_producer" 2>/dev/null || true
     wait "$_active_producer" 2>/dev/null || true
     _active_producer=""
   fi
-  exit 143
-' TERM
-trap 'exit 129' HUP
+}
+trap '_kill_active_producer; exit 130' INT
+trap '_kill_active_producer; exit 143' TERM
+trap '_kill_active_producer; exit 129' HUP
 
 # ── Run all patterns ──────────────────────────────────────────────────────────
 for _pattern in "${ALT_PATTERNS[@]}"; do
