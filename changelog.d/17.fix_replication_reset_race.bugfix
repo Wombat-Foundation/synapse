@@ -1,0 +1,1 @@
+Fix a replication `POSITION` reset (`prev_token > new_token`, e.g. after a writer restart) being wrongly treated as having missing updates when the receiver was already caught up to `new_token`. This drove `get_updates_since` into an empty, non-advancing range and tripped the "fail closed" `RuntimeError` added to guard against silently stale stream-change caches.
