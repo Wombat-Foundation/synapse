@@ -596,7 +596,10 @@ record_result() {
   local action="$1" test_name="$2" elapsed="$3"
   jq -nc --arg Action "$action" --arg Test "$test_name" \
     '{Action: $Action, Test: $Test}' >>"$staged_results_file"
-  printf '%s\t%s\t%s\n' "${action^^}" "$test_name" "$elapsed" >&2
+
+  if [ "$action" != "skip" ]; then
+    printf '%s\t%s\t%s\n' "${action^^}" "$test_name" "$elapsed" >&2
+  fi
 }
 
 # ── run_one_pattern: one go test invocation per -run alternative ─────────────
