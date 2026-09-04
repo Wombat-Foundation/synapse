@@ -809,27 +809,6 @@ class EventFederationWorkerStoreTestCase(tests.unittest.HomeserverTestCase):
                 )
             )
 
-        # The production store keeps chain links exclusively in the embedded
-        # engine when HAMT is enabled. Keep this hand-built graph available to
-        # that reader too, so this test exercises both storage backends.
-        if self.store._embedded_hamt_engine:
-            from synapse.storage.databases.main.embedded_event_auth_chain_links import (
-                put_chain_links_batch,
-            )
-
-            put_chain_links_batch(
-                self.store._embedded_hamt_namespace,
-                [
-                    (
-                        link.origin_chain_and_seq[0],
-                        link.origin_chain_and_seq[1],
-                        link.target_chain_and_seq[0],
-                        link.target_chain_and_seq[1],
-                    )
-                    for link in links
-                ],
-            )
-
         # Define the test cases
         class TestCase(NamedTuple):
             name: str
