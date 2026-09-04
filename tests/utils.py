@@ -24,6 +24,7 @@ import logging
 import os
 import signal
 import sys
+import tempfile
 import uuid
 from types import FrameType, TracebackType
 from typing import (
@@ -101,12 +102,19 @@ SQLITE_PERSIST_DB = os.environ.get("SYNAPSE_TEST_PERSIST_SQLITE_DB") is not None
 # whole purpose. mdbx is just a local file, so no "is a server reachable"
 # check is needed here -- config/database.py opens it directly.
 EMBEDDED_HAMT_ENGINE = os.environ.get("SYNAPSE_TEST_EMBEDDED_HAMT_ENGINE")
+if EMBEDDED_HAMT_ENGINE is None:
+    # Unit tests inherit the process environment. If the normal deployment
+    # switch is present, run it against the test-local temporary store rather
+    # than requiring every test invocation to also provide a path.
+    EMBEDDED_HAMT_ENGINE = os.environ.get("SYNAPSE_EMBEDDED_HAMT_ENGINE")
 if EMBEDDED_HAMT_ENGINE is None and os.environ.get("SYNAPSE_MDBX"):
     EMBEDDED_HAMT_ENGINE = "mdbx"
 
 EMBEDDED_HAMT_PATH = os.environ.get("SYNAPSE_TEST_EMBEDDED_HAMT_PATH")
-if EMBEDDED_HAMT_PATH is None and os.environ.get("SYNAPSE_MDBX"):
-    EMBEDDED_HAMT_PATH = "/tmp/synapse-embedded-hamt"
+if EMBEDDED_HAMT_PATH is None:
+    EMBEDDED_HAMT_PATH = os.environ.get("SYNAPSE_EMBEDDED_HAMT_PATH")
+if EMBEDDED_HAMT_PATH is None and EMBEDDED_HAMT_ENGINE:
+    EMBEDDED_HAMT_PATH = tempfile.mkdtemp()
 
 # the dbname we will connect to in order to create the base database.
 POSTGRES_DBNAME_FOR_INITIAL_CREATE = "postgres"
