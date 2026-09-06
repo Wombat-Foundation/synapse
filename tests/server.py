@@ -18,6 +18,7 @@
 # [This file includes modifications made by New Vector Limited]
 #
 #
+import atexit
 import hashlib
 import ipaddress
 import json
@@ -30,6 +31,7 @@ import uuid
 import warnings
 import weakref
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from io import SEEK_END, BytesIO
 from typing import (
     Any,
@@ -127,6 +129,25 @@ CustomHeaderType = tuple[str | bytes, str | bytes]
 # A pre-prepared SQLite DB that is used as a template when creating new SQLite
 # DB each test run. This dramatically speeds up test set up when using SQLite.
 PREPPED_SQLITE_DB_CONN: LoggingDatabaseConnection | None = None
+
+# `DROP DATABASE` for a test's Postgres clone is pure teardown -- nothing
+# about the *next* test depends on this one's database having actually been
+# dropped yet -- but run synchronously it blocks each test's cleanup on a
+# round trip plus (on the rare flaky case) up to 5 retries * 0.5s of
+# sleeping. Dropping in the background off this small pool lets the next
+# test start immediately; `_drain_postgres_test_db_drops` (registered below)
+# blocks at process exit until every queued drop has actually finished, so
+# nothing is silently left behind.
+_POSTGRES_TEST_DB_DROP_POOL = ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="postgres-test-db-drop"
+)
+
+
+def _drain_postgres_test_db_drops() -> None:
+    _POSTGRES_TEST_DB_DROP_POOL.shutdown(wait=True)
+
+
+atexit.register(_drain_postgres_test_db_drops)
 
 
 class TimedOutException(Exception):
@@ -1226,7 +1247,14 @@ def setup_test_homeserver(
                 "user": POSTGRES_USER,
                 "port": POSTGRES_PORT,
                 "cp_min": 1,
-                "cp_max": 5,
+                # `make_fake_db_pool` runs every query synchronously on the
+                # test reactor's main thread (see its docstring), so a given
+                # test never has more than one query in flight at once --
+                # `cp_max` above 1 just means opening (and, on teardown,
+                # closing) connections nothing ever uses, one real
+                # socket-connect + session-setup round trip apiece, times
+                # every test in the suite.
+                "cp_max": 1,
             },
         }
     else:
@@ -1311,7 +1339,7 @@ def setup_test_homeserver(
         cur.close()
         db_conn.close()
 
-        def cleanup() -> None:
+        def drop_test_db() -> None:
             import psycopg2
 
             dropped = False
@@ -1336,6 +1364,7 @@ def setup_test_homeserver(
                     cur.execute("DROP DATABASE IF EXISTS %s;" % (test_db,))
                     db_conn.commit()
                     dropped = True
+                    break
                 except psycopg2.OperationalError as e:
                     warnings.warn(
                         "Couldn't drop old db: " + str(e),
@@ -1353,6 +1382,13 @@ def setup_test_homeserver(
                     category=UserWarning,
                     stacklevel=2,
                 )
+
+        def cleanup() -> None:
+            # Nothing about the *next* test depends on this database having
+            # actually been dropped by the time this test's teardown
+            # returns, so hand it to the background pool instead of
+            # blocking here -- see `_POSTGRES_TEST_DB_DROP_POOL`'s comment.
+            _POSTGRES_TEST_DB_DROP_POOL.submit(drop_test_db)
 
         if not LEAVE_DB:
             # Register the cleanup hook
