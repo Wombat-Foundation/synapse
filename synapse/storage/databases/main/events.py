@@ -950,6 +950,7 @@ class PersistEventsStore:
             event_to_types,
             event_to_auth_chain,
             resolve_namespace(self),
+            self._embedded_hamt_engine,
         )
 
     async def _get_events_which_are_prevs(self, event_ids: Iterable[str]) -> list[str]:
@@ -1252,6 +1253,7 @@ class PersistEventsStore:
                 self.db_pool,
                 new_event_links,
                 resolve_namespace(self),
+                self._embedded_hamt_engine,
             )
 
         # We only care about state events, so this if there are no state events.
@@ -1286,6 +1288,7 @@ class PersistEventsStore:
         event_to_types: dict[str, tuple[str, str]],
         event_to_auth_chain: dict[str, StrCollection],
         embedded_hamt_namespace: str | None,
+        embedded_hamt_engine: str | None,
     ) -> None:
         """Calculate and persist the chain cover index for the given events.
 
@@ -1298,6 +1301,8 @@ class PersistEventsStore:
                 embedded engine is configured, `None` when it isn't -- a
                 `@classmethod` has no `self` of its own, so this can't be
                 recomputed here; see `embedded_event_auth_chain_links.py`.
+            embedded_hamt_engine: the engine name threaded alongside
+                `embedded_hamt_namespace` (same `@classmethod` constraint).
         """
 
         new_event_links = cls._calculate_chain_cover_index(
@@ -1308,9 +1313,10 @@ class PersistEventsStore:
             event_to_types,
             event_to_auth_chain,
             embedded_hamt_namespace,
+            embedded_hamt_engine,
         )
         cls._persist_chain_cover_index(
-            txn, db_pool, new_event_links, embedded_hamt_namespace
+            txn, db_pool, new_event_links, embedded_hamt_namespace, embedded_hamt_engine
         )
 
     @classmethod
@@ -1323,6 +1329,7 @@ class PersistEventsStore:
         event_to_types: dict[str, tuple[str, str]],
         event_to_auth_chain: dict[str, StrCollection],
         embedded_hamt_namespace: str | None,
+        embedded_hamt_engine: str | None,
     ) -> dict[str, NewEventChainLinks]:
         """Calculate the chain cover index for the given events.
 
@@ -1517,6 +1524,7 @@ class PersistEventsStore:
             txn,
             {chain_id for chain_id, _ in chain_map.values()},
             embedded_hamt_namespace,
+            embedded_hamt_engine,
         ):
             for origin_chain_id, inner_links in links.items():
                 for (
@@ -1573,6 +1581,7 @@ class PersistEventsStore:
         db_pool: DatabasePool,
         new_event_links: dict[str, NewEventChainLinks],
         embedded_hamt_namespace: str | None,
+        embedded_hamt_engine: str | None,
     ) -> None:
         db_pool.simple_insert_many_txn(
             txn,
@@ -1610,7 +1619,9 @@ class PersistEventsStore:
                 put_chain_links_batch,
             )
 
-            put_chain_links_batch(embedded_hamt_namespace, chain_links)
+            put_chain_links_batch(
+                embedded_hamt_engine, embedded_hamt_namespace, chain_links
+            )
             return
 
         db_pool.simple_insert_many_txn(
@@ -2921,10 +2932,11 @@ class PersistEventsStore:
         # Postgres stays authoritative, this is a read fast path.
         if self._embedded_event_json_enabled:
             put_event_json_batch(
+                self._embedded_hamt_engine,
                 [
                     (event_id, internal_metadata, json, format_version)
                     for event_id, _room_id, internal_metadata, json, format_version in event_json_rows
-                ]
+                ],
             )
 
         self.db_pool.simple_insert_many_txn(
@@ -3794,7 +3806,9 @@ class PersistEventsStore:
             # event_ids are genuinely new before deciding what to
             # increment.
             existing = get_state_group_for_events_batch(
-                self._embedded_hamt_namespace, list(state_groups.keys())
+                self._embedded_hamt_engine,
+                self._embedded_hamt_namespace,
+                list(state_groups.keys()),
             )
             new_event_ids = [
                 event_id for event_id in state_groups if event_id not in existing
@@ -3805,9 +3819,12 @@ class PersistEventsStore:
                 if state_group_id is not None
             }
             put_event_to_state_group_batch(
-                self._embedded_hamt_namespace, list(non_null_state_groups.items())
+                self._embedded_hamt_engine,
+                self._embedded_hamt_namespace,
+                list(non_null_state_groups.items()),
             )
             increment_state_group_refcounts_batch(
+                self._embedded_hamt_engine,
                 self._embedded_hamt_namespace,
                 [
                     non_null_state_groups[event_id]

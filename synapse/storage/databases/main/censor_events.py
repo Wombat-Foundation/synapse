@@ -178,7 +178,8 @@ class CensorEventsStore(EventsWorkerStore, CacheInvalidationWorkerStore, SQLBase
             )
             internal_metadata, format_version = row
             put_event_json_batch(
-                [(event_id, internal_metadata, pruned_json, format_version)]
+                self._embedded_hamt_engine,
+                [(event_id, internal_metadata, pruned_json, format_version)],
             )
 
     async def expire_event(self, event_id: str) -> None:

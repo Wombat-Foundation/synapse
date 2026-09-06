@@ -1637,7 +1637,7 @@ class EventsWorkerStore(SQLBaseStore):
         found: dict[str, tuple[str, str, int | None]] = {}
         still_missing = event_ids
         if self._embedded_event_json_enabled:
-            found = get_event_json_batch(event_ids)
+            found = get_event_json_batch(self._embedded_hamt_engine, event_ids)
             still_missing = [e for e in event_ids if e not in found]
 
         if still_missing:

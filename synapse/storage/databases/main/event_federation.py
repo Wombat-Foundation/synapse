@@ -317,7 +317,10 @@ class EventFederationWorkerStore(
 
         embedded_hamt_namespace = resolve_namespace(self)
         for links in self._get_chain_links(
-            txn, set(event_chains.keys()), embedded_hamt_namespace
+            txn,
+            set(event_chains.keys()),
+            embedded_hamt_namespace,
+            self._embedded_hamt_engine,
         ):
             for chain_id in links:
                 if chain_id not in event_chains:
@@ -374,6 +377,7 @@ class EventFederationWorkerStore(
         txn: LoggingTransaction,
         chains_to_fetch: set[int],
         embedded_hamt_namespace: str | None,
+        embedded_hamt_engine: str | None,
     ) -> Generator[dict[int, list[tuple[int, int, int]]], None, None]:
         """Fetch all auth chain links from the given set of chains, and all
         links from those chains, recursively.
@@ -388,6 +392,9 @@ class EventFederationWorkerStore(
         embedded engine is configured, `None` when it isn't -- a
         `@classmethod` has no `self` of its own, so this can't be
         recomputed here; see `embedded_event_auth_chain_links.py`.
+
+        `embedded_hamt_engine`: the engine name threaded alongside
+        `embedded_hamt_namespace` (same `@classmethod` constraint).
         """
         if embedded_hamt_namespace is not None:
             # Exclusive by configured engine, not a dual-write. mtxdb has no
@@ -401,7 +408,9 @@ class EventFederationWorkerStore(
             while chains_to_fetch:
                 batch = set(itertools.islice(chains_to_fetch, 1000))
                 chains_to_fetch.difference_update(batch)
-                embedded_links = get_chain_links_batch(embedded_hamt_namespace, batch)
+                embedded_links = get_chain_links_batch(
+                    embedded_hamt_engine, embedded_hamt_namespace, batch
+                )
                 chains_to_fetch.difference_update(embedded_links)
                 yield embedded_links
             return
@@ -736,7 +745,7 @@ class EventFederationWorkerStore(
 
         embedded_hamt_namespace = resolve_namespace(self)
         for links in self._get_chain_links(
-            txn, set(seen_chains), embedded_hamt_namespace
+            txn, set(seen_chains), embedded_hamt_namespace, self._embedded_hamt_engine
         ):
             # `links` encodes the backwards reachable events _from a single chain_ all the way to
             # the root of the graph.

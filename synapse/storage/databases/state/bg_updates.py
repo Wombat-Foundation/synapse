@@ -876,7 +876,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         `_background_migrate_state_hamt_to_embedded`. Only in that bounded,
         explicit window does this fall back to SQL.
         """
-        engine = get_embedded_engine(self.embedded_hamt_engine)
+        engine = get_embedded_engine(getattr(self, "embedded_hamt_engine", None))
         namespace = self.hamt_namespace
         found: dict[int, tuple[bytes, bytes, str]] = {}
         still_missing: list[int] = []
@@ -950,7 +950,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         roots = self._fetch_hamt_roots_for_embedded_txn(txn, groups)
         if not roots:
             return results
-        engine = get_embedded_engine(self.embedded_hamt_engine)
+        engine = get_embedded_engine(getattr(self, "embedded_hamt_engine", None))
         ordered_groups = list(roots.keys())
         materialized = engine.materialize_state_hamts(
             self.hamt_namespace,
@@ -972,7 +972,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         roots = self._fetch_hamt_roots_for_embedded_txn(txn, groups)
         if not roots:
             return results
-        engine = get_embedded_engine(self.embedded_hamt_engine)
+        engine = get_embedded_engine(getattr(self, "embedded_hamt_engine", None))
         ordered_groups = list(roots.keys())
         queries = [
             (room_prefix, root_hash, self._room_structural_key(room_id), keys)

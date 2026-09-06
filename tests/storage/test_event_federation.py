@@ -808,6 +808,7 @@ class EventFederationWorkerStoreTestCase(tests.unittest.HomeserverTestCase):
         embedded_hamt_namespace = resolve_namespace(self.store)
         if embedded_hamt_namespace is not None:
             put_chain_links_batch(
+                getattr(self.store, "_embedded_hamt_engine", None),
                 embedded_hamt_namespace,
                 [
                     (

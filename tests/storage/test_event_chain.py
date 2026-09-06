@@ -503,6 +503,7 @@ class EventChainStoreTestCase(HomeserverTestCase):
                 txn,
                 {chain_id for chain_id, _ in chain_map.values()},
                 embedded_hamt_namespace,
+                getattr(self.store, "_embedded_hamt_engine", None),
             ):
                 for origin_chain_id, values in links.items():
                     for (

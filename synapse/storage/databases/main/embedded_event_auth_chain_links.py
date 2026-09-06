@@ -70,7 +70,9 @@ def resolve_namespace(store: object) -> str | None:
 
 
 def put_chain_links_batch(
-    engine_name: str, namespace: str, links: list[tuple[int, int, int, int]]
+    engine_name: str | None,
+    namespace: str,
+    links: list[tuple[int, int, int, int]],
 ) -> None:
     """`links`: `(origin_chain_id, origin_sequence_number, target_chain_id,
     target_sequence_number)`.
@@ -81,7 +83,7 @@ def put_chain_links_batch(
 
 
 def get_chain_links_batch(
-    engine_name: str, namespace: str, chain_ids: set[int]
+    engine_name: str | None, namespace: str, chain_ids: set[int]
 ) -> dict[int, list[tuple[int, int, int]]]:
     """Returns every edge out of every chain transitively reachable from
     `chain_ids` (following `target_chain_id`), mirroring one batch of
@@ -102,7 +104,9 @@ def get_chain_links_batch(
 
 
 def delete_chain_links_batch(
-    engine_name: str, namespace: str, origin_chain_seq_pairs: list[tuple[int, int]]
+    engine_name: str | None,
+    namespace: str,
+    origin_chain_seq_pairs: list[tuple[int, int]],
 ) -> None:
     """Removes every edge whose `(origin_chain_id, origin_sequence_number)`
     matches one of `origin_chain_seq_pairs` -- the embedded-engine

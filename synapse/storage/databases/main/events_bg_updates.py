@@ -485,6 +485,7 @@ class EventsBackgroundUpdatesStore(
         # migrated last time. Only increment for event_ids this batch
         # hasn't already written to mtxdb.
         already_migrated = get_state_group_for_events_batch(
+            self._embedded_hamt_engine,
             self._embedded_hamt_namespace,
             [event_id for event_id, _state_group in rows],
         )
@@ -493,8 +494,11 @@ class EventsBackgroundUpdatesStore(
             for event_id, state_group in rows
             if event_id not in already_migrated
         ]
-        put_event_to_state_group_batch(self._embedded_hamt_namespace, rows)
+        put_event_to_state_group_batch(
+            self._embedded_hamt_engine, self._embedded_hamt_namespace, rows
+        )
         increment_state_group_refcounts_batch(
+            self._embedded_hamt_engine,
             self._embedded_hamt_namespace,
             [state_group for _event_id, state_group in new_rows],
         )
@@ -585,7 +589,9 @@ class EventsBackgroundUpdatesStore(
             put_chain_links_batch,
         )
 
-        put_chain_links_batch(self._embedded_hamt_namespace, rows)
+        put_chain_links_batch(
+            self._embedded_hamt_engine, self._embedded_hamt_namespace, rows
+        )
 
         (
             last_origin_chain_id,
@@ -1469,6 +1475,7 @@ class EventsBackgroundUpdatesStore(
             event_to_types,
             cast(dict[str, StrCollection], event_to_auth_chain),
             resolve_namespace(self),
+            self._embedded_hamt_engine,
         )
 
         return _CalculateChainCover(
@@ -1535,7 +1542,9 @@ class EventsBackgroundUpdatesStore(
                 # Exclusive by configured engine, not a dual-write -- see
                 # embedded_event_auth_chain_links.py.
                 delete_chain_links_batch(
-                    embedded_hamt_namespace, unreferenced_chain_id_tuples
+                    self._embedded_hamt_engine,
+                    embedded_hamt_namespace,
+                    unreferenced_chain_id_tuples,
                 )
             else:
                 txn.executemany(
@@ -3126,6 +3135,7 @@ class EventsBackgroundUpdatesStore(
                 # signature) JSON forever from the embedded engine.
                 if getattr(self, "_embedded_event_json_enabled", False):
                     put_event_json_batch(
+                        self._embedded_hamt_engine,
                         [
                             (
                                 event_id,
@@ -3134,7 +3144,7 @@ class EventsBackgroundUpdatesStore(
                                 event.format_version,
                             )
                             for event_id, event_dict, event in events_to_write
-                        ]
+                        ],
                     )
             # Always update the progress even if we re-sign nothing.
             self.db_pool.updates._background_update_progress_txn(

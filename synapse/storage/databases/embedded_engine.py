@@ -30,11 +30,14 @@ switching engines (or renaming the module) is a one-file change.
 from types import ModuleType
 
 
-def get_embedded_engine(engine_name: str) -> ModuleType:
+def get_embedded_engine(engine_name: str | None) -> ModuleType:
     """Return the PyO3 module implementing the named embedded HAMT engine.
 
     Args:
         engine_name: the `embedded_hamt.engine` config value (e.g. "mtxdb").
+            Callers only invoke this after gating on the engine being
+            configured, so `None` shouldn't reach here; if it does, it fails
+            loudly below rather than as an AttributeError in a hot path.
 
     Returns:
         The PyO3 submodule exposing the engine's point/batch API.

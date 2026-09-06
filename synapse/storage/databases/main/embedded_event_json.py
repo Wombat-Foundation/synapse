@@ -106,7 +106,7 @@ def _decode_event_json_record(value: bytes) -> tuple[str, str, int | None]:
 
 
 def put_event_json_batch(
-    engine_name: str, rows: list[tuple[str, str, str, int | None]]
+    engine_name: str | None, rows: list[tuple[str, str, str, int | None]]
 ) -> None:
     """`rows`: `(event_id, internal_metadata, json, format_version)`.
     Called from the event persister only (the sole writer of `event_json`),
@@ -125,7 +125,7 @@ def put_event_json_batch(
 
 
 def get_event_json_batch(
-    engine_name: str, event_ids: list[str]
+    engine_name: str | None, event_ids: list[str]
 ) -> dict[str, tuple[str, str, int | None]]:
     """Returns `event_id -> (internal_metadata, json, format_version)` for
     every id found in the embedded engine; a missing id is simply absent
@@ -140,7 +140,7 @@ def get_event_json_batch(
     }
 
 
-def delete_event_json_batch(engine_name: str, event_ids: list[str]) -> None:
+def delete_event_json_batch(engine_name: str | None, event_ids: list[str]) -> None:
     """Removes `event_id`s from the embedded mirror. Must be called wherever
     `event_json` rows are deleted from SQL (purge_events.py) so the mirror
     doesn't retain data the user asked to be purged -- see also

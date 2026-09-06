@@ -57,6 +57,8 @@ import hashlib
 import logging
 import struct
 
+from synapse.storage.databases.embedded_engine import get_embedded_engine
+
 logger = logging.getLogger(__name__)
 
 
@@ -82,7 +84,9 @@ def _state_group_refcount_key(namespace: str, state_group: int) -> bytes:
     )
 
 
-def put_event_to_state_group_batch(namespace: str, rows: list[tuple[str, int]]) -> None:
+def put_event_to_state_group_batch(
+    engine_name: str | None, namespace: str, rows: list[tuple[str, int]]
+) -> None:
     """`rows`: `(event_id, state_group)`. Called both from the event
     persister (initial insert) and from `update_state_for_partial_state_event`
     (in-place rewrite once partial state resolves) -- synchronously, in the
@@ -98,8 +102,6 @@ def put_event_to_state_group_batch(namespace: str, rows: list[tuple[str, int]]) 
     its caller for exactly how the refcount is kept accurate across the
     rewrite).
     """
-    from synapse.synapse_rust import mtxdb_engine
-
     pairs = [
         (
             _event_to_state_group_key(namespace, event_id),
@@ -107,20 +109,18 @@ def put_event_to_state_group_batch(namespace: str, rows: list[tuple[str, int]]) 
         )
         for event_id, state_group in rows
     ]
-    mtxdb_engine.batch_put(pairs)
+    get_embedded_engine(engine_name).batch_put(pairs)
 
 
 def get_state_group_for_events_batch(
-    namespace: str, event_ids: list[str]
+    engine_name: str | None, namespace: str, event_ids: list[str]
 ) -> dict[str, int]:
     """Returns `event_id -> state_group` for every id found in the embedded
     engine; a missing id is simply absent from the result.
     """
-    from synapse.synapse_rust import mtxdb_engine
-
     keys = [_event_to_state_group_key(namespace, event_id) for event_id in event_ids]
     key_to_event_id = dict(zip(keys, event_ids))
-    found = mtxdb_engine.batch_get(keys)
+    found = get_embedded_engine(engine_name).batch_get(keys)
     out = {}
     for key, value in found:
         value = bytes(value)
@@ -131,7 +131,9 @@ def get_state_group_for_events_batch(
     return out
 
 
-def delete_event_to_state_group_batch(namespace: str, event_ids: list[str]) -> None:
+def delete_event_to_state_group_batch(
+    engine_name: str | None, namespace: str, event_ids: list[str]
+) -> None:
     """Removes `event_id`s from the embedded mirror. Must be called wherever
     `event_to_state_groups` rows are purged, alongside
     `decrement_state_group_refcounts_batch` for the state groups they
@@ -139,14 +141,12 @@ def delete_event_to_state_group_batch(namespace: str, event_ids: list[str]) -> N
     """
     if not event_ids:
         return
-    from synapse.synapse_rust import mtxdb_engine
-
     keys = [_event_to_state_group_key(namespace, event_id) for event_id in event_ids]
-    mtxdb_engine.batch_delete(keys)
+    get_embedded_engine(engine_name).batch_delete(keys)
 
 
 def increment_state_group_refcounts_batch(
-    namespace: str, state_groups: list[int]
+    engine_name: str | None, namespace: str, state_groups: list[int]
 ) -> None:
     """Adds +1 to each listed state group's reference count (repeats count
     multiple times, e.g. `[5, 5, 7]` adds 2 to group 5's count and 1 to
@@ -156,8 +156,6 @@ def increment_state_group_refcounts_batch(
     """
     if not state_groups:
         return
-    from synapse.synapse_rust import mtxdb_engine
-
     counts: dict[int, int] = {}
     for state_group in state_groups:
         counts[state_group] = counts.get(state_group, 0) + 1
@@ -165,11 +163,11 @@ def increment_state_group_refcounts_batch(
         (_state_group_refcount_key(namespace, state_group), delta)
         for state_group, delta in counts.items()
     ]
-    mtxdb_engine.increment_counters_batch(pairs)
+    get_embedded_engine(engine_name).increment_counters_batch(pairs)
 
 
 def decrement_state_group_refcounts_batch(
-    namespace: str, state_groups: list[int]
+    engine_name: str | None, namespace: str, state_groups: list[int]
 ) -> None:
     """The inverse of `increment_state_group_refcounts_batch` -- call once
     per purged `(event_id, state_group)` mapping. Never lets a counter go
@@ -179,8 +177,6 @@ def decrement_state_group_refcounts_batch(
     """
     if not state_groups:
         return
-    from synapse.synapse_rust import mtxdb_engine
-
     counts: dict[int, int] = {}
     for state_group in state_groups:
         counts[state_group] = counts.get(state_group, 0) + 1
@@ -188,11 +184,11 @@ def decrement_state_group_refcounts_batch(
         (_state_group_refcount_key(namespace, state_group), -delta)
         for state_group, delta in counts.items()
     ]
-    mtxdb_engine.increment_counters_batch(pairs)
+    get_embedded_engine(engine_name).increment_counters_batch(pairs)
 
 
 def get_referenced_state_groups_batch(
-    namespace: str, state_groups: list[int]
+    engine_name: str | None, namespace: str, state_groups: list[int]
 ) -> set[int]:
     """Returns the subset of `state_groups` whose reference count is > 0 --
     the embedded-engine equivalent of the SQL `get_referenced_state_groups`
@@ -200,14 +196,12 @@ def get_referenced_state_groups_batch(
     """
     if not state_groups:
         return set()
-    from synapse.synapse_rust import mtxdb_engine
-
     keys = [
         _state_group_refcount_key(namespace, state_group)
         for state_group in state_groups
     ]
     key_to_group = dict(zip(keys, state_groups))
-    found = mtxdb_engine.batch_get(keys)
+    found = get_embedded_engine(engine_name).batch_get(keys)
     referenced = set()
     for key, value in found:
         value = bytes(value)
