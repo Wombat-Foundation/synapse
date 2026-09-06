@@ -75,9 +75,9 @@ def put_chain_links_batch(
     """
     if not links:
         return
-    from synapse.synapse_rust import mdbx_engine
+    from synapse.synapse_rust import mtxdb_engine
 
-    mdbx_engine.put_auth_chain_links_batch(namespace, links)
+    mtxdb_engine.put_auth_chain_links_batch(namespace, links)
 
 
 def get_chain_links_batch(
@@ -94,9 +94,9 @@ def get_chain_links_batch(
     """
     if not chain_ids:
         return {}
-    from synapse.synapse_rust import mdbx_engine
+    from synapse.synapse_rust import mtxdb_engine
 
-    return dict(mdbx_engine.get_auth_chain_links_batch(namespace, list(chain_ids)))
+    return dict(mtxdb_engine.get_auth_chain_links_batch(namespace, list(chain_ids)))
 
 
 def delete_chain_links_batch(
@@ -110,6 +110,6 @@ def delete_chain_links_batch(
     """
     if not origin_chain_seq_pairs:
         return
-    from synapse.synapse_rust import mdbx_engine
+    from synapse.synapse_rust import mtxdb_engine
 
-    mdbx_engine.delete_auth_chain_links_batch(namespace, origin_chain_seq_pairs)
+    mtxdb_engine.delete_auth_chain_links_batch(namespace, origin_chain_seq_pairs)

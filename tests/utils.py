@@ -112,8 +112,11 @@ SQLITE_PERSIST_DB = os.environ.get("SYNAPSE_TEST_PERSIST_SQLITE_DB") is not None
 # honoured here. SYNAPSE_TEST_MDBX is a shorthand alias for the common case
 # of just wanting the mdbx engine, without spelling out the engine name.
 EMBEDDED_HAMT_ENGINE = os.environ.get("SYNAPSE_TEST_EMBEDDED_HAMT_ENGINE")
-if EMBEDDED_HAMT_ENGINE is None and os.environ.get("SYNAPSE_TEST_MDBX"):
-    EMBEDDED_HAMT_ENGINE = "mdbx"
+if EMBEDDED_HAMT_ENGINE is None:
+    if os.environ.get("SYNAPSE_TEST_MDBX"):
+        EMBEDDED_HAMT_ENGINE = "mdbx"
+    elif os.environ.get("SYNAPSE_TEST_MTXDB"):
+        EMBEDDED_HAMT_ENGINE = "mtxdb"
 
 EMBEDDED_HAMT_PATH = os.environ.get("SYNAPSE_TEST_EMBEDDED_HAMT_PATH")
 if EMBEDDED_HAMT_PATH is None and EMBEDDED_HAMT_ENGINE:

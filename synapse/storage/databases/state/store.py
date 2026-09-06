@@ -21,6 +21,7 @@
 
 import logging
 import time
+from types import ModuleType
 from typing import (
     TYPE_CHECKING,
     Iterable,
@@ -63,6 +64,19 @@ if TYPE_CHECKING:
     from synapse.storage.databases.state.deletion import StateDeletionDataStore
 
 logger = logging.getLogger(__name__)
+
+
+def _get_embedded_engine(engine_name: str) -> ModuleType:
+    """Return the PyO3 module for the configured embedded HAMT engine."""
+    if engine_name == "mdbx":
+        from synapse.synapse_rust import mdbx_engine
+
+        return mdbx_engine
+    elif engine_name == "mtxdb":
+        from synapse.synapse_rust import mtxdb_engine
+
+        return mtxdb_engine
+    raise RuntimeError(f"Unknown embedded_hamt_engine: {engine_name!r}")
 
 
 class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
@@ -146,22 +160,22 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             # benchmark (point reads, batch reads) and needs no worker-
             # process bridge (native multi-process mmap access), so fjall
             # was dropped rather than kept as a second maintained option.
-            if self.embedded_hamt_engine != "mdbx":
+            if self.embedded_hamt_engine not in ("mdbx", "mtxdb"):
                 raise RuntimeError(
                     f"Unknown embedded_hamt_engine: {self.embedded_hamt_engine!r} "
-                    "(only 'mdbx' is supported)"
+                    "(only 'mdbx' or 'mtxdb' is supported)"
                 )
             try:
-                from synapse.synapse_rust import mdbx_engine
-
-                mdbx_engine.open_client(self.embedded_hamt_path)
+                engine = _get_embedded_engine(self.embedded_hamt_engine)
+                engine.open_client(self.embedded_hamt_path)
                 logger.info(
-                    "Opened embedded mdbx engine at %s for state HAMT offload",
+                    "Opened embedded %s engine at %s for state HAMT offload",
+                    self.embedded_hamt_engine,
                     self.embedded_hamt_path,
                 )
             except Exception as e:
                 raise RuntimeError(
-                    f"Failed to open embedded mdbx engine at {self.embedded_hamt_path}"
+                    f"Failed to open embedded {self.embedded_hamt_engine} engine at {self.embedded_hamt_path}"
                 ) from e
 
             if hs.config.database.embedded_hamt_namespace:
@@ -268,7 +282,10 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             )
             return 0
 
-        from synapse.synapse_rust import mdbx_engine, state_hamt
+        from synapse.synapse_rust import state_hamt
+
+        assert self.embedded_hamt_engine is not None
+        engine = _get_embedded_engine(self.embedded_hamt_engine)
 
         def migrate_one_txn(
             txn: LoggingTransaction,
@@ -300,7 +317,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                         bytes(child)
                         for child in state_hamt.node_child_hashes(node_bytes)
                     )
-            mdbx_engine.put_state_hamt_nodes(
+            engine.put_state_hamt_nodes(
                 self.hamt_namespace, room_prefix, list(nodes.items())
             )
             if lattice:
@@ -686,7 +703,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         # owns it instead. _store_state_hamt_nodes_txn already makes this
         # same choice for nodes.
         self._store_state_hamt_nodes_txn(txn, room_prefix, nodes)
-        if self.embedded_hamt_engine == "mdbx":
+        if self.embedded_hamt_engine in ("mdbx", "mtxdb"):
             self._store_state_hamt_root_embedded_txn(
                 state_group, room_prefix, root_structural_hash, root_lattice, room_id
             )
@@ -745,7 +762,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         else:
             prev_root_hash = None
             prev_lattice = None
-            mdbx_active = self.embedded_hamt_engine == "mdbx"
+            mdbx_active = self.embedded_hamt_engine in ("mdbx", "mtxdb")
             if mdbx_active:
                 embedded_root = self._get_embedded_hamt_root(prev_state_group)
                 if embedded_root is not None:
@@ -775,7 +792,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         if root_node_bytes is None:
             root_node_bytes = self._get_embedded_hamt_node(room_prefix, prev_root_hash)
         if root_node_bytes is None and (
-            self.embedded_hamt_engine != "mdbx"
+            self.embedded_hamt_engine not in ("mdbx", "mtxdb")
             or self._embedded_hamt_migration_pending_txn(txn)
         ):
             root_node_bytes = self.db_pool.simple_select_one_onecol_txn(
@@ -852,7 +869,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         new_root_hash, _new_state_group_id, new_lattice, new_nodes = applied
 
         self._store_state_hamt_nodes_txn(txn, room_prefix, new_nodes)
-        if self.embedded_hamt_engine == "mdbx":
+        if self.embedded_hamt_engine in ("mdbx", "mtxdb"):
             self._store_state_hamt_root_embedded_txn(
                 state_group, room_prefix, new_root_hash, new_lattice, room_id
             )
@@ -889,10 +906,9 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         # embedded engine's materialize/lookup BFS walk actually looks up --
         # a plain `batch_put` keyed by the raw structural_hash would be
         # invisible to it.
-        if self.embedded_hamt_engine == "mdbx":
-            from synapse.synapse_rust import mdbx_engine
-
-            mdbx_engine.put_state_hamt_nodes(self.hamt_namespace, room_prefix, nodes)
+        if self.embedded_hamt_engine in ("mdbx", "mtxdb"):
+            engine = _get_embedded_engine(self.embedded_hamt_engine)
+            engine.put_state_hamt_nodes(self.hamt_namespace, room_prefix, nodes)
             return
 
         txn.executemany(
@@ -923,11 +939,11 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         """Point lookup of a single HAMT root's `(root_hash, lattice)` in
         the embedded engine, if configured. Returns `None` on a miss.
         """
-        if self.embedded_hamt_engine != "mdbx":
+        if self.embedded_hamt_engine not in ("mdbx", "mtxdb"):
             return None
-        from synapse.synapse_rust import mdbx_engine
+        engine = _get_embedded_engine(self.embedded_hamt_engine)
 
-        (record,) = mdbx_engine.batch_get_state_hamt_roots(
+        (record,) = engine.batch_get_state_hamt_roots(
             self.hamt_namespace, [state_group]
         )
         if record is None:
@@ -947,13 +963,13 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         SQL. Returns `None` on a miss (caller falls back), never raises for
         a missing key.
         """
-        if self.embedded_hamt_engine != "mdbx":
+        if self.embedded_hamt_engine not in ("mdbx", "mtxdb"):
             return None
-        from synapse.synapse_rust import mdbx_engine
+        engine = _get_embedded_engine(self.embedded_hamt_engine)
 
         key = _state_hamt_node_key(self.hamt_namespace, room_prefix, node_hash)
-        value = mdbx_engine.get(key)
-        return bytes(value) if value is not None else None
+        results = engine.batch_get([key])
+        return bytes(results[0][1]) if results else None
 
     def _get_embedded_hamt_nodes_batch(
         self, room_prefix: bytes, node_hashes: list[bytes]
@@ -963,15 +979,15 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         result, same self-healing shape as `embedded_event_json`'s
         `get_event_json_batch`.
         """
-        if self.embedded_hamt_engine != "mdbx" or not node_hashes:
+        if self.embedded_hamt_engine not in ("mdbx", "mtxdb") or not node_hashes:
             return {}
-        from synapse.synapse_rust import mdbx_engine
+        engine = _get_embedded_engine(self.embedded_hamt_engine)
 
         key_to_hash = {
             _state_hamt_node_key(self.hamt_namespace, room_prefix, node_hash): node_hash
             for node_hash in node_hashes
         }
-        found = mdbx_engine.batch_get(list(key_to_hash))
+        found = engine.batch_get(list(key_to_hash))
         return {key_to_hash[bytes(key)]: bytes(value) for key, value in found}
 
     def _store_state_hamt_root_embedded_txn(
@@ -999,10 +1015,9 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         root_value = _encode_state_hamt_root(
             room_prefix, root_hash, lattice, room_id=room_id
         )
-        if self.embedded_hamt_engine == "mdbx":
-            from synapse.synapse_rust import mdbx_engine
-
-            mdbx_engine.put(root_key, root_value)
+        if self.embedded_hamt_engine in ("mdbx", "mtxdb"):
+            engine = _get_embedded_engine(self.embedded_hamt_engine)
+            engine.batch_put([(root_key, root_value)])
 
     async def _background_backfill_state_hamt_roots(
         self, progress: dict, batch_size: int
@@ -1082,15 +1097,14 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         # a good root with an empty one. Skip anything the embedded engine
         # already has.
         already_embedded: set[int] = set()
-        if self.embedded_hamt_engine == "mdbx":
-            from synapse.synapse_rust import mdbx_engine
-
+        if self.embedded_hamt_engine in ("mdbx", "mtxdb"):
+            engine = _get_embedded_engine(self.embedded_hamt_engine)
             state_groups = [state_group for state_group, _ in rows]
             already_embedded = {
                 state_group
                 for state_group, record in zip(
                     state_groups,
-                    mdbx_engine.batch_get_state_hamt_roots(
+                    engine.batch_get_state_hamt_roots(
                         self.hamt_namespace, state_groups
                     ),
                 )
@@ -1490,12 +1504,11 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             room_id,
             state_groups_to_sequence_numbers,
         )
-        if self.embedded_hamt_engine == "mdbx" and state_groups:
-            from synapse.synapse_rust import mdbx_engine
-
+        if self.embedded_hamt_engine in ("mdbx", "mtxdb") and state_groups:
+            engine = _get_embedded_engine(self.embedded_hamt_engine)
             await defer_to_thread(
                 self.hs.get_reactor(),
-                mdbx_engine.batch_delete,
+                engine.batch_delete,
                 [
                     _state_hamt_root_key(self.hamt_namespace, int(state_group))
                     for state_group in state_groups
@@ -1664,7 +1677,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             self._purge_room_state_txn,
             room_id,
         )
-        if self.embedded_hamt_engine == "mdbx":
+        if self.embedded_hamt_engine in ("mdbx", "mtxdb"):
             await self._drain_embedded_state_hamt_root_deletion_queue()
 
     @wrap_as_background_process("drain_embedded_state_hamt_root_deletion_queue")
@@ -1672,10 +1685,10 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         """Delete queued embedded-engine roots after their SQL state groups
         are purged."""
 
-        if self.embedded_hamt_engine != "mdbx":
+        if self.embedded_hamt_engine not in ("mdbx", "mtxdb"):
             return
 
-        from synapse.synapse_rust import mdbx_engine
+        engine = _get_embedded_engine(self.embedded_hamt_engine)
 
         while True:
 
@@ -1698,7 +1711,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             try:
                 await defer_to_thread(
                     self.hs.get_reactor(),
-                    mdbx_engine.batch_delete,
+                    engine.batch_delete,
                     [
                         _state_hamt_root_key(self.hamt_namespace, state_group)
                         for state_group in state_groups
@@ -1747,7 +1760,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         if not deleted_state_groups:
             return []
 
-        if self.embedded_hamt_engine == "mdbx":
+        if self.embedded_hamt_engine in ("mdbx", "mtxdb"):
             # Persist a retry record in the same transaction as the SQL purge.
             # If the embedded engine write fails after commit, its root keys
             # can still be removed on a later retry instead of being lost

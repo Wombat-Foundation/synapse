@@ -155,10 +155,13 @@ class DatabaseConfig(Config):
                 "Set embedded_hamt.engine (or SYNAPSE_EMBEDDED_HAMT_ENGINE) to "
                 "'mdbx', or remove the path setting."
             )
-        if self.embedded_hamt_engine and self.embedded_hamt_engine != "mdbx":
+        if self.embedded_hamt_engine and self.embedded_hamt_engine not in (
+            "mdbx",
+            "mtxdb",
+        ):
             raise ConfigError(
                 f"embedded_hamt.engine is {self.embedded_hamt_engine!r}, "
-                "but only 'mdbx' is supported."
+                "but only 'mdbx' or 'mtxdb' is supported."
             )
 
         if multi_database_config and database_config:

@@ -112,7 +112,7 @@ def put_event_json_batch(
     `_store_state_hamt_root_embedded_txn`: an mdbx call is local, no
     network round-trip to justify deferring past commit.
     """
-    from synapse.synapse_rust import mdbx_engine
+    from synapse.synapse_rust import mtxdb_engine
 
     pairs = [
         (
@@ -121,7 +121,7 @@ def put_event_json_batch(
         )
         for event_id, internal_metadata, json, format_version in rows
     ]
-    mdbx_engine.batch_put(pairs)
+    mtxdb_engine.batch_put(pairs)
 
 
 def get_event_json_batch(
@@ -131,11 +131,11 @@ def get_event_json_batch(
     every id found in the embedded engine; a missing id is simply absent
     from the result (the caller falls back to SQL for it).
     """
-    from synapse.synapse_rust import mdbx_engine
+    from synapse.synapse_rust import mtxdb_engine
 
     keys = [_event_json_key(event_id) for event_id in event_ids]
     key_to_event_id = dict(zip(keys, event_ids))
-    found = mdbx_engine.batch_get(keys)
+    found = mtxdb_engine.batch_get(keys)
     return {
         key_to_event_id[bytes(key)]: _decode_event_json_record(bytes(value))
         for key, value in found
@@ -151,7 +151,7 @@ def delete_event_json_batch(event_ids: list[str]) -> None:
     """
     if not event_ids:
         return
-    from synapse.synapse_rust import mdbx_engine
+    from synapse.synapse_rust import mtxdb_engine
 
     keys = [_event_json_key(event_id) for event_id in event_ids]
-    mdbx_engine.batch_delete(keys)
+    mtxdb_engine.batch_delete(keys)

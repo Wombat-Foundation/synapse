@@ -98,7 +98,7 @@ def put_event_to_state_group_batch(namespace: str, rows: list[tuple[str, int]]) 
     its caller for exactly how the refcount is kept accurate across the
     rewrite).
     """
-    from synapse.synapse_rust import mdbx_engine
+    from synapse.synapse_rust import mtxdb_engine
 
     pairs = [
         (
@@ -107,7 +107,7 @@ def put_event_to_state_group_batch(namespace: str, rows: list[tuple[str, int]]) 
         )
         for event_id, state_group in rows
     ]
-    mdbx_engine.batch_put(pairs)
+    mtxdb_engine.batch_put(pairs)
 
 
 def get_state_group_for_events_batch(
@@ -116,11 +116,11 @@ def get_state_group_for_events_batch(
     """Returns `event_id -> state_group` for every id found in the embedded
     engine; a missing id is simply absent from the result.
     """
-    from synapse.synapse_rust import mdbx_engine
+    from synapse.synapse_rust import mtxdb_engine
 
     keys = [_event_to_state_group_key(namespace, event_id) for event_id in event_ids]
     key_to_event_id = dict(zip(keys, event_ids))
-    found = mdbx_engine.batch_get(keys)
+    found = mtxdb_engine.batch_get(keys)
     out = {}
     for key, value in found:
         value = bytes(value)
@@ -139,10 +139,10 @@ def delete_event_to_state_group_batch(namespace: str, event_ids: list[str]) -> N
     """
     if not event_ids:
         return
-    from synapse.synapse_rust import mdbx_engine
+    from synapse.synapse_rust import mtxdb_engine
 
     keys = [_event_to_state_group_key(namespace, event_id) for event_id in event_ids]
-    mdbx_engine.batch_delete(keys)
+    mtxdb_engine.batch_delete(keys)
 
 
 def increment_state_group_refcounts_batch(
@@ -156,7 +156,7 @@ def increment_state_group_refcounts_batch(
     """
     if not state_groups:
         return
-    from synapse.synapse_rust import mdbx_engine
+    from synapse.synapse_rust import mtxdb_engine
 
     counts: dict[int, int] = {}
     for state_group in state_groups:
@@ -165,7 +165,7 @@ def increment_state_group_refcounts_batch(
         (_state_group_refcount_key(namespace, state_group), delta)
         for state_group, delta in counts.items()
     ]
-    mdbx_engine.increment_counters_batch(pairs)
+    mtxdb_engine.increment_counters_batch(pairs)
 
 
 def decrement_state_group_refcounts_batch(
@@ -179,7 +179,7 @@ def decrement_state_group_refcounts_batch(
     """
     if not state_groups:
         return
-    from synapse.synapse_rust import mdbx_engine
+    from synapse.synapse_rust import mtxdb_engine
 
     counts: dict[int, int] = {}
     for state_group in state_groups:
@@ -188,7 +188,7 @@ def decrement_state_group_refcounts_batch(
         (_state_group_refcount_key(namespace, state_group), -delta)
         for state_group, delta in counts.items()
     ]
-    mdbx_engine.increment_counters_batch(pairs)
+    mtxdb_engine.increment_counters_batch(pairs)
 
 
 def get_referenced_state_groups_batch(
@@ -200,14 +200,14 @@ def get_referenced_state_groups_batch(
     """
     if not state_groups:
         return set()
-    from synapse.synapse_rust import mdbx_engine
+    from synapse.synapse_rust import mtxdb_engine
 
     keys = [
         _state_group_refcount_key(namespace, state_group)
         for state_group in state_groups
     ]
     key_to_group = dict(zip(keys, state_groups))
-    found = mdbx_engine.batch_get(keys)
+    found = mtxdb_engine.batch_get(keys)
     referenced = set()
     for key, value in found:
         value = bytes(value)

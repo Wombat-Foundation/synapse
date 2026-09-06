@@ -89,8 +89,8 @@ class DatabaseConfigTestCase(unittest.TestCase):
                 embedded_hamt={"path": "/tmp/test.mdbx"},
             )
 
-    def test_engine_not_mdbx_raises(self) -> None:
-        """engine set to a non-mdbx value → ConfigError."""
+    def test_engine_unsupported_raises(self) -> None:
+        """engine set to an unsupported value → ConfigError."""
         from synapse.config._base import ConfigError
 
         with self.assertRaises(ConfigError):
