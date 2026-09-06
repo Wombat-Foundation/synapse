@@ -83,15 +83,36 @@ class Databases(Generic[DataStoreT]):
             db_name = database_config.name
             engine = create_engine(database_config.config)
 
+            import os as _os
+            import time as _time
+
+            _pgt = (
+                (
+                    lambda tag, dt: __import__(
+                        "tests.server", fromlist=["_pg_timing"]
+                    )._pg_timing(tag, dt)
+                )
+                if _os.environ.get("SYNAPSE_PG_TIMINGS")
+                else None
+            )
+
+            _conn_t = _time.monotonic()
             with make_conn(
                 db_config=database_config,
                 engine=engine,
                 default_txn_name="startup",
                 server_name=server_name,
             ) as db_conn:
+                if _pgt is not None:
+                    _pgt("make_conn", _time.monotonic() - _conn_t)
+
+                _t = _time.monotonic()
                 logger.info("[database config %r]: Checking database server", db_name)
                 engine.check_database(db_conn)
+                if _pgt is not None:
+                    _pgt("check_database", _time.monotonic() - _t)
 
+                _t = _time.monotonic()
                 logger.info(
                     "[database config %r]: Preparing for databases %r",
                     db_name,
@@ -103,6 +124,8 @@ class Databases(Generic[DataStoreT]):
                     hs.config,
                     databases=database_config.databases,
                 )
+                if _pgt is not None:
+                    _pgt("prepare_database", _time.monotonic() - _t)
 
                 database = DatabasePool(hs, database_config, engine)
 
