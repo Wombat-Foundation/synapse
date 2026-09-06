@@ -106,6 +106,13 @@ class DatabaseConfigTestCase(unittest.TestCase):
         self.assertEqual(dc.embedded_hamt_engine, "mdbx")
         self.assertEqual(dc.embedded_hamt_path, "/tmp/test.mdbx")
 
+    def test_engine_mtxdb_ok(self) -> None:
+        """engine set to 'mtxdb' with a path → no error."""
+        dc = self._read_config(
+            embedded_hamt={"engine": "mtxdb", "path": "/tmp/test"},
+        )
+        self.assertEqual(dc.embedded_hamt_engine, "mtxdb")
+
     def test_neither_set_ok(self) -> None:
         """engine + path both unset → no error."""
         dc = self._read_config()

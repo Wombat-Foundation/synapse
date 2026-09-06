@@ -284,8 +284,9 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
 
         from synapse.synapse_rust import state_hamt
 
-        assert self.embedded_hamt_engine is not None
-        engine = _get_embedded_engine(self.embedded_hamt_engine)
+        engine_name = self.embedded_hamt_engine
+        assert engine_name is not None
+        engine = _get_embedded_engine(engine_name)
 
         def migrate_one_txn(
             txn: LoggingTransaction,

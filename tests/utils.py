@@ -99,24 +99,24 @@ POSTGRES_BASE_DB = "_synapse_unit_tests_base_%s" % (os.getpid(),)
 SQLITE_PERSIST_DB = os.environ.get("SYNAPSE_TEST_PERSIST_SQLITE_DB") is not None
 
 # When set, every test homeserver runs its HAMT state store through the
-# embedded engine (mdbx) instead of plain SQL -- the trial-mdbx CI job's
-# whole purpose. mdbx is just a local file, so no "is a server reachable"
-# check is needed here -- config/database.py opens it directly.
+# embedded engine (mdbx or mtxdb) instead of plain SQL -- the trial-embedded
+# CI job's whole purpose. The embedded engine is just a local file, so no
+# "is a server reachable" check is needed here -- config/database.py opens
+# it directly.
 #
 # Deliberately *not* falling back to the bare deployment switches
 # (SYNAPSE_EMBEDDED_HAMT_ENGINE / SYNAPSE_EMBEDDED_HAMT_PATH / SYNAPSE_MDBX):
 # unit tests inherit the process environment, and a shell configured for
 # running a real homeserver (e.g. SYNAPSE_EMBEDDED_HAMT_PATH pointing at a
-# production mdbx store) must not have `trial` silently open and mutate
-# that store. Only the SYNAPSE_TEST_-prefixed, test-only variables are
-# honoured here. SYNAPSE_TEST_MDBX is a shorthand alias for the common case
-# of just wanting the mdbx engine, without spelling out the engine name.
+# production store) must not have `trial` silently open and mutate that
+# store. Only the SYNAPSE_TEST_-prefixed, test-only variables are honoured
+# here. SYNAPSE_TEST_MDBX / SYNAPSE_TEST_MTXDB are shorthand aliases for
+# the common case of just wanting an engine, without spelling out the name.
 EMBEDDED_HAMT_ENGINE = os.environ.get("SYNAPSE_TEST_EMBEDDED_HAMT_ENGINE")
-if EMBEDDED_HAMT_ENGINE is None:
-    if os.environ.get("SYNAPSE_TEST_MDBX"):
-        EMBEDDED_HAMT_ENGINE = "mdbx"
-    elif os.environ.get("SYNAPSE_TEST_MTXDB"):
-        EMBEDDED_HAMT_ENGINE = "mtxdb"
+if EMBEDDED_HAMT_ENGINE is None and os.environ.get("SYNAPSE_TEST_MTXDB"):
+    EMBEDDED_HAMT_ENGINE = "mtxdb"
+elif EMBEDDED_HAMT_ENGINE is None and os.environ.get("SYNAPSE_TEST_MDBX"):
+    EMBEDDED_HAMT_ENGINE = "mdbx"
 
 EMBEDDED_HAMT_PATH = os.environ.get("SYNAPSE_TEST_EMBEDDED_HAMT_PATH")
 if EMBEDDED_HAMT_PATH is None and EMBEDDED_HAMT_ENGINE:
