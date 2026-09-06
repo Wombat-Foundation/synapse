@@ -73,7 +73,7 @@ class StateStoreTestCase(HomeserverTestCase):
         test that specifically wants SQL must force it off locally rather
         than assume it's already off).
         """
-        self.state_datastore.embedded_hamt_engine = None
+        self.state_datastore._embedded_hamt_engine = None
 
     def inject_state_event(
         self, room: RoomID, sender: UserID, typ: str, state_key: str, content: JsonDict
@@ -174,8 +174,8 @@ class StateStoreTestCase(HomeserverTestCase):
         tmpdir = tempfile.mkdtemp(prefix="test-embedded-mtxdb-")
         self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
         mtxdb_engine.open_client(tmpdir)
-        self.state_datastore.embedded_hamt_engine = "mtxdb"
-        self.state_datastore.embedded_hamt_path = tmpdir
+        self.state_datastore._embedded_hamt_engine = "mtxdb"
+        self.state_datastore._embedded_hamt_path = tmpdir
 
         e1 = self.inject_state_event(self.room, self.u_alice, EventTypes.Create, "", {})
         e2 = self.inject_state_event(
@@ -229,8 +229,8 @@ class StateStoreTestCase(HomeserverTestCase):
         tmpdir = tempfile.mkdtemp(prefix="test-exclusive-write-mtxdb-")
         self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
         mtxdb_engine.open_client(tmpdir)
-        self.state_datastore.embedded_hamt_engine = "mtxdb"
-        self.state_datastore.embedded_hamt_path = tmpdir
+        self.state_datastore._embedded_hamt_engine = "mtxdb"
+        self.state_datastore._embedded_hamt_path = tmpdir
 
         event = self.inject_state_event(
             self.room, self.u_alice, EventTypes.Create, "", {}
@@ -312,8 +312,8 @@ class StateStoreTestCase(HomeserverTestCase):
         tmpdir = tempfile.mkdtemp(prefix="test-hamt-migration-mtxdb-")
         self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
         mtxdb_engine.open_client(tmpdir)
-        self.state_datastore.embedded_hamt_engine = "mtxdb"
-        self.state_datastore.embedded_hamt_path = tmpdir
+        self.state_datastore._embedded_hamt_engine = "mtxdb"
+        self.state_datastore._embedded_hamt_path = tmpdir
 
         with patch.object(
             self.store.db_pool.updates, "start_doing_background_updates"
@@ -377,8 +377,8 @@ class StateStoreTestCase(HomeserverTestCase):
         tmpdir = tempfile.mkdtemp(prefix="test-embedded-root-mtxdb-")
         self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
         mtxdb_engine.open_client(tmpdir)
-        self.state_datastore.embedded_hamt_engine = "mtxdb"
-        self.state_datastore.embedded_hamt_path = tmpdir
+        self.state_datastore._embedded_hamt_engine = "mtxdb"
+        self.state_datastore._embedded_hamt_path = tmpdir
 
         e1 = self.inject_state_event(self.room, self.u_alice, EventTypes.Create, "", {})
         e2 = self.inject_state_event(

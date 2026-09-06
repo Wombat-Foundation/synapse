@@ -468,7 +468,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         # falling back to `state_hamt_roots`/`state_groups` SQL only for a
         # group it doesn't have. Always use the bulk path (it degrades to a
         # single-root fetch fine for len(groups) == 1).
-        use_embedded = bool(getattr(self, "embedded_hamt_engine", None))
+        use_embedded = bool(getattr(self, "_embedded_hamt_engine", None))
 
         bulk_results: dict[int, list[tuple[str, str, str]] | None] | None = None
         bulk_selective_results: dict[int, list[tuple[str, str, str]] | None] | None = (
@@ -876,8 +876,8 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         `_background_migrate_state_hamt_to_embedded`. Only in that bounded,
         explicit window does this fall back to SQL.
         """
-        engine = get_embedded_engine(getattr(self, "embedded_hamt_engine", None))
-        namespace = self.hamt_namespace
+        engine = get_embedded_engine(getattr(self, "_embedded_hamt_engine", None))
+        namespace = getattr(self, "_embedded_hamt_namespace", None)
         found: dict[int, tuple[bytes, bytes, str]] = {}
         still_missing: list[int] = []
         # One batched Rust call instead of an N-iteration Python for loop
@@ -950,10 +950,10 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         roots = self._fetch_hamt_roots_for_embedded_txn(txn, groups)
         if not roots:
             return results
-        engine = get_embedded_engine(getattr(self, "embedded_hamt_engine", None))
+        engine = get_embedded_engine(getattr(self, "_embedded_hamt_engine", None))
         ordered_groups = list(roots.keys())
         materialized = engine.materialize_state_hamts(
-            self.hamt_namespace,
+            getattr(self, "_embedded_hamt_namespace", None),
             [roots[group] for group in ordered_groups],
         )
         for group, entries in zip(ordered_groups, materialized):
@@ -972,13 +972,15 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         roots = self._fetch_hamt_roots_for_embedded_txn(txn, groups)
         if not roots:
             return results
-        engine = get_embedded_engine(getattr(self, "embedded_hamt_engine", None))
+        engine = get_embedded_engine(getattr(self, "_embedded_hamt_engine", None))
         ordered_groups = list(roots.keys())
         queries = [
             (room_prefix, root_hash, self._room_structural_key(room_id), keys)
             for room_prefix, root_hash, room_id in (roots[g] for g in ordered_groups)
         ]
-        looked_up = engine.lookup_state_hamts(self.hamt_namespace, queries)
+        looked_up = engine.lookup_state_hamts(
+            getattr(self, "_embedded_hamt_namespace", None), queries
+        )
         for group, entries in zip(ordered_groups, looked_up):
             results[group] = entries
         return results
