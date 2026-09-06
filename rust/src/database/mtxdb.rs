@@ -60,7 +60,14 @@ impl NodeStore for MtxdbStore {
                 .engine
                 .get(&room_id, &node_id)
                 .map_err(|e| e.to_string())?;
-            Ok(result.map(|data| data.bytes.to_vec()))
+            // Treat empty-byte tombstones (from batch_delete) as absent.
+            Ok(result.and_then(|data| {
+                if data.bytes.is_empty() {
+                    None
+                } else {
+                    Some(data.bytes.to_vec())
+                }
+            }))
         } else {
             // Treat anything else (e.g., hamt:root:... keys) as a global KV lookup
             let room_id = kv_room_id();
@@ -69,7 +76,13 @@ impl NodeStore for MtxdbStore {
                 .engine
                 .get(&room_id, &node_id)
                 .map_err(|e| e.to_string())?;
-            Ok(result.map(|data| data.bytes.to_vec()))
+            Ok(result.and_then(|data| {
+                if data.bytes.is_empty() {
+                    None
+                } else {
+                    Some(data.bytes.to_vec())
+                }
+            }))
         }
     }
 }
@@ -237,10 +250,15 @@ pub fn put_auth_chain_links_batch(
 
         for (chain_id, new_edges) in grouped {
             let node_id = chain_node_id(chain_id);
-            let mut edges = if let Ok(Some(data)) = engine.get(&room_id, &node_id) {
-                deserialize_manifest(&data.bytes)
-            } else {
-                Vec::new()
+            let mut edges = match engine.get(&room_id, &node_id) {
+                Ok(Some(data)) => deserialize_manifest(&data.bytes),
+                Ok(None) => Vec::new(),
+                Err(e) => {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "mtxdb get error reading chain {}: {}",
+                        chain_id, e
+                    )))
+                }
             };
             edges.extend(new_edges);
             let bytes = serialize_manifest(&edges);
@@ -534,14 +552,17 @@ pub fn increment_counters_batch(py: Python<'_>, pairs: Vec<(Vec<u8>, i64)>) -> P
 
         for (key, delta) in pairs {
             let node_id = kv_node_id(&key);
-            let current = if let Ok(Some(data)) = engine.get(&room_id, &node_id) {
-                if data.bytes.len() == 8 {
+            let current = match engine.get(&room_id, &node_id) {
+                Ok(Some(data)) if data.bytes.len() == 8 => {
                     i64::from_be_bytes(data.bytes.as_ref().try_into().unwrap())
-                } else {
-                    0
                 }
-            } else {
-                0
+                Ok(Some(_)) | Ok(None) => 0,
+                Err(e) => {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "mtxdb get error reading counter: {}",
+                        e
+                    )))
+                }
             };
             let new_value = current + delta;
             results.push(new_value);
