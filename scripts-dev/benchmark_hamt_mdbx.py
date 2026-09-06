@@ -17,7 +17,7 @@ import statistics
 import tempfile
 import time
 
-from synapse.synapse_rust import mdbx_engine
+from synapse.synapse_rust import mtxdb_engine
 
 NODE_SIZE = 512
 CORPUS_SIZE = 2_000_000
@@ -41,13 +41,13 @@ def percentiles(samples: list[float]) -> tuple[float, float]:
 def main() -> None:
     tmpdir = tempfile.mkdtemp(prefix="hamt-mdbx-bench-")
     try:
-        mdbx_engine.open_client(tmpdir)
+        mtxdb_engine.open_client(tmpdir)
         rng = random.Random(0)
         print(f"corpus: {CORPUS_SIZE:,} nodes x {NODE_SIZE}B\n")
 
         start = time.perf_counter()
         rows = rand_rows(rng, CORPUS_SIZE)
-        mdbx_engine.batch_put(rows)
+        mtxdb_engine.batch_put(rows)
         elapsed = time.perf_counter() - start
         print(
             f"mdbx  bulk-load {CORPUS_SIZE:,} rows in {elapsed:6.2f}s ({CORPUS_SIZE / elapsed:,.0f} rows/s)"
@@ -60,7 +60,7 @@ def main() -> None:
             for _ in range(READ_ITERATIONS):
                 batch = sample_rng.sample(keys_pool, batch_size)
                 start = time.perf_counter()
-                mdbx_engine.batch_get(batch)
+                mtxdb_engine.batch_get(batch)
                 samples.append(time.perf_counter() - start)
             p50, p99 = percentiles(samples)
             print(
@@ -71,7 +71,7 @@ def main() -> None:
         for _ in range(COMMIT_ITERATIONS):
             commit_batch = rand_rows(rng, COMMIT_BATCH_SIZE)
             start = time.perf_counter()
-            mdbx_engine.transactional_batch_put(commit_batch)
+            mtxdb_engine.transactional_batch_put(commit_batch)
             commit_samples.append(time.perf_counter() - start)
         p50, p99 = percentiles(commit_samples)
         print(

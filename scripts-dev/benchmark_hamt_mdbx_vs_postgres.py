@@ -34,7 +34,7 @@ from typing import Callable
 import psycopg2
 import psycopg2.extras
 
-from synapse.synapse_rust import mdbx_engine
+from synapse.synapse_rust import mtxdb_engine
 
 NODE_SIZE = 512
 CORPUS_SIZE = 2_000_000
@@ -94,21 +94,21 @@ def bench_commit(
 def run_mdbx() -> tuple[dict[int, tuple[float, float]], tuple[float, float]]:
     tmpdir = tempfile.mkdtemp(prefix="hamt-mdbx-bench-")
     try:
-        mdbx_engine.open_client(tmpdir)
+        mtxdb_engine.open_client(tmpdir)
         rng = random.Random(0)
         print(f"\n=== mdbx: corpus {CORPUS_SIZE:,} nodes x {NODE_SIZE}B ===")
 
         rows = rand_rows(rng, CORPUS_SIZE)
         start = time.perf_counter()
-        mdbx_engine.batch_put(rows)
+        mtxdb_engine.batch_put(rows)
         elapsed = time.perf_counter() - start
         print(
             f"mdbx  bulk-load {CORPUS_SIZE:,} rows in {elapsed:6.2f}s ({CORPUS_SIZE / elapsed:,.0f} rows/s)"
         )
 
         keys_pool = [h for h, _ in rows[:20000]]
-        reads = bench_reads("mdbx", mdbx_engine.batch_get, keys_pool)
-        commit = bench_commit("mdbx", mdbx_engine.transactional_batch_put, rng)
+        reads = bench_reads("mdbx", mtxdb_engine.batch_get, keys_pool)
+        commit = bench_commit("mdbx", mtxdb_engine.transactional_batch_put, rng)
         return reads, commit
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)

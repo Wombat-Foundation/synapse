@@ -11,7 +11,7 @@ persistent-typed-hamt-architecture.md for the historical comparison).
 
 Unlike the HAMT benchmark, this needs no materialize/BFS walk -- event_json
 rows don't reference each other, so the plain put/get/batch_get/batch_put
-surface (already exposed by mdbx_engine) is the whole engine API surface
+surface (already exposed by mtxdb_engine) is the whole engine API surface
 needed here.
 
 Keys: 44-byte strings, matching real event_id length (`$` + 43-char
@@ -41,7 +41,7 @@ from typing import Callable
 import psycopg2
 import psycopg2.extras
 
-from synapse.synapse_rust import mdbx_engine
+from synapse.synapse_rust import mtxdb_engine
 
 CUMULATIVE_SIZES = (200_000, 2_000_000)
 READ_BATCH_SIZES = (1, 20, 100)
@@ -237,7 +237,7 @@ def run_embedded(name: str, engine: object) -> None:
 def main() -> None:
     print(f"cumulative sizes: {CUMULATIVE_SIZES}, event_json-shaped payloads\n")
     print("--- mdbx ---")
-    run_embedded("mdbx", mdbx_engine)
+    run_embedded("mdbx", mtxdb_engine)
     print("\n--- postgres ---")
     run_postgres()
 

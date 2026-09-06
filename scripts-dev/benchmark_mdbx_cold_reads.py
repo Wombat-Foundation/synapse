@@ -65,7 +65,7 @@ def evict_database_pages(database_dir: Path) -> None:
 def seed(database_dir: Path, keys_path: Path, rows: int, value_size: int) -> None:
     # Import here so the coordinator process never owns the process-global MDBX
     # environment. This process exits immediately after building the corpus.
-    from synapse.synapse_rust import mdbx_engine
+    from synapse.synapse_rust import mtxdb_engine
 
     rng = random.Random(0)
     entries: list[tuple[bytes, bytes]] = []
@@ -75,19 +75,19 @@ def seed(database_dir: Path, keys_path: Path, rows: int, value_size: int) -> Non
             keys.write(key)
             entries.append((key, rng.randbytes(value_size)))
 
-    mdbx_engine.open_client(str(database_dir))
-    mdbx_engine.batch_put(entries)
+    mtxdb_engine.open_client(str(database_dir))
+    mtxdb_engine.batch_put(entries)
 
 
 def measure(database_dir: Path, key: bytes) -> None:
     # Time only the lookup. Opening the environment happens before the timer,
     # but it may itself fault metadata pages and is intentionally part of the
     # cold-cache setup, just as a restarted Synapse worker would do.
-    from synapse.synapse_rust import mdbx_engine
+    from synapse.synapse_rust import mtxdb_engine
 
-    mdbx_engine.open_client(str(database_dir))
+    mtxdb_engine.open_client(str(database_dir))
     started = time.perf_counter_ns()
-    value = mdbx_engine.get(key)
+    value = mtxdb_engine.get(key)
     elapsed_us = (time.perf_counter_ns() - started) / 1_000
     if value is None:
         raise RuntimeError("seeded key was not found")

@@ -77,7 +77,6 @@ once_cell = "1.18.0"
 lru = "0.12"
 itertools = "0.14.0"
 rezzy ={ git = "https://github.com/gamesguru/rezzy.git", rev = "82c9078f69297fe81cecf12516af71236e398712" }
-libmdbx = "0.6.6"
 mtxdb = { git = "https://gitlab.com/wombat-foundation/mtxdb.git", rev = "244df45d7fe4260bf78f7a3c902ad428fe837d51" }
 
 [build-dependencies]

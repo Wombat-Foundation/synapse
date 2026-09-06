@@ -98,7 +98,6 @@ class DatabaseConfigTestCase(unittest.TestCase):
                 embedded_hamt={"engine": "unknown_engine", "path": "/tmp/test"},
             )
 
-
     def test_engine_mtxdb_ok(self) -> None:
         """engine set to 'mtxdb' with a path → no error."""
         dc = self._read_config(
