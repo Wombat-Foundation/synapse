@@ -225,7 +225,7 @@ def run_embedded(name: str, engine: object) -> None:
                 engine.batch_get(keys)  # type: ignore[attr-defined]
 
             def commit_write(rows: list[tuple[bytes, bytes]]) -> None:
-                engine.transactional_batch_put(rows)  # type: ignore[attr-defined]
+                engine.batch_put(rows)  # type: ignore[attr-defined]
 
             for batch_size in READ_BATCH_SIZES:
                 bench_reads(name, target, batch_size, batch_fetch, keys_pool)

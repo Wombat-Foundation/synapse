@@ -87,9 +87,9 @@ def measure(database_dir: Path, key: bytes) -> None:
 
     mtxdb_engine.open_client(str(database_dir))
     started = time.perf_counter_ns()
-    value = mtxdb_engine.batch_get([key])
+    results = mtxdb_engine.batch_get([key])
     elapsed_us = (time.perf_counter_ns() - started) / 1_000
-    if not value:
+    if not results:
         raise RuntimeError("seeded key was not found")
     print(json.dumps({"elapsed_us": elapsed_us}))
 
