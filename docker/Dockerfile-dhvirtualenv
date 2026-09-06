@@ -98,6 +98,9 @@ RUN mkdir /rust /cargo
 
 RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --default-toolchain stable --profile minimal
 
+# mtxdb uses #![feature(...)] which requires RUSTC_BOOTSTRAP on stable.
+ENV RUSTC_BOOTSTRAP=1
+
 
 COPY --from=builder /dh-virtualenv_1.2.2-1_all.deb /
 
