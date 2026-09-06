@@ -405,13 +405,25 @@ class EventFederationWorkerStore(
                 get_chain_links_batch,
             )
 
+            # `get_chain_links_batch` is a flat batch-get, not a BFS -- it
+            # only returns edges *out of* the chain IDs it's given, not the
+            # transitive closure. So unlike the SQL `WITH RECURSIVE` below,
+            # the walk has to happen here: every `target_chain_id` we
+            # discover is a new chain that might have further edges out of
+            # it, so it goes back into `chains_to_fetch` (unless already
+            # seen) unless this loop is to stop after one hop.
+            seen_chains = set(chains_to_fetch)
             while chains_to_fetch:
                 batch = set(itertools.islice(chains_to_fetch, 1000))
                 chains_to_fetch.difference_update(batch)
                 embedded_links = get_chain_links_batch(
                     embedded_hamt_engine, embedded_hamt_namespace, batch
                 )
-                chains_to_fetch.difference_update(embedded_links)
+                for edges in embedded_links.values():
+                    for _origin_seq, target_chain_id, _target_seq in edges:
+                        if target_chain_id not in seen_chains:
+                            seen_chains.add(target_chain_id)
+                            chains_to_fetch.add(target_chain_id)
                 yield embedded_links
             return
 

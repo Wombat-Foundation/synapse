@@ -455,6 +455,10 @@ main() {
     export PASS_SYNAPSE_EMBEDDED_HAMT_PATH="$SYNAPSE_EMBEDDED_HAMT_PATH"
   fi
 
+  if [[ -n "$PASS_SYNAPSE_EMBEDDED_HAMT_ENGINE" ]]; then
+    echo "Embedded HAMT engine: ${PASS_SYNAPSE_EMBEDDED_HAMT_ENGINE} at ${PASS_SYNAPSE_EMBEDDED_HAMT_PATH:-<not set>}" >&2
+  fi
+
   # ── Run-filter and extra-tags from remaining args ───────────────────────────
   # RUN_TESTS=. means "run everything" (the default).
   # -run PATTERN and -run=PATTERN are extracted for package narrowing + anchoring.

@@ -121,6 +121,12 @@ if EMBEDDED_HAMT_PATH is None and EMBEDDED_HAMT_ENGINE:
     EMBEDDED_HAMT_PATH = tempfile.mkdtemp()
     atexit.register(shutil.rmtree, EMBEDDED_HAMT_PATH, ignore_errors=True)
 
+if EMBEDDED_HAMT_ENGINE:
+    print(
+        f"Embedded HAMT engine: {EMBEDDED_HAMT_ENGINE} at {EMBEDDED_HAMT_PATH}",
+        file=sys.stderr,
+    )
+
 # the dbname we will connect to in order to create the base database.
 POSTGRES_DBNAME_FOR_INITIAL_CREATE = "postgres"
 

@@ -20,15 +20,14 @@ by configured engine, not a dual-write, same as `embedded_event_to_state_group.p
 Unlike `event_to_state_groups`, this table is not a point lookup: its real
 usage is `_get_chain_links`'s recursive walk ("all chains transitively
 reachable from this set, and every edge out of each"), which SQL answers
-with `WITH RECURSIVE`. mtxdb has no recursive-query primitive, and this walk
-runs on every state-resolution conflict -- a real hot path -- so the BFS,
-key encoding, and scan all live in Rust
-(`rust/src/database/mtxdb.rs`'s `get_auth_chain_links_batch` et al., key
-layout in `rust/src/database/core.rs`) rather than being reimplemented in
-Python calling `scan_prefix` in a loop: that would pay one FFI round trip
-per chain visited during the walk, exactly the kind of per-item overhead
-this project keeps out of hot paths (see `batch_get_state_hamt_roots`'s
-docstring for the same reasoning applied to HAMT root lookups). This module
+with `WITH RECURSIVE`. mtxdb has no recursive-query primitive, so
+`get_chain_links_batch` here is a flat batch-get -- one round trip per
+*layer* of the walk, not per chain -- and `_get_chain_links` in
+`event_federation.py` drives the BFS itself, adding each newly-discovered
+`target_chain_id` back into the next batch. This keeps the per-item cost
+out of the hot loop (see `batch_get_state_hamt_roots`'s docstring for the
+same reasoning applied to HAMT root lookups) while still doing the
+transitive walk in Python, since mtxdb can't do it in one call. This module
 is accordingly a thin pass-through, not an independent implementation --
 the key format only needs to agree with itself, in one place.
 
@@ -85,10 +84,12 @@ def put_chain_links_batch(
 def get_chain_links_batch(
     engine_name: str | None, namespace: str, chain_ids: set[int]
 ) -> dict[int, list[tuple[int, int, int]]]:
-    """Returns every edge out of every chain transitively reachable from
-    `chain_ids` (following `target_chain_id`), mirroring one batch of
-    `_get_chain_links`'s `WITH RECURSIVE` walk: `chain_id -> [(origin_seq,
-    target_chain_id, target_seq), ...]`.
+    """Returns every edge out of exactly the given `chain_ids` (following
+    `target_chain_id`), *not* the transitive closure: `chain_id ->
+    [(origin_seq, target_chain_id, target_seq), ...]`. `_get_chain_links`
+    drives the transitive walk by feeding each call's discovered
+    `target_chain_id`s back in as the next call's `chain_ids`, mirroring
+    what the SQL `WITH RECURSIVE` does in one query.
 
     Like the SQL version, this may return links not reachable from the
     *events* the caller ultimately cares about -- it returns everything
