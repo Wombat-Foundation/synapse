@@ -24,6 +24,7 @@ concurrency:
 env:
   RUST_VERSION: 1.87.0
   UV_HTTP_RETRIES: 5
+  RUSTC_BOOTSTRAP: "1"
 
 jobs:
   check_repo:

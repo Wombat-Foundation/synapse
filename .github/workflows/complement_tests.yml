@@ -20,6 +20,7 @@ permissions:
 env:
   RUST_VERSION: 1.87.0
   UV_HTTP_RETRIES: 5
+  RUSTC_BOOTSTRAP: "1"
   DOCKER_BUILD_ARGS: "--cache-from=type=gha --cache-to=type=gha,mode=max"
   COMPLEMENT_REPO: "gamesguru/complement"
 
