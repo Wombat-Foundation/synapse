@@ -22,7 +22,6 @@
 import atexit
 import logging
 import os
-import shutil
 import signal
 import sys
 import tempfile
@@ -119,7 +118,6 @@ if EMBEDDED_HAMT_ENGINE is None and os.environ.get("SYNAPSE_TEST_MTXDB"):
 EMBEDDED_HAMT_PATH = os.environ.get("SYNAPSE_TEST_EMBEDDED_HAMT_PATH")
 if EMBEDDED_HAMT_PATH is None and EMBEDDED_HAMT_ENGINE:
     EMBEDDED_HAMT_PATH = tempfile.mkdtemp()
-    atexit.register(shutil.rmtree, EMBEDDED_HAMT_PATH, ignore_errors=True)
 
 if EMBEDDED_HAMT_ENGINE:
     print(
