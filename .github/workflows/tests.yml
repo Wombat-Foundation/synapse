@@ -14,7 +14,6 @@ concurrency:
 env:
   RUST_VERSION: 1.87.0
   UV_HTTP_RETRIES: 5
-  RUSTC_BOOTSTRAP: "1"
   # This nightly is roughly the last to be branded 1.87.0.
   #
   # We know this, as 1.87.0 was branched from master on 2025-03-28. Shortly
