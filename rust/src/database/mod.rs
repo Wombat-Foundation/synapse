@@ -13,10 +13,12 @@
 
 pub mod core;
 pub mod mdbx;
+pub mod mtxdb;
 
 use pyo3::prelude::*;
 
 pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     mdbx::register_module(py, m)?;
+    mtxdb::register_module(py, m)?;
     Ok(())
 }

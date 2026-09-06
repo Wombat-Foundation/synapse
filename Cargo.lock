@@ -221,6 +221,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "crc32fast"
+version = "1.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8498c871161e1742aaa9d52551b2d6ebdd4c3d45a3be423e3728f33b955be550"
+dependencies = [
+ "cfg-if",
+]
+
+[[package]]
 name = "crypto-common"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -995,6 +1004,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
+name = "memmap2"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "43a5a03cefb0d953ec0be133036f14e109412fa594edc2f77227249db66cc3ed"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1015,6 +1033,17 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "mtxdb"
+version = "0.1.0"
+source = "git+https://gitlab.com/wombat-foundation/mtxdb.git?rev=af49a650f3adf4a4de8956d261e50a962020cb77#af49a650f3adf4a4de8956d261e50a962020cb77"
+dependencies = [
+ "bytes",
+ "crc32fast",
+ "memmap2",
+ "parking_lot",
 ]
 
 [[package]]
@@ -1775,6 +1804,7 @@ dependencies = [
  "log",
  "lru",
  "mime",
+ "mtxdb",
  "once_cell",
  "pyo3",
  "pyo3-log",
