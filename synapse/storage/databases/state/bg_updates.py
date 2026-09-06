@@ -31,6 +31,7 @@ from typing import (
 
 from synapse.logging.opentracing import tag_args, trace
 from synapse.storage._base import SQLBaseStore
+from synapse.storage.databases.embedded_engine import get_embedded_engine
 from synapse.storage.database import (
     DatabasePool,
     LoggingDatabaseConnection,
@@ -862,25 +863,6 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         )
         return results
 
-    def _embedded_hamt_engine_module(self) -> ModuleType:
-        """Returns the configured embedded HAMT engine PyO3 module.
-
-        Nodes are content-addressed and immutable, so
-        `materialize_state_hamts`/`lookup_state_hamts` can walk the tree
-        itself in Rust -- unlike the SQL path above, no per-node round trip
-        back into Python is needed here.
-        """
-        engine = getattr(self, "embedded_hamt_engine", None)
-        if engine == "mtxdb":
-            from synapse.synapse_rust import mtxdb_engine
-
-            return mtxdb_engine
-        elif engine == "mtxdb":
-            from synapse.synapse_rust import mtxdb_engine
-
-            return mtxdb_engine
-        raise RuntimeError(f"Unknown embedded_hamt_engine: {engine!r}")
-
     def _fetch_hamt_roots_for_embedded_txn(
         self, txn: LoggingTransaction, groups: list[int]
     ) -> dict[int, tuple[bytes, bytes, str]]:
@@ -895,7 +877,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         `_background_migrate_state_hamt_to_embedded`. Only in that bounded,
         explicit window does this fall back to SQL.
         """
-        engine = self._embedded_hamt_engine_module()
+        engine = get_embedded_engine(self.embedded_hamt_engine)
         namespace = self.hamt_namespace
         found: dict[int, tuple[bytes, bytes, str]] = {}
         still_missing: list[int] = []

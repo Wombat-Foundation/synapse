@@ -296,7 +296,7 @@ class PurgeEventsStore(StateGroupWorkerStore, CacheInvalidationWorkerStore):
             # Exclusive by configured engine, not a dual-write -- see
             # embedded_event_to_state_group.py. This is the *forward*
             # lookup (event_id -> state_group) for exactly the event_ids in
-            # this purge batch's temp table, which mdbx answers directly;
+            # this purge batch's temp table, which mtxdb answers directly;
             # it is not the reverse "is state_group X still referenced
             # elsewhere" question (that's get_referenced_state_groups,
             # backed by the separate refcount).
@@ -361,7 +361,7 @@ class PurgeEventsStore(StateGroupWorkerStore, CacheInvalidationWorkerStore):
         # The `event_json` DELETE above only removed the SQL rows; the
         # embedded mirror (if any) has its own copy under `event_json:<id>`
         # keys that must be removed too, or purged events keep serving their
-        # pre-purge content forever from mdbx -- see embedded_event_json.py.
+        # pre-purge content forever from mtxdb -- see embedded_event_json.py.
         if getattr(self, "_embedded_event_json_enabled", False):
             delete_event_json_batch(
                 [event_id for event_id, should_delete in event_rows if should_delete]
@@ -581,7 +581,7 @@ class PurgeEventsStore(StateGroupWorkerStore, CacheInvalidationWorkerStore):
             # embedded_event_auth_chain_links.py. The `LEFT JOIN` above can
             # yield `(None, None)` for events with no chain cover entry
             # (e.g. non-state events); a raw SQL `WHERE origin_chain_id =
-            # NULL` matches nothing harmlessly, but building an mdbx key
+            # NULL` matches nothing harmlessly, but building an mtxdb key
             # from `None` would crash, so filter those out explicitly.
             from synapse.storage.databases.main.embedded_event_auth_chain_links import (
                 delete_chain_links_batch,

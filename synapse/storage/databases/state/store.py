@@ -21,7 +21,6 @@
 
 import logging
 import time
-from types import ModuleType
 from typing import (
     TYPE_CHECKING,
     Iterable,
@@ -54,6 +53,7 @@ from synapse.storage.engines import PostgresEngine
 from synapse.storage.types import Cursor
 from synapse.storage.util.sequence import build_sequence_generator
 from synapse.types import MutableStateMap, StateKey, StateMap
+from synapse.storage.databases.embedded_engine import get_embedded_engine
 from synapse.types.state import StateFilter
 from synapse.util.caches.dictionary_cache import DictionaryCache
 from synapse.util.cancellation import cancellable
@@ -64,20 +64,6 @@ if TYPE_CHECKING:
     from synapse.storage.databases.state.deletion import StateDeletionDataStore
 
 logger = logging.getLogger(__name__)
-
-
-def _get_embedded_engine(engine_name: str) -> ModuleType:
-    """Return the PyO3 module for the configured embedded HAMT engine.
-
-    Add new engine backends here as elif branches. The caller resolves the
-    engine name from config and threads the returned module into leaf
-    functions -- no global state, no ambient imports.
-    """
-    if engine_name == "mtxdb":
-        from synapse.synapse_rust import mtxdb_engine
-
-        return mtxdb_engine
-    raise RuntimeError(f"Unknown embedded_hamt_engine: {engine_name!r}")
 
 
 class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
@@ -164,10 +150,10 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             if self.embedded_hamt_engine != "mtxdb":
                 raise RuntimeError(
                     f"Unknown embedded_hamt_engine: {self.embedded_hamt_engine!r} "
-                    "(only 'mdbx' or 'mtxdb' is supported)"
+                    "(only 'mtxdb' is supported)"
                 )
             try:
-                engine = _get_embedded_engine(self.embedded_hamt_engine)
+                engine = get_embedded_engine(self.embedded_hamt_engine)
                 engine.open_client(self.embedded_hamt_path)
                 logger.info(
                     "Opened embedded %s engine at %s for state HAMT offload",
@@ -287,7 +273,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
 
         engine_name = self.embedded_hamt_engine
         assert engine_name is not None
-        engine = _get_embedded_engine(engine_name)
+        engine = get_embedded_engine(engine_name)
 
         def migrate_one_txn(
             txn: LoggingTransaction,
@@ -909,7 +895,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         # a plain `batch_put` keyed by the raw structural_hash would be
         # invisible to it.
         if self.embedded_hamt_engine == "mtxdb":
-            engine = _get_embedded_engine(self.embedded_hamt_engine)
+            engine = get_embedded_engine(self.embedded_hamt_engine)
             engine.put_state_hamt_nodes(self.hamt_namespace, room_prefix, nodes)
             return
 
@@ -943,7 +929,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         """
         if self.embedded_hamt_engine != "mtxdb":
             return None
-        engine = _get_embedded_engine(self.embedded_hamt_engine)
+        engine = get_embedded_engine(self.embedded_hamt_engine)
 
         (record,) = engine.batch_get_state_hamt_roots(
             self.hamt_namespace, [state_group]
@@ -967,7 +953,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         """
         if self.embedded_hamt_engine != "mtxdb":
             return None
-        engine = _get_embedded_engine(self.embedded_hamt_engine)
+        engine = get_embedded_engine(self.embedded_hamt_engine)
 
         key = _state_hamt_node_key(self.hamt_namespace, room_prefix, node_hash)
         results = engine.batch_get([key])
@@ -983,7 +969,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         """
         if self.embedded_hamt_engine != "mtxdb" or not node_hashes:
             return {}
-        engine = _get_embedded_engine(self.embedded_hamt_engine)
+        engine = get_embedded_engine(self.embedded_hamt_engine)
 
         key_to_hash = {
             _state_hamt_node_key(self.hamt_namespace, room_prefix, node_hash): node_hash
@@ -1018,7 +1004,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             room_prefix, root_hash, lattice, room_id=room_id
         )
         if self.embedded_hamt_engine == "mtxdb":
-            engine = _get_embedded_engine(self.embedded_hamt_engine)
+            engine = get_embedded_engine(self.embedded_hamt_engine)
             engine.batch_put([(root_key, root_value)])
 
     async def _background_backfill_state_hamt_roots(
@@ -1100,7 +1086,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         # already has.
         already_embedded: set[int] = set()
         if self.embedded_hamt_engine == "mtxdb":
-            engine = _get_embedded_engine(self.embedded_hamt_engine)
+            engine = get_embedded_engine(self.embedded_hamt_engine)
             state_groups = [state_group for state_group, _ in rows]
             already_embedded = {
                 state_group
@@ -1294,9 +1280,9 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             state_group_iter = iter(state_groups)
             hamt_writes: list[tuple[int, bytes, bytes, list[tuple[bytes, bytes]]]] = []
             # Nodes for state groups persisted earlier *in this same batch*
-            # aren't visible to a fresh SQL/mdbx lookup mid-transaction (SQL
+            # aren't visible to a fresh SQL/mtxdb lookup mid-transaction (SQL
             # rows aren't visible to other reads in the same txn until
-            # commit, and mdbx isn't written until _store_state_hamt_nodes_txn
+            # commit, and mtxdb isn't written until _store_state_hamt_nodes_txn
             # runs for that row either) -- so a later group's incremental
             # update needs this in-memory cache to find its predecessor's
             # root.
@@ -1507,7 +1493,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             state_groups_to_sequence_numbers,
         )
         if self.embedded_hamt_engine == "mtxdb" and state_groups:
-            engine = _get_embedded_engine(self.embedded_hamt_engine)
+            engine = get_embedded_engine(self.embedded_hamt_engine)
             await defer_to_thread(
                 self.hs.get_reactor(),
                 engine.batch_delete,
@@ -1690,7 +1676,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         if self.embedded_hamt_engine != "mtxdb":
             return
 
-        engine = _get_embedded_engine(self.embedded_hamt_engine)
+        engine = get_embedded_engine(self.embedded_hamt_engine)
 
         while True:
 

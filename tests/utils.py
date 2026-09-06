@@ -99,13 +99,13 @@ POSTGRES_BASE_DB = "_synapse_unit_tests_base_%s" % (os.getpid(),)
 SQLITE_PERSIST_DB = os.environ.get("SYNAPSE_TEST_PERSIST_SQLITE_DB") is not None
 
 # When set, every test homeserver runs its HAMT state store through the
-# embedded engine (mdbx or mtxdb) instead of plain SQL -- the trial-embedded
+# embedded engine (mtxdb) instead of plain SQL -- the trial-embedded
 # CI job's whole purpose. The embedded engine is just a local file, so no
 # "is a server reachable" check is needed here -- config/database.py opens
 # it directly.
 #
 # Deliberately *not* falling back to the bare deployment switches
-# (SYNAPSE_EMBEDDED_HAMT_ENGINE / SYNAPSE_EMBEDDED_HAMT_PATH / SYNAPSE_MDBX):
+# (SYNAPSE_EMBEDDED_HAMT_ENGINE / SYNAPSE_EMBEDDED_HAMT_PATH / SYNAPSE_MTXDB):
 # unit tests inherit the process environment, and a shell configured for
 # running a real homeserver (e.g. SYNAPSE_EMBEDDED_HAMT_PATH pointing at a
 # production store) must not have `trial` silently open and mutate that
@@ -287,9 +287,9 @@ def default_config(
     if EMBEDDED_HAMT_ENGINE and EMBEDDED_HAMT_PATH:
         # Many test homeservers (each with their own fresh SQL database, so
         # each restarting its state_group id sequence at 1) can share this
-        # one mdbx file across a whole trial worker process. Without a
+        # one mtxdb file across a whole trial worker process. Without a
         # unique namespace per homeserver, two different tests' state_group
-        # 1 would collide on the same mdbx keys and silently read each
+        # 1 would collide on the same mtxdb keys and silently read each
         # other's data.
         config_dict["embedded_hamt"] = {
             "engine": EMBEDDED_HAMT_ENGINE,

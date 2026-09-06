@@ -10,7 +10,7 @@ On Linux, ``POSIX_FADV_DONTNEED`` is advisory, so label these results
 "evicted-page" rather than claiming perfectly cold storage. For a strict
 device-cold result, boot into a controlled test host (or use a data set larger
 than RAM) and run this script there. It never uses ``drop_caches`` and affects
-only its temporary MDBX files.
+only its temporary mtxdb files.
 
 Usage::
 
@@ -47,7 +47,7 @@ def read_key(path: Path, index: int) -> bytes:
 
 
 def evict_database_pages(database_dir: Path) -> None:
-    """Ask the kernel to reclaim clean pages from this temporary MDBX database."""
+    """Ask the kernel to reclaim clean pages from this temporary mtxdb database."""
     if not hasattr(os, "posix_fadvise"):
         raise RuntimeError("this benchmark requires os.posix_fadvise (POSIX/Linux)")
 
@@ -63,7 +63,7 @@ def evict_database_pages(database_dir: Path) -> None:
 
 
 def seed(database_dir: Path, keys_path: Path, rows: int, value_size: int) -> None:
-    # Import here so the coordinator process never owns the process-global MDBX
+    # Import here so the coordinator process never owns the process-global mtxdb
     # environment. This process exits immediately after building the corpus.
     from synapse.synapse_rust import mtxdb_engine
 
@@ -143,7 +143,7 @@ def run_parent(rows: int, value_size: int, samples: int, workdir: Path) -> None:
         p50 = statistics.median(ordered)
         p95 = ordered[int(len(ordered) * 0.95)]
         p99 = ordered[int(len(ordered) * 0.99)]
-        print("\n=== MDBX evicted-page point lookup (us) ===")
+        print("\n=== mtxdb evicted-page point lookup (us) ===")
         print(f"rows={rows:,}, value_size={value_size}, samples={samples}")
         print(f"p50={p50:.1f}  p95={p95:.1f}  p99={p99:.1f}  max={ordered[-1]:.1f}")
     finally:

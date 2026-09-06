@@ -389,13 +389,13 @@ class RedactionTestCase(unittest.HomeserverTestCase):
 
     def test_expire_event_updates_embedded_mirror(self) -> None:
         """`_censor_event_txn` (shared by censoring and expiry) must update
-        the embedded mdbx mirror, not just SQL -- otherwise `get_event`
-        keeps serving the pre-expiry JSON from mdbx forever.
+        the embedded mtxdb mirror, not just SQL -- otherwise `get_event`
+        keeps serving the pre-expiry JSON from mtxdb forever.
 
         This must go through expiry, not an ordinary redaction: a redacted
         event is dynamically re-pruned on every read from its `redactions`
         row (see events_worker.py's "check for redactions" handling)
-        regardless of what's stored in event_json/mdbx, so a test built on
+        regardless of what's stored in event_json/mtxdb, so a test built on
         redaction+censor would pass even with a stale mirror. Expiry has no
         such row -- the stored JSON is the only source of truth -- so it's
         the case that actually exercises _censor_event_txn's write.

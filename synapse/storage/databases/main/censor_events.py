@@ -166,7 +166,7 @@ class CensorEventsStore(EventsWorkerStore, CacheInvalidationWorkerStore, SQLBase
 
         # SQL is updated in place above, so the embedded mirror (if any) must
         # be updated to match -- otherwise get_event would keep serving the
-        # pre-censor/pre-expiry JSON forever from mdbx. internal_metadata and
+        # pre-censor/pre-expiry JSON forever from mtxdb. internal_metadata and
         # format_version aren't changing here, so re-fetch them rather than
         # thread them through every _censor_event_txn caller.
         if getattr(self, "_embedded_event_json_enabled", False):

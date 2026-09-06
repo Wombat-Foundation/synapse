@@ -59,7 +59,7 @@ def open_embedded_event_json_engine(hs: "HomeServer") -> bool:
     `embedded_hamt` configures only persistent state HAMT storage. It must not
     enable the independent event-JSON and event-chain stores: those keys are
     not part of the HAMT namespace and doing so lets separate homeservers
-    sharing an MDBX file overwrite each other's event data.
+    sharing an mtxdb file overwrite each other's event data.
 
     The event-JSON backend has no independent configuration yet, so it remains
     disabled.
@@ -109,7 +109,7 @@ def put_event_json_batch(
     """`rows`: `(event_id, internal_metadata, json, format_version)`.
     Called from the event persister only (the sole writer of `event_json`),
     synchronously in the persisting transaction -- same reasoning as
-    `_store_state_hamt_root_embedded_txn`: an mdbx call is local, no
+    `_store_state_hamt_root_embedded_txn`: an mtxdb call is local, no
     network round-trip to justify deferring past commit.
     """
     from synapse.synapse_rust import mtxdb_engine

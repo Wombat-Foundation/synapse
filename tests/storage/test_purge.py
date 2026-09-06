@@ -403,7 +403,7 @@ class PurgeTests(HomeserverTestCase):
         )
         # get_referenced_state_groups() always queries the plain SQL
         # event_to_state_groups table here, regardless of embedded_hamt_engine:
-        # it only reads the embedded mdbx refcount store when
+        # it only reads the embedded mtxdb refcount store when
         # _embedded_event_json_enabled is true, which is a separate, currently
         # hard-disabled feature (see embedded_event_json.py). A real SQL
         # insert is required to make this state group look referenced, even

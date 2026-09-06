@@ -390,7 +390,7 @@ class EventFederationWorkerStore(
         recomputed here; see `embedded_event_auth_chain_links.py`.
         """
         if embedded_hamt_namespace is not None:
-            # Exclusive by configured engine, not a dual-write. mdbx has no
+            # Exclusive by configured engine, not a dual-write. mtxdb has no
             # recursive-query primitive, so the walk is done here in Python
             # instead of SQL's `WITH RECURSIVE` below -- see
             # embedded_event_auth_chain_links.py's module docstring.

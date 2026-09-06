@@ -433,19 +433,19 @@ main() {
   # particularly tricky.
   export PASS_SYNAPSE_LOG_TESTING=1
 
-  # SYNAPSE_MDBX=1 is the concise production on-switch (see
+  # SYNAPSE_MTXDB=1 is the concise production on-switch (see
   # config/database.py) but was never actually forwarded into the
-  # container here -- treat it the same as SYNAPSE_EMBEDDED_HAMT_ENGINE=mdbx
+  # container here -- treat it the same as SYNAPSE_EMBEDDED_HAMT_ENGINE=mtxdb
   # so it does something locally too.
-  if [[ -n "${SYNAPSE_MDBX:-}" && -z "$SYNAPSE_EMBEDDED_HAMT_ENGINE" ]]; then
-    SYNAPSE_EMBEDDED_HAMT_ENGINE="mdbx"
-    SYNAPSE_EMBEDDED_HAMT_PATH="${SYNAPSE_EMBEDDED_HAMT_PATH:-${SYNAPSE_MDBX_PATH:-}}"
+  if [[ -n "${SYNAPSE_MTXDB:-}" && -z "$SYNAPSE_EMBEDDED_HAMT_ENGINE" ]]; then
+    SYNAPSE_EMBEDDED_HAMT_ENGINE="mtxdb"
+    SYNAPSE_EMBEDDED_HAMT_PATH="${SYNAPSE_EMBEDDED_HAMT_PATH:-${SYNAPSE_MTXDB_PATH:-}}"
   fi
 
   if [[ -n "$SYNAPSE_EMBEDDED_HAMT_ENGINE" ]]; then
     export PASS_SYNAPSE_EMBEDDED_HAMT_ENGINE="$SYNAPSE_EMBEDDED_HAMT_ENGINE"
     # SYNAPSE_EMBEDDED_HAMT_PATH is read inside the Complement container, not
-    # on the host -- a caller who just wants to turn mdbx on shouldn't have
+    # on the host -- a caller who just wants to turn mtxdb on shouldn't have
     # to know or care about that. Default it to a path that's always
     # writable there (the image's WORKDIR) rather than making them supply an
     # in-container path themselves.

@@ -240,7 +240,7 @@ class EventsBackgroundUpdatesStore(
             self._event_arbitrary_relations,
         )
 
-        if hs.config.database.embedded_hamt_engine == "mdbx":
+        if hs.config.database.embedded_hamt_engine == "mtxdb":
             self.db_pool.updates.register_background_update_handler(
                 self.EMBEDDED_EVENT_TO_STATE_GROUP_MIGRATION_UPDATE_NAME,
                 self._background_migrate_event_to_state_groups_to_embedded,
@@ -478,12 +478,12 @@ class EventsBackgroundUpdatesStore(
             )
             return 0
 
-        # The mdbx put below is idempotent (an overwrite), but the refcount
+        # The mtxdb put below is idempotent (an overwrite), but the refcount
         # increment is not: if this batch is reprocessed after a crash
         # between the writes here and the progress update below, an
         # unguarded increment would double-count every event already
         # migrated last time. Only increment for event_ids this batch
-        # hasn't already written to mdbx.
+        # hasn't already written to mtxdb.
         already_migrated = get_state_group_for_events_batch(
             self._embedded_hamt_namespace,
             [event_id for event_id, _state_group in rows],
@@ -537,7 +537,7 @@ class EventsBackgroundUpdatesStore(
         origin_sequence_number, target_chain_id, target_sequence_number)`
         together are the primary key, so progress is a 4-tuple row-value
         cursor. There's also no already-migrated pre-check needed here: an
-        mdbx `batch_put` is a plain overwrite with no counter to
+        mtxdb `batch_put` is a plain overwrite with no counter to
         double-count, so reprocessing a batch after a crash is naturally
         idempotent (see `embedded_event_auth_chain_links.py`'s
         `put_chain_links_batch`).

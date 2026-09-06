@@ -51,7 +51,7 @@ class EventsTestCase(HomeserverTestCase):
         self._store = self.hs.get_datastores().main
 
     def test_get_event_via_embedded_mtxdb_engine(self) -> None:
-        """`_store_event_txn` mirrors event_json into mdbx when
+        """`_store_event_txn` mirrors event_json into mtxdb when
         embedded_hamt_engine is configured; `_fetch_event_json_for_ids_txn`
         reads it back on the `get_event` path. Deleting the SQL
         `event_json` row entirely and still fetching the event correctly
@@ -59,7 +59,7 @@ class EventsTestCase(HomeserverTestCase):
         silent SQL fallback.
 
         Note: `mtxdb_engine.open_client` is backed by a process-global
-        `OnceCell` on the Rust side (one mdbx handle per process, matching
+        `OnceCell` on the Rust side (one mtxdb handle per process, matching
         how Synapse itself only ever opens one), so this call is a no-op
         if any earlier test in this process already opened a client --
         this test then exercises whatever database is already open, not
@@ -83,7 +83,7 @@ class EventsTestCase(HomeserverTestCase):
         user = self.register_user("embedded_event_json_user", "pass")
         token = self.login("embedded_event_json_user", "pass")
         room_id = self.helper.create_room_as(user, tok=token)
-        event_id = self.helper.send(room_id, "hello embedded mdbx", tok=token)[
+        event_id = self.helper.send(room_id, "hello embedded mtxdb", tok=token)[
             "event_id"
         ]
 
@@ -101,7 +101,7 @@ class EventsTestCase(HomeserverTestCase):
 
         event = self.get_success(self._store.get_event(event_id))
         self.assertEqual(event.event_id, event_id)
-        self.assertEqual(event.content.get("body"), "hello embedded mdbx")
+        self.assertEqual(event.content.get("body"), "hello embedded mtxdb")
 
     def test_get_senders_for_event_ids(self) -> None:
         """Tests the `get_senders_for_event_ids` storage function."""

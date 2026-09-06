@@ -68,7 +68,7 @@ class StateStoreTestCase(HomeserverTestCase):
     def _force_sql_only_hamt(self) -> None:
         """Some tests assert pure-SQL HAMT behaviour specifically and must
         stay deterministic regardless of SYNAPSE_TEST_EMBEDDED_HAMT_ENGINE
-        (the trial-mdbx CI job runs the *whole* suite through the embedded
+        (the trial-mtxdb CI job runs the *whole* suite through the embedded
         engine by default -- see tests/utils.py's default_config -- so a
         test that specifically wants SQL must force it off locally rather
         than assume it's already off).
@@ -160,10 +160,10 @@ class StateStoreTestCase(HomeserverTestCase):
 
     def test_state_group_reads_via_embedded_mtxdb_engine(self) -> None:
         """With `embedded_hamt_engine` configured before these events are
-        persisted, `_store_state_hamt_nodes_txn` writes exclusively to mdbx
+        persisted, `_store_state_hamt_nodes_txn` writes exclusively to mtxdb
         (not SQL -- see `_persist_state_hamt_txn`), and reads resolve
         entirely through `_materialize_state_hamts_from_embedded_txn` /
-        `_lookup_state_hamts_from_embedded_txn` against a real mdbx
+        `_lookup_state_hamts_from_embedded_txn` against a real mtxdb
         database.
         """
         import shutil
@@ -171,10 +171,10 @@ class StateStoreTestCase(HomeserverTestCase):
 
         from synapse.synapse_rust import mtxdb_engine
 
-        tmpdir = tempfile.mkdtemp(prefix="test-embedded-mdbx-")
+        tmpdir = tempfile.mkdtemp(prefix="test-embedded-mtxdb-")
         self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
         mtxdb_engine.open_client(tmpdir)
-        self.state_datastore.embedded_hamt_engine = "mdbx"
+        self.state_datastore.embedded_hamt_engine = "mtxdb"
         self.state_datastore.embedded_hamt_path = tmpdir
 
         e1 = self.inject_state_event(self.room, self.u_alice, EventTypes.Create, "", {})
@@ -218,7 +218,7 @@ class StateStoreTestCase(HomeserverTestCase):
 
     def test_embedded_engine_writes_are_exclusive_not_dual(self) -> None:
         """Once `embedded_hamt_engine` is configured, new state groups are
-        written to mdbx ONLY -- `state_hamt_roots`/`state_hamt_nodes` SQL
+        written to mtxdb ONLY -- `state_hamt_roots`/`state_hamt_nodes` SQL
         rows are not also inserted (see `_persist_state_hamt_txn`).
         """
         import shutil
@@ -226,10 +226,10 @@ class StateStoreTestCase(HomeserverTestCase):
 
         from synapse.synapse_rust import mtxdb_engine
 
-        tmpdir = tempfile.mkdtemp(prefix="test-exclusive-write-mdbx-")
+        tmpdir = tempfile.mkdtemp(prefix="test-exclusive-write-mtxdb-")
         self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
         mtxdb_engine.open_client(tmpdir)
-        self.state_datastore.embedded_hamt_engine = "mdbx"
+        self.state_datastore.embedded_hamt_engine = "mtxdb"
         self.state_datastore.embedded_hamt_path = tmpdir
 
         event = self.inject_state_event(
@@ -256,7 +256,7 @@ class StateStoreTestCase(HomeserverTestCase):
             "dual",
         )
 
-        # But it really is in mdbx -- not just "nowhere".
+        # But it really is in mtxdb -- not just "nowhere".
         full_state = self.get_success(
             self.state_datastore._get_state_groups_from_groups(
                 [state_group], StateFilter.all()
@@ -269,7 +269,7 @@ class StateStoreTestCase(HomeserverTestCase):
     def test_embedded_hamt_migration_copies_existing_sql_data(self) -> None:
         """A state group written before `embedded_hamt_engine` was turned on
         stays SQL-only until `_background_migrate_state_hamt_to_embedded`
-        runs; after it completes, the group is readable via mdbx with SQL
+        runs; after it completes, the group is readable via mtxdb with SQL
         deleted out from under it -- proving the data actually moved, not
         just that the SQL fallback happened to still work.
         """
@@ -309,10 +309,10 @@ class StateStoreTestCase(HomeserverTestCase):
         # poller: it would race this test's direct handler invocation and
         # repeatedly fail to dispatch the unregistered handler. Drive the
         # handler directly instead.
-        tmpdir = tempfile.mkdtemp(prefix="test-hamt-migration-mdbx-")
+        tmpdir = tempfile.mkdtemp(prefix="test-hamt-migration-mtxdb-")
         self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
         mtxdb_engine.open_client(tmpdir)
-        self.state_datastore.embedded_hamt_engine = "mdbx"
+        self.state_datastore.embedded_hamt_engine = "mtxdb"
         self.state_datastore.embedded_hamt_path = tmpdir
 
         with patch.object(
@@ -342,7 +342,7 @@ class StateStoreTestCase(HomeserverTestCase):
             progress = {"last_state_group": state_group}
 
         # Delete the SQL rows entirely -- if the read below still works,
-        # the data really moved into mdbx rather than the read just still
+        # the data really moved into mtxdb rather than the read just still
         # falling back to SQL.
         self.get_success(
             self.store.db_pool.simple_delete(
@@ -374,10 +374,10 @@ class StateStoreTestCase(HomeserverTestCase):
 
         from synapse.synapse_rust import mtxdb_engine
 
-        tmpdir = tempfile.mkdtemp(prefix="test-embedded-root-mdbx-")
+        tmpdir = tempfile.mkdtemp(prefix="test-embedded-root-mtxdb-")
         self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
         mtxdb_engine.open_client(tmpdir)
-        self.state_datastore.embedded_hamt_engine = "mdbx"
+        self.state_datastore.embedded_hamt_engine = "mtxdb"
         self.state_datastore.embedded_hamt_path = tmpdir
 
         e1 = self.inject_state_event(self.room, self.u_alice, EventTypes.Create, "", {})
