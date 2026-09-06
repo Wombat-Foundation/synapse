@@ -26,12 +26,12 @@ import logging
 import os
 import os.path
 import sqlite3
+import sys
 import time
 import uuid
 import warnings
 import weakref
-from collections import deque
-from concurrent.futures import ThreadPoolExecutor
+from collections import defaultdict, deque
 from io import SEEK_END, BytesIO
 from typing import (
     Any,
@@ -130,24 +130,35 @@ CustomHeaderType = tuple[str | bytes, str | bytes]
 # DB each test run. This dramatically speeds up test set up when using SQLite.
 PREPPED_SQLITE_DB_CONN: LoggingDatabaseConnection | None = None
 
-# `DROP DATABASE` for a test's Postgres clone is pure teardown -- nothing
-# about the *next* test depends on this one's database having actually been
-# dropped yet -- but run synchronously it blocks each test's cleanup on a
-# round trip plus (on the rare flaky case) up to 5 retries * 0.5s of
-# sleeping. Dropping in the background off this small pool lets the next
-# test start immediately; `_drain_postgres_test_db_drops` (registered below)
-# blocks at process exit until every queued drop has actually finished, so
-# nothing is silently left behind.
-_POSTGRES_TEST_DB_DROP_POOL = ThreadPoolExecutor(
-    max_workers=4, thread_name_prefix="postgres-test-db-drop"
-)
+# ── Postgres per-test lifecycle timing (opt-in via SYNAPSE_PG_TIMINGS=1) ────
+_PG_TIMINGS: dict[str, float] = defaultdict(float)
+_PG_TIMING_COUNTS: dict[str, int] = defaultdict(int)
 
 
-def _drain_postgres_test_db_drops() -> None:
-    _POSTGRES_TEST_DB_DROP_POOL.shutdown(wait=True)
+def _pg_timing(tag: str, elapsed: float) -> None:
+    _PG_TIMINGS[tag] += elapsed
+    _PG_TIMING_COUNTS[tag] += 1
 
 
-atexit.register(_drain_postgres_test_db_drops)
+def _print_pg_timings() -> None:
+    if not os.environ.get("SYNAPSE_PG_TIMINGS"):
+        return
+    print("\n=== Postgres test-DB lifecycle timings ===", file=sys.stderr)
+    for tag in sorted(_PG_TIMINGS):
+        total = _PG_TIMINGS[tag]
+        count = _PG_TIMING_COUNTS[tag]
+        print(
+            f"  {tag:40s}  {total:8.3f}s  ({count} calls, {total / count:.4f}s avg)",
+            file=sys.stderr,
+        )
+    print(
+        f"  {'TOTAL':40s}  {sum(_PG_TIMINGS.values()):8.3f}s",
+        file=sys.stderr,
+    )
+    print("==========================================\n", file=sys.stderr)
+
+
+atexit.register(_print_pg_timings)
 
 
 class TimedOutException(Exception):
@@ -1323,6 +1334,7 @@ def setup_test_homeserver(
     # Create the database before we actually try and connect to it, based off
     # the template database we generate in setupdb()
     if USE_POSTGRES_FOR_TESTS:
+        _t0 = time.monotonic()
         db_conn = db_engine.module.connect(
             dbname=POSTGRES_BASE_DB,
             user=POSTGRES_USER,
@@ -1338,8 +1350,9 @@ def setup_test_homeserver(
         )
         cur.close()
         db_conn.close()
+        _pg_timing("create_database", time.monotonic() - _t0)
 
-        def drop_test_db() -> None:
+        def cleanup() -> None:
             import psycopg2
 
             dropped = False
@@ -1383,13 +1396,6 @@ def setup_test_homeserver(
                     stacklevel=2,
                 )
 
-        def cleanup() -> None:
-            # Nothing about the *next* test depends on this database having
-            # actually been dropped by the time this test's teardown
-            # returns, so hand it to the background pool instead of
-            # blocking here -- see `_POSTGRES_TEST_DB_DROP_POOL`'s comment.
-            _POSTGRES_TEST_DB_DROP_POOL.submit(drop_test_db)
-
         if not LEAVE_DB:
             # Register the cleanup hook
             cleanup_func(cleanup)
@@ -1420,8 +1426,10 @@ def setup_test_homeserver(
 
     # Patch `make_pool` before initialising the database, to make database transactions
     # synchronous for testing.
+    _t0 = time.monotonic()
     with patch("synapse.storage.database.make_pool", side_effect=make_fake_db_pool):
         hs.setup()
+    _pg_timing("hs_setup_total", time.monotonic() - _t0)
 
     # Ideally, setup/start would be separated but since this is historically used
     # throughout tests, we keep the existing behavior for now. We probably just need to
