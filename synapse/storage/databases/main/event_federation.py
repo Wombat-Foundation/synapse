@@ -410,21 +410,35 @@ class EventFederationWorkerStore(
             # transitive closure. So unlike the SQL `WITH RECURSIVE` below,
             # the walk has to happen here: every `target_chain_id` we
             # discover is a new chain that might have further edges out of
-            # it, so it goes back into `chains_to_fetch` (unless already
-            # seen) unless this loop is to stop after one hop.
+            # it, so it goes back into the fetch set (unless already seen).
+            #
+            # Every caller of this generator relies on each yielded `links`
+            # dict being *self-contained*: `_materialize` does its own
+            # internal stack-based walk over a single `links` dict starting
+            # from one origin chain, so if the edges for a chain two hops
+            # away land in a *different* yielded dict than the edges for the
+            # chain one hop away, `_materialize` dead-ends after one hop and
+            # silently drops everything beyond it (this used to happen here:
+            # each BFS layer was yielded separately). So the whole transitive
+            # closure for `chains_to_fetch` is accumulated below and yielded
+            # once, matching what the SQL recursive query below returns in a
+            # single row set per outer (<=1000-chain) batch.
             seen_chains = set(chains_to_fetch)
-            while chains_to_fetch:
-                batch = set(itertools.islice(chains_to_fetch, 1000))
-                chains_to_fetch.difference_update(batch)
+            to_walk = set(chains_to_fetch)
+            accumulated: dict[int, list[tuple[int, int, int]]] = {}
+            while to_walk:
+                batch = set(itertools.islice(to_walk, 1000))
+                to_walk.difference_update(batch)
                 embedded_links = get_chain_links_batch(
                     embedded_hamt_engine, embedded_hamt_namespace, batch
                 )
-                for edges in embedded_links.values():
+                for chain_id, edges in embedded_links.items():
+                    accumulated.setdefault(chain_id, []).extend(edges)
                     for _origin_seq, target_chain_id, _target_seq in edges:
                         if target_chain_id not in seen_chains:
                             seen_chains.add(target_chain_id)
-                            chains_to_fetch.add(target_chain_id)
-                yield embedded_links
+                            to_walk.add(target_chain_id)
+            yield accumulated
             return
 
         # This query is structured to first get all chain IDs reachable, and
