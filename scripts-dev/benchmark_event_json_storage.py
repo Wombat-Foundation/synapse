@@ -1,12 +1,12 @@
 #!/usr/bin/env python
-"""Benchmarks Postgres (event_json, the real table) vs. mdbx for the
+"""Benchmarks Postgres (event_json, the real table) vs. mtxdb for the
 event_json access pattern: an immutable blob keyed by event_id, pure point
 lookups (get_event), high write volume, no aggregation/joins against it --
 the next candidate identified from the same criteria that made HAMT nodes
 a good embedded-engine fit (content-addressed, point-keyed, no SQL query
 shape needed against the table itself). fjall was also benchmarked here
-originally but was dropped after losing to mdbx on every measurement (see
-scripts-dev/benchmark_hamt_mdbx.py and docs/development-gg/
+originally but was dropped after losing to mtxdb on every measurement (see
+scripts-dev/benchmark_hamt_mtxdb.py and docs/development-gg/
 persistent-typed-hamt-architecture.md for the historical comparison).
 
 Unlike the HAMT benchmark, this needs no materialize/BFS walk -- event_json
@@ -148,7 +148,7 @@ def run_postgres() -> None:
         start = time.perf_counter()
         # execute_values pages internally (page_size=1000) via separate
         # cur.execute() calls; under autocommit=True each page is its own
-        # implicit transaction/commit, while the mdbx leg below does the
+        # implicit transaction/commit, while the mtxdb leg below does the
         # whole chunk in a single batch_put transaction. Wrap in one
         # explicit transaction so both sides pay one commit per chunk.
         conn.autocommit = False
@@ -236,8 +236,8 @@ def run_embedded(name: str, engine: object) -> None:
 
 def main() -> None:
     print(f"cumulative sizes: {CUMULATIVE_SIZES}, event_json-shaped payloads\n")
-    print("--- mdbx ---")
-    run_embedded("mdbx", mtxdb_engine)
+    print("--- mtxdb ---")
+    run_embedded("mtxdb", mtxdb_engine)
     print("\n--- postgres ---")
     run_postgres()
 

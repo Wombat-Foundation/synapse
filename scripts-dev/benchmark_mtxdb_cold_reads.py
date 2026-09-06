@@ -1,8 +1,8 @@
 #!/usr/bin/env python
-"""Measure libmdbx point lookups after best-effort OS page-cache eviction.
+"""Measure libmtxdb point lookups after best-effort OS page-cache eviction.
 
 This complements the steady-state benchmarks. It deliberately runs every
-measured lookup in a fresh process: the Rust mdbx binding owns a process-global
+measured lookup in a fresh process: the Rust mtxdb binding owns a process-global
 environment and its mmap must be gone before asking the kernel to reclaim the
 database's file-backed pages.
 
@@ -14,8 +14,8 @@ only its temporary MDBX files.
 
 Usage::
 
-    python3 scripts-dev/benchmark_mdbx_cold_reads.py
-    python3 scripts-dev/benchmark_mdbx_cold_reads.py --rows 2000000 --samples 200
+    python3 scripts-dev/benchmark_mtxdb_cold_reads.py
+    python3 scripts-dev/benchmark_mtxdb_cold_reads.py --rows 2000000 --samples 200
 """
 
 from __future__ import annotations
@@ -87,9 +87,9 @@ def measure(database_dir: Path, key: bytes) -> None:
 
     mtxdb_engine.open_client(str(database_dir))
     started = time.perf_counter_ns()
-    value = mtxdb_engine.get(key)
+    value = mtxdb_engine.batch_get([key])
     elapsed_us = (time.perf_counter_ns() - started) / 1_000
-    if value is None:
+    if not value:
         raise RuntimeError("seeded key was not found")
     print(json.dumps({"elapsed_us": elapsed_us}))
 
@@ -104,7 +104,7 @@ def run_parent(rows: int, value_size: int, samples: int, workdir: Path) -> None:
     # Do not default to /tmp: it is commonly tmpfs (as it is on CI and this
     # development host), which would turn an I/O-cold benchmark into RAM-only
     # timing. The caller may select a dedicated directory on the target NVMe.
-    workspace = Path(tempfile.mkdtemp(prefix="mdbx-evicted-page-bench-", dir=workdir))
+    workspace = Path(tempfile.mkdtemp(prefix="mtxdb-evicted-page-bench-", dir=workdir))
     database_dir = workspace / "database"
     keys_path = workspace / "keys.bin"
     database_dir.mkdir()

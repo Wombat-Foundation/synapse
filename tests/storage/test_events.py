@@ -50,7 +50,7 @@ class EventsTestCase(HomeserverTestCase):
     ) -> None:
         self._store = self.hs.get_datastores().main
 
-    def test_get_event_via_embedded_mdbx_engine(self) -> None:
+    def test_get_event_via_embedded_mtxdb_engine(self) -> None:
         """`_store_event_txn` mirrors event_json into mdbx when
         embedded_hamt_engine is configured; `_fetch_event_json_for_ids_txn`
         reads it back on the `get_event` path. Deleting the SQL
@@ -58,7 +58,7 @@ class EventsTestCase(HomeserverTestCase):
         proves the embedded-engine fast path is actually taken, not a
         silent SQL fallback.
 
-        Note: `mdbx_engine.open_client` is backed by a process-global
+        Note: `mtxdb_engine.open_client` is backed by a process-global
         `OnceCell` on the Rust side (one mdbx handle per process, matching
         how Synapse itself only ever opens one), so this call is a no-op
         if any earlier test in this process already opened a client --
@@ -69,11 +69,11 @@ class EventsTestCase(HomeserverTestCase):
         import shutil
         import tempfile
 
-        from synapse.synapse_rust import mdbx_engine
+        from synapse.synapse_rust import mtxdb_engine
 
         tmpdir = tempfile.mkdtemp(prefix="test-embedded-event-json-")
         self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
-        mdbx_engine.open_client(tmpdir)
+        mtxdb_engine.open_client(tmpdir)
 
         persist_store = self.hs.get_datastores().persist_events
         assert persist_store is not None
@@ -95,7 +95,7 @@ class EventsTestCase(HomeserverTestCase):
             self._store.db_pool.simple_delete(
                 table="event_json",
                 keyvalues={"event_id": event_id},
-                desc="test_get_event_via_embedded_mdbx_engine",
+                desc="test_get_event_via_embedded_mtxdb_engine",
             )
         )
 

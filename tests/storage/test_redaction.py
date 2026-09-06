@@ -403,11 +403,11 @@ class RedactionTestCase(unittest.HomeserverTestCase):
         import shutil
         import tempfile
 
-        from synapse.synapse_rust import mdbx_engine
+        from synapse.synapse_rust import mtxdb_engine
 
         tmpdir = tempfile.mkdtemp(prefix="test-expire-embedded-")
         self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
-        mdbx_engine.open_client(tmpdir)
+        mtxdb_engine.open_client(tmpdir)
         self.store._embedded_event_json_enabled = True
         persist_store = self.hs.get_datastores().persist_events
         assert persist_store is not None

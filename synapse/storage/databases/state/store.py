@@ -67,12 +67,13 @@ logger = logging.getLogger(__name__)
 
 
 def _get_embedded_engine(engine_name: str) -> ModuleType:
-    """Return the PyO3 module for the configured embedded HAMT engine."""
-    if engine_name == "mdbx":
-        from synapse.synapse_rust import mdbx_engine
+    """Return the PyO3 module for the configured embedded HAMT engine.
 
-        return mdbx_engine
-    elif engine_name == "mtxdb":
+    Add new engine backends here as elif branches. The caller resolves the
+    engine name from config and threads the returned module into leaf
+    functions -- no global state, no ambient imports.
+    """
+    if engine_name == "mtxdb":
         from synapse.synapse_rust import mtxdb_engine
 
         return mtxdb_engine
@@ -156,7 +157,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         self.embedded_hamt_engine = hs.config.database.embedded_hamt_engine
         self.embedded_hamt_path = hs.config.database.embedded_hamt_path
         if self.embedded_hamt_engine and self.embedded_hamt_path:
-            # mdbx is the only embedded engine: it beat fjall on every real
+            # mtxdb is the embedded engine for HAMT state offload.
             # benchmark (point reads, batch reads) and needs no worker-
             # process bridge (native multi-process mmap access), so fjall
             # was dropped rather than kept as a second maintained option.
@@ -810,7 +811,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             )
         root_bytes = bytes(root_node_bytes)
         # Start with only the root node from the local cache (not all accumulated nodes).
-        # The retry loop below will fetch any missing child nodes via SQL/mdbx.
+        # The retry loop below will fetch any missing child nodes via SQL/mtxdb.
         nodes: dict[bytes, bytes] = {prev_root_hash: root_bytes}
         # Add any root nodes from the local cache (needed for the retry loop)
         for node_hash, node_bytes in local_nodes.items():
@@ -1246,7 +1247,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         )
 
         # Each group's incremental update looks up its predecessor via
-        # _get_embedded_hamt_node (mdbx, if configured) then SQL -- no
+        # _get_embedded_hamt_node (mtxdb, if configured) then SQL -- no
         # prefetch needed before the transaction starts; both are local
         # reads, unlike a real network round-trip would require.
         initial_nodes: dict[bytes, bytes] = {}
@@ -1333,7 +1334,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 )
                 hamt_writes.append((sg_after, root_hash, lattice, nodes))
                 # Only keep the root node in the local cache for the next iteration.
-                # Child nodes are fetched via SQL/mdbx in the retry loop if needed.
+                # Child nodes are fetched via SQL/mtxdb in the retry loop if needed.
                 local_nodes.clear()
                 # nodes is a list of (hash, bytes) tuples; find the root node entry
                 for node_hash, node_bytes in nodes:

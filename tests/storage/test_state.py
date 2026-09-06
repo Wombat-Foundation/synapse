@@ -158,7 +158,7 @@ class StateStoreTestCase(HomeserverTestCase):
             {(EventTypes.Create, ""): e1.event_id, (EventTypes.Name, ""): e2.event_id},
         )
 
-    def test_state_group_reads_via_embedded_mdbx_engine(self) -> None:
+    def test_state_group_reads_via_embedded_mtxdb_engine(self) -> None:
         """With `embedded_hamt_engine` configured before these events are
         persisted, `_store_state_hamt_nodes_txn` writes exclusively to mdbx
         (not SQL -- see `_persist_state_hamt_txn`), and reads resolve
@@ -169,11 +169,11 @@ class StateStoreTestCase(HomeserverTestCase):
         import shutil
         import tempfile
 
-        from synapse.synapse_rust import mdbx_engine
+        from synapse.synapse_rust import mtxdb_engine
 
         tmpdir = tempfile.mkdtemp(prefix="test-embedded-mdbx-")
         self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
-        mdbx_engine.open_client(tmpdir)
+        mtxdb_engine.open_client(tmpdir)
         self.state_datastore.embedded_hamt_engine = "mdbx"
         self.state_datastore.embedded_hamt_path = tmpdir
 
@@ -224,11 +224,11 @@ class StateStoreTestCase(HomeserverTestCase):
         import shutil
         import tempfile
 
-        from synapse.synapse_rust import mdbx_engine
+        from synapse.synapse_rust import mtxdb_engine
 
         tmpdir = tempfile.mkdtemp(prefix="test-exclusive-write-mdbx-")
         self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
-        mdbx_engine.open_client(tmpdir)
+        mtxdb_engine.open_client(tmpdir)
         self.state_datastore.embedded_hamt_engine = "mdbx"
         self.state_datastore.embedded_hamt_path = tmpdir
 
@@ -276,7 +276,7 @@ class StateStoreTestCase(HomeserverTestCase):
         import shutil
         import tempfile
 
-        from synapse.synapse_rust import mdbx_engine
+        from synapse.synapse_rust import mtxdb_engine
 
         # Persist with no embedded engine configured -- goes to SQL only.
         self._force_sql_only_hamt()
@@ -311,7 +311,7 @@ class StateStoreTestCase(HomeserverTestCase):
         # handler directly instead.
         tmpdir = tempfile.mkdtemp(prefix="test-hamt-migration-mdbx-")
         self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
-        mdbx_engine.open_client(tmpdir)
+        mtxdb_engine.open_client(tmpdir)
         self.state_datastore.embedded_hamt_engine = "mdbx"
         self.state_datastore.embedded_hamt_path = tmpdir
 
@@ -372,11 +372,11 @@ class StateStoreTestCase(HomeserverTestCase):
         import shutil
         import tempfile
 
-        from synapse.synapse_rust import mdbx_engine
+        from synapse.synapse_rust import mtxdb_engine
 
         tmpdir = tempfile.mkdtemp(prefix="test-embedded-root-mdbx-")
         self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
-        mdbx_engine.open_client(tmpdir)
+        mtxdb_engine.open_client(tmpdir)
         self.state_datastore.embedded_hamt_engine = "mdbx"
         self.state_datastore.embedded_hamt_path = tmpdir
 
