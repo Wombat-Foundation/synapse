@@ -14,7 +14,7 @@
 
 """Mirrors `event_to_state_groups` (event_id -> state_group, a pure point
 lookup with no aggregation/joins needed against the forward mapping -- see
-`_get_state_group_for_event(s)` in `state.py`) into the same embedded mdbx
+`_get_state_group_for_event(s)` in `state.py`) into the same embedded mtxdb
 keyspace `event_json` and the state HAMT use. Exclusive by configured
 engine, not a dual-write: when `embedded_hamt_engine` is configured, this
 table is written/read here only, never SQL -- see `_store_event_state_mappings_txn`
@@ -22,7 +22,7 @@ et al. in `events.py`/`state.py`.
 
 Every key here is namespaced (see `namespace` on each function, and
 `hamt_namespace` on the state datastore) for the same reason the HAMT
-node/root keys are: multiple homeservers/deployments can share one mdbx
+node/root keys are: multiple homeservers/deployments can share one mtxdb
 file (e.g. many trial test processes), and state_group ids restart at 1 for
 each -- without a namespace prefix, two different deployments' state_group
 9 would collide and silently share (and corrupt) each other's refcounts and
@@ -43,10 +43,10 @@ group would itself need updating (a list insert) on every single event
 persisted and every purge -- real write cost that grows with room activity,
 not O(1). A plain reference *count* per state group avoids that: each event
 contributes exactly +1 to its state group's counter once, each purge
-contributes exactly -1 per purged event, and both are O(1) mdbx point
+contributes exactly -1 per purged event, and both are O(1) mtxdb point
 operations regardless of how many events share that state group. That's
 what `increment_state_group_refcounts_batch`/`get_referenced_state_groups_batch`
-below provide -- see `rust/src/database/mdbx.rs`'s `increment_counters_batch`
+below provide -- see `rust/src/database/mtxdb.rs`'s `increment_counters_batch`
 for why this can't just be a Python read-then-write (it would race a
 concurrent increment on the same key and lose an update).
 """

@@ -68,7 +68,7 @@ class DatabaseConfigTestCase(unittest.TestCase):
 
         with self.assertRaises(ConfigError):
             self._read_config(
-                embedded_hamt={"engine": "mdbx"},
+                embedded_hamt={"engine": "mtxdb"},
             )
 
     def test_engine_without_path_env_raises(self) -> None:
@@ -77,7 +77,7 @@ class DatabaseConfigTestCase(unittest.TestCase):
 
         with self.assertRaises(ConfigError):
             self._read_config(
-                env={"SYNAPSE_EMBEDDED_HAMT_ENGINE": "mdbx"},
+                env={"SYNAPSE_EMBEDDED_HAMT_ENGINE": "mtxdb"},
             )
 
     def test_path_without_engine_raises(self) -> None:
@@ -86,7 +86,7 @@ class DatabaseConfigTestCase(unittest.TestCase):
 
         with self.assertRaises(ConfigError):
             self._read_config(
-                embedded_hamt={"path": "/tmp/test.mdbx"},
+                embedded_hamt={"path": "/tmp/test.mtxdb"},
             )
 
     def test_engine_unsupported_raises(self) -> None:
@@ -98,13 +98,6 @@ class DatabaseConfigTestCase(unittest.TestCase):
                 embedded_hamt={"engine": "unknown_engine", "path": "/tmp/test"},
             )
 
-    def test_both_set_ok(self) -> None:
-        """engine + path both set → no error."""
-        dc = self._read_config(
-            embedded_hamt={"engine": "mdbx", "path": "/tmp/test.mdbx"},
-        )
-        self.assertEqual(dc.embedded_hamt_engine, "mdbx")
-        self.assertEqual(dc.embedded_hamt_path, "/tmp/test.mdbx")
 
     def test_engine_mtxdb_ok(self) -> None:
         """engine set to 'mtxdb' with a path → no error."""

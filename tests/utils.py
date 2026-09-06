@@ -110,13 +110,11 @@ SQLITE_PERSIST_DB = os.environ.get("SYNAPSE_TEST_PERSIST_SQLITE_DB") is not None
 # running a real homeserver (e.g. SYNAPSE_EMBEDDED_HAMT_PATH pointing at a
 # production store) must not have `trial` silently open and mutate that
 # store. Only the SYNAPSE_TEST_-prefixed, test-only variables are honoured
-# here. SYNAPSE_TEST_MDBX / SYNAPSE_TEST_MTXDB are shorthand aliases for
-# the common case of just wanting an engine, without spelling out the name.
+# here. SYNAPSE_TEST_MTXDB is a shorthand alias for
+# the common case of just wanting the mtxdb engine, without spelling out the name.
 EMBEDDED_HAMT_ENGINE = os.environ.get("SYNAPSE_TEST_EMBEDDED_HAMT_ENGINE")
 if EMBEDDED_HAMT_ENGINE is None and os.environ.get("SYNAPSE_TEST_MTXDB"):
     EMBEDDED_HAMT_ENGINE = "mtxdb"
-elif EMBEDDED_HAMT_ENGINE is None and os.environ.get("SYNAPSE_TEST_MDBX"):
-    EMBEDDED_HAMT_ENGINE = "mdbx"
 
 EMBEDDED_HAMT_PATH = os.environ.get("SYNAPSE_TEST_EMBEDDED_HAMT_PATH")
 if EMBEDDED_HAMT_PATH is None and EMBEDDED_HAMT_ENGINE:

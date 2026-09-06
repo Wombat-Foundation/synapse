@@ -160,7 +160,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             # benchmark (point reads, batch reads) and needs no worker-
             # process bridge (native multi-process mmap access), so fjall
             # was dropped rather than kept as a second maintained option.
-            if self.embedded_hamt_engine not in ("mdbx", "mtxdb"):
+            if self.embedded_hamt_engine != "mtxdb":
                 raise RuntimeError(
                     f"Unknown embedded_hamt_engine: {self.embedded_hamt_engine!r} "
                     "(only 'mdbx' or 'mtxdb' is supported)"
@@ -704,7 +704,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         # owns it instead. _store_state_hamt_nodes_txn already makes this
         # same choice for nodes.
         self._store_state_hamt_nodes_txn(txn, room_prefix, nodes)
-        if self.embedded_hamt_engine in ("mdbx", "mtxdb"):
+        if self.embedded_hamt_engine == "mtxdb":
             self._store_state_hamt_root_embedded_txn(
                 state_group, room_prefix, root_structural_hash, root_lattice, room_id
             )
@@ -763,13 +763,13 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         else:
             prev_root_hash = None
             prev_lattice = None
-            mdbx_active = self.embedded_hamt_engine in ("mdbx", "mtxdb")
-            if mdbx_active:
+            mtxdb_active = self.embedded_hamt_engine == "mtxdb"
+            if mtxdb_active:
                 embedded_root = self._get_embedded_hamt_root(prev_state_group)
                 if embedded_root is not None:
                     prev_root_hash, prev_lattice = embedded_root
             if prev_root_hash is None and (
-                not mdbx_active or self._embedded_hamt_migration_pending_txn(txn)
+                not mtxdb_active or self._embedded_hamt_migration_pending_txn(txn)
             ):
                 prev_root = self.db_pool.simple_select_one_txn(
                     txn,
@@ -793,7 +793,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         if root_node_bytes is None:
             root_node_bytes = self._get_embedded_hamt_node(room_prefix, prev_root_hash)
         if root_node_bytes is None and (
-            self.embedded_hamt_engine not in ("mdbx", "mtxdb")
+            self.embedded_hamt_engine != "mtxdb"
             or self._embedded_hamt_migration_pending_txn(txn)
         ):
             root_node_bytes = self.db_pool.simple_select_one_onecol_txn(
@@ -870,7 +870,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         new_root_hash, _new_state_group_id, new_lattice, new_nodes = applied
 
         self._store_state_hamt_nodes_txn(txn, room_prefix, new_nodes)
-        if self.embedded_hamt_engine in ("mdbx", "mtxdb"):
+        if self.embedded_hamt_engine == "mtxdb":
             self._store_state_hamt_root_embedded_txn(
                 state_group, room_prefix, new_root_hash, new_lattice, room_id
             )
@@ -907,7 +907,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         # embedded engine's materialize/lookup BFS walk actually looks up --
         # a plain `batch_put` keyed by the raw structural_hash would be
         # invisible to it.
-        if self.embedded_hamt_engine in ("mdbx", "mtxdb"):
+        if self.embedded_hamt_engine == "mtxdb":
             engine = _get_embedded_engine(self.embedded_hamt_engine)
             engine.put_state_hamt_nodes(self.hamt_namespace, room_prefix, nodes)
             return
@@ -940,7 +940,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         """Point lookup of a single HAMT root's `(root_hash, lattice)` in
         the embedded engine, if configured. Returns `None` on a miss.
         """
-        if self.embedded_hamt_engine not in ("mdbx", "mtxdb"):
+        if self.embedded_hamt_engine != "mtxdb":
             return None
         engine = _get_embedded_engine(self.embedded_hamt_engine)
 
@@ -964,7 +964,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         SQL. Returns `None` on a miss (caller falls back), never raises for
         a missing key.
         """
-        if self.embedded_hamt_engine not in ("mdbx", "mtxdb"):
+        if self.embedded_hamt_engine != "mtxdb":
             return None
         engine = _get_embedded_engine(self.embedded_hamt_engine)
 
@@ -980,7 +980,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         result, same self-healing shape as `embedded_event_json`'s
         `get_event_json_batch`.
         """
-        if self.embedded_hamt_engine not in ("mdbx", "mtxdb") or not node_hashes:
+        if self.embedded_hamt_engine != "mtxdb" or not node_hashes:
             return {}
         engine = _get_embedded_engine(self.embedded_hamt_engine)
 
@@ -1016,7 +1016,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         root_value = _encode_state_hamt_root(
             room_prefix, root_hash, lattice, room_id=room_id
         )
-        if self.embedded_hamt_engine in ("mdbx", "mtxdb"):
+        if self.embedded_hamt_engine == "mtxdb":
             engine = _get_embedded_engine(self.embedded_hamt_engine)
             engine.batch_put([(root_key, root_value)])
 
@@ -1098,7 +1098,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         # a good root with an empty one. Skip anything the embedded engine
         # already has.
         already_embedded: set[int] = set()
-        if self.embedded_hamt_engine in ("mdbx", "mtxdb"):
+        if self.embedded_hamt_engine == "mtxdb":
             engine = _get_embedded_engine(self.embedded_hamt_engine)
             state_groups = [state_group for state_group, _ in rows]
             already_embedded = {
@@ -1505,7 +1505,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             room_id,
             state_groups_to_sequence_numbers,
         )
-        if self.embedded_hamt_engine in ("mdbx", "mtxdb") and state_groups:
+        if self.embedded_hamt_engine == "mtxdb" and state_groups:
             engine = _get_embedded_engine(self.embedded_hamt_engine)
             await defer_to_thread(
                 self.hs.get_reactor(),
@@ -1678,7 +1678,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             self._purge_room_state_txn,
             room_id,
         )
-        if self.embedded_hamt_engine in ("mdbx", "mtxdb"):
+        if self.embedded_hamt_engine == "mtxdb":
             await self._drain_embedded_state_hamt_root_deletion_queue()
 
     @wrap_as_background_process("drain_embedded_state_hamt_root_deletion_queue")
@@ -1686,7 +1686,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         """Delete queued embedded-engine roots after their SQL state groups
         are purged."""
 
-        if self.embedded_hamt_engine not in ("mdbx", "mtxdb"):
+        if self.embedded_hamt_engine != "mtxdb":
             return
 
         engine = _get_embedded_engine(self.embedded_hamt_engine)
@@ -1761,7 +1761,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         if not deleted_state_groups:
             return []
 
-        if self.embedded_hamt_engine in ("mdbx", "mtxdb"):
+        if self.embedded_hamt_engine == "mtxdb":
             # Persist a retry record in the same transaction as the SQL purge.
             # If the embedded engine write fails after commit, its root keys
             # can still be removed on a later retry instead of being lost

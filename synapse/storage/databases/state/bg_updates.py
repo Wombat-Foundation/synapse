@@ -463,7 +463,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
             state_filter.concrete_types() if not state_filter.has_wildcards() else None
         )
 
-        # The embedded engine (mdbx) mirrors both nodes and root records
+        # The embedded engine (mtxdb) mirrors both nodes and root records
         # (`_store_state_hamt_root_embedded_txn`/`batch_get_state_hamt_roots`),
         # falling back to `state_hamt_roots`/`state_groups` SQL only for a
         # group it doesn't have. Always use the bulk path (it degrades to a
@@ -871,10 +871,10 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         back into Python is needed here.
         """
         engine = getattr(self, "embedded_hamt_engine", None)
-        if engine == "mdbx":
-            from synapse.synapse_rust import mdbx_engine
+        if engine == "mtxdb":
+            from synapse.synapse_rust import mtxdb_engine
 
-            return mdbx_engine
+            return mtxdb_engine
         elif engine == "mtxdb":
             from synapse.synapse_rust import mtxdb_engine
 

@@ -12,7 +12,6 @@
 //! one driver.
 
 pub mod core;
-pub mod mdbx;
 pub mod mtxdb;
 
 use pyo3::prelude::*;

@@ -14,16 +14,16 @@
 
 """Mirrors `event_auth_chain_links` (origin_chain_id, origin_sequence_number,
 target_chain_id, target_sequence_number -- one directed edge in the auth
-chain cover index's DAG of chains) into the embedded mdbx engine. Exclusive
+chain cover index's DAG of chains) into the embedded mtxdb engine. Exclusive
 by configured engine, not a dual-write, same as `embedded_event_to_state_group.py`.
 
 Unlike `event_to_state_groups`, this table is not a point lookup: its real
 usage is `_get_chain_links`'s recursive walk ("all chains transitively
 reachable from this set, and every edge out of each"), which SQL answers
-with `WITH RECURSIVE`. mdbx has no recursive-query primitive, and this walk
+with `WITH RECURSIVE`. mtxdb has no recursive-query primitive, and this walk
 runs on every state-resolution conflict -- a real hot path -- so the BFS,
 key encoding, and scan all live in Rust
-(`rust/src/database/mdbx.rs`'s `get_auth_chain_links_batch` et al., key
+(`rust/src/database/mtxdb.rs`'s `get_auth_chain_links_batch` et al., key
 layout in `rust/src/database/core.rs`) rather than being reimplemented in
 Python calling `scan_prefix` in a loop: that would pay one FFI round trip
 per chain visited during the walk, exactly the kind of per-item overhead
@@ -34,7 +34,7 @@ the key format only needs to agree with itself, in one place.
 
 Every key is namespaced (see `namespace` on each function) for the same
 reason as `embedded_event_to_state_group.py` -- multiple homeservers can
-share one mdbx file, and chain_ids restart at 1 for each.
+share one mtxdb file, and chain_ids restart at 1 for each.
 
 Purge deletes by `(origin_chain_id, origin_sequence_number)` only, exactly
 matching the existing SQL behaviour (see `_purge_room_txn`,
