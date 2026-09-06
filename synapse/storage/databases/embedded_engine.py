@@ -49,6 +49,5 @@ def get_embedded_engine(engine_name: str) -> ModuleType:
 
         return mtxdb_engine
     raise RuntimeError(
-        f"Unknown embedded_hamt_engine: {engine_name!r} "
-        "(supported engine(s): mtxdb)"
+        f"Unknown embedded_hamt_engine: {engine_name!r} (supported engine(s): mtxdb)"
     )

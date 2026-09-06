@@ -47,6 +47,8 @@ import logging
 import struct
 from typing import TYPE_CHECKING
 
+from synapse.storage.databases.embedded_engine import get_embedded_engine
+
 if TYPE_CHECKING:
     from synapse.server import HomeServer
 
@@ -104,7 +106,7 @@ def _decode_event_json_record(value: bytes) -> tuple[str, str, int | None]:
 
 
 def put_event_json_batch(
-    rows: list[tuple[str, str, str, int | None]],
+    engine_name: str, rows: list[tuple[str, str, str, int | None]]
 ) -> None:
     """`rows`: `(event_id, internal_metadata, json, format_version)`.
     Called from the event persister only (the sole writer of `event_json`),
@@ -112,8 +114,6 @@ def put_event_json_batch(
     `_store_state_hamt_root_embedded_txn`: an mtxdb call is local, no
     network round-trip to justify deferring past commit.
     """
-    from synapse.synapse_rust import mtxdb_engine
-
     pairs = [
         (
             _event_json_key(event_id),
@@ -121,28 +121,26 @@ def put_event_json_batch(
         )
         for event_id, internal_metadata, json, format_version in rows
     ]
-    mtxdb_engine.batch_put(pairs)
+    get_embedded_engine(engine_name).batch_put(pairs)
 
 
 def get_event_json_batch(
-    event_ids: list[str],
+    engine_name: str, event_ids: list[str]
 ) -> dict[str, tuple[str, str, int | None]]:
     """Returns `event_id -> (internal_metadata, json, format_version)` for
     every id found in the embedded engine; a missing id is simply absent
     from the result (the caller falls back to SQL for it).
     """
-    from synapse.synapse_rust import mtxdb_engine
-
     keys = [_event_json_key(event_id) for event_id in event_ids]
     key_to_event_id = dict(zip(keys, event_ids))
-    found = mtxdb_engine.batch_get(keys)
+    found = get_embedded_engine(engine_name).batch_get(keys)
     return {
         key_to_event_id[bytes(key)]: _decode_event_json_record(bytes(value))
         for key, value in found
     }
 
 
-def delete_event_json_batch(event_ids: list[str]) -> None:
+def delete_event_json_batch(engine_name: str, event_ids: list[str]) -> None:
     """Removes `event_id`s from the embedded mirror. Must be called wherever
     `event_json` rows are deleted from SQL (purge_events.py) so the mirror
     doesn't retain data the user asked to be purged -- see also
@@ -151,7 +149,5 @@ def delete_event_json_batch(event_ids: list[str]) -> None:
     """
     if not event_ids:
         return
-    from synapse.synapse_rust import mtxdb_engine
-
     keys = [_event_json_key(event_id) for event_id in event_ids]
-    mtxdb_engine.batch_delete(keys)
+    get_embedded_engine(engine_name).batch_delete(keys)

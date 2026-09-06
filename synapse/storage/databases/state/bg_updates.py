@@ -23,7 +23,6 @@ import hashlib
 import logging
 import struct
 import time
-from types import ModuleType
 from typing import (
     TYPE_CHECKING,
     Mapping,
@@ -31,12 +30,12 @@ from typing import (
 
 from synapse.logging.opentracing import tag_args, trace
 from synapse.storage._base import SQLBaseStore
-from synapse.storage.databases.embedded_engine import get_embedded_engine
 from synapse.storage.database import (
     DatabasePool,
     LoggingDatabaseConnection,
     LoggingTransaction,
 )
+from synapse.storage.databases.embedded_engine import get_embedded_engine
 from synapse.storage.engines import PostgresEngine
 from synapse.types import MutableStateMap, StateMap
 from synapse.types.state import StateFilter
@@ -951,7 +950,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         roots = self._fetch_hamt_roots_for_embedded_txn(txn, groups)
         if not roots:
             return results
-        engine = self._embedded_hamt_engine_module()
+        engine = get_embedded_engine(self.embedded_hamt_engine)
         ordered_groups = list(roots.keys())
         materialized = engine.materialize_state_hamts(
             self.hamt_namespace,
@@ -973,7 +972,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         roots = self._fetch_hamt_roots_for_embedded_txn(txn, groups)
         if not roots:
             return results
-        engine = self._embedded_hamt_engine_module()
+        engine = get_embedded_engine(self.embedded_hamt_engine)
         ordered_groups = list(roots.keys())
         queries = [
             (room_prefix, root_hash, self._room_structural_key(room_id), keys)

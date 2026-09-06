@@ -48,6 +48,8 @@ origin_* searches").
 
 from __future__ import annotations
 
+from synapse.storage.databases.embedded_engine import get_embedded_engine
+
 
 def resolve_namespace(store: object) -> str | None:
     """The namespace to pass to `put_chain_links_batch`/`get_chain_links_batch`
@@ -68,20 +70,18 @@ def resolve_namespace(store: object) -> str | None:
 
 
 def put_chain_links_batch(
-    namespace: str, links: list[tuple[int, int, int, int]]
+    engine_name: str, namespace: str, links: list[tuple[int, int, int, int]]
 ) -> None:
     """`links`: `(origin_chain_id, origin_sequence_number, target_chain_id,
     target_sequence_number)`.
     """
     if not links:
         return
-    from synapse.synapse_rust import mtxdb_engine
-
-    mtxdb_engine.put_auth_chain_links_batch(namespace, links)
+    get_embedded_engine(engine_name).put_auth_chain_links_batch(namespace, links)
 
 
 def get_chain_links_batch(
-    namespace: str, chain_ids: set[int]
+    engine_name: str, namespace: str, chain_ids: set[int]
 ) -> dict[int, list[tuple[int, int, int]]]:
     """Returns every edge out of every chain transitively reachable from
     `chain_ids` (following `target_chain_id`), mirroring one batch of
@@ -94,13 +94,15 @@ def get_chain_links_batch(
     """
     if not chain_ids:
         return {}
-    from synapse.synapse_rust import mtxdb_engine
-
-    return dict(mtxdb_engine.get_auth_chain_links_batch(namespace, list(chain_ids)))
+    return dict(
+        get_embedded_engine(engine_name).get_auth_chain_links_batch(
+            namespace, list(chain_ids)
+        )
+    )
 
 
 def delete_chain_links_batch(
-    namespace: str, origin_chain_seq_pairs: list[tuple[int, int]]
+    engine_name: str, namespace: str, origin_chain_seq_pairs: list[tuple[int, int]]
 ) -> None:
     """Removes every edge whose `(origin_chain_id, origin_sequence_number)`
     matches one of `origin_chain_seq_pairs` -- the embedded-engine
@@ -110,6 +112,6 @@ def delete_chain_links_batch(
     """
     if not origin_chain_seq_pairs:
         return
-    from synapse.synapse_rust import mtxdb_engine
-
-    mtxdb_engine.delete_auth_chain_links_batch(namespace, origin_chain_seq_pairs)
+    get_embedded_engine(engine_name).delete_auth_chain_links_batch(
+        namespace, origin_chain_seq_pairs
+    )
