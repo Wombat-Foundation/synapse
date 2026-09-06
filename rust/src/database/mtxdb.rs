@@ -1,10 +1,17 @@
 use std::sync::Arc;
 
-use mtxdb::{NodeData, PackfileStorage, StorageEngine};
+use mtxdb::{NodeData, NodeId, PackfileStorage, StorageEngine};
+use once_cell::sync::OnceCell;
 use pyo3::prelude::*;
-use rezzy::hamt::StructuralHash;
 
-use crate::database::core::{self, NodeStore, ROOM_PREFIX_LEN};
+use crate::database::core::{NodeStore, ROOM_PREFIX_LEN};
+
+static DB: OnceCell<Arc<dyn StorageEngine>> = OnceCell::new();
+
+fn db() -> PyResult<&'static Arc<dyn StorageEngine>> {
+    DB.get()
+        .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("mtxdb not opened"))
+}
 
 /// Extracts the room prefix and structural hash from a full node key.
 /// Key format: hamt:node:<namespace_hex_16>:<room_prefix_hex>:<structural_hash_hex>
@@ -13,14 +20,6 @@ fn parse_node_key(key: &[u8]) -> Option<([u8; ROOM_PREFIX_LEN], [u8; 32])> {
         return None;
     }
 
-    // Expected lengths:
-    // b"hamt:node:" (10)
-    // namespace_hex (32)
-    // b":" (1)
-    // room_prefix_hex (16)
-    // b":" (1)
-    // structural_hash_hex (64)
-    // Total = 124 bytes
     if key.len() != 124 {
         return None;
     }
@@ -59,25 +58,41 @@ impl NodeStore for MtxdbStore {
                 .map_err(|e| e.to_string())?;
             Ok(result.map(|data| data.bytes.to_vec()))
         } else {
-            // For now, mtxdb only supports content-addressed HAMT nodes.
-            // Roots (hamt:root:...) are not supported in the packfile itself.
             Ok(None)
         }
     }
 }
 
-// TODO: PyO3 wrappers for open_client, put_state_hamt_nodes, repack, delete_room, etc.
+#[pyfunction]
+pub fn open_client(py: Python<'_>, path: String) -> PyResult<()> {
+    py.detach(|| {
+        if DB.get().is_some() {
+            return Ok(());
+        }
+        std::fs::create_dir_all(&path).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("failed to create directory: {}", e))
+        })?;
+
+        let storage = PackfileStorage::open(std::path::PathBuf::from(&path)).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("failed to open mtxdb: {}", e))
+        })?;
+        let _ = DB.set(Arc::new(storage));
+        Ok(())
+    })
+}
 
 #[pyfunction]
 pub fn put_state_hamt_nodes(
     py: Python<'_>,
-    namespace: String,
+    _namespace: String,
     room_prefix: Vec<u8>,
     nodes: Vec<(Vec<u8>, Vec<u8>)>,
 ) -> PyResult<()> {
-    // The user mentioned it receives (full_namespaced_key, node_bytes) pairs.
-    // If nodes contains full_namespaced_keys, we parse them. If it contains raw structural_hashes, we use them directly.
-    let pairs: Vec<(mtxdb::NodeId, mtxdb::NodeData)> = nodes
+    let mut room_id = [0u8; 16];
+    let prefix_len = std::cmp::min(room_prefix.len(), 16);
+    room_id[..prefix_len].copy_from_slice(&room_prefix[..prefix_len]);
+
+    let pairs: Vec<(NodeId, NodeData)> = nodes
         .into_iter()
         .filter_map(|(key_or_hash, bytes)| {
             let mut node_id = [0u8; 16];
@@ -85,23 +100,34 @@ pub fn put_state_hamt_nodes(
                 if let Some((_, structural_hash)) = parse_node_key(&key_or_hash) {
                     node_id.copy_from_slice(&structural_hash[..16]);
                 } else {
-                    return None; // Skip invalid
+                    return None;
                 }
             } else if key_or_hash.len() == 32 {
                 node_id.copy_from_slice(&key_or_hash[..16]);
+            } else if key_or_hash.len() == 16 {
+                node_id.copy_from_slice(&key_or_hash);
             } else {
-                return None; // Skip invalid
+                return None;
             }
-            Some((node_id, mtxdb::NodeData::new(bytes::Bytes::from(bytes))))
+            Some((node_id, NodeData::new(bytes::Bytes::from(bytes))))
         })
         .collect();
 
-    // In a real implementation we would get the DB from a OnceCell or similar.
-    // For now we just return Ok.
-    Ok(())
+    py.detach(|| {
+        let engine = db()?;
+        engine.put_many(&room_id, &pairs).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb put error: {}", e))
+        })
+    })
 }
 
 pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(open_client, m)?)?;
     m.add_function(wrap_pyfunction!(put_state_hamt_nodes, m)?)?;
+
+    // Register as a submodule similar to mdbx_engine
+    py.import("sys")?
+        .getattr("modules")?
+        .set_item("synapse.synapse_rust.mtxdb_engine", m)?;
     Ok(())
 }
