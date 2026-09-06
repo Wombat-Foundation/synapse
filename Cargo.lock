@@ -910,7 +910,7 @@ dependencies = [
 [[package]]
 name = "mtxdb"
 version = "0.1.0"
-source = "git+https://gitlab.com/wombat-foundation/mtxdb.git?rev=af49a650f3adf4a4de8956d261e50a962020cb77#af49a650f3adf4a4de8956d261e50a962020cb77"
+source = "git+https://gitlab.com/wombat-foundation/mtxdb.git?rev=f7e407602a94d8eeb3ac146ba57e8e7192877b55#f7e407602a94d8eeb3ac146ba57e8e7192877b55"
 dependencies = [
  "bytes",
  "crc32fast",
