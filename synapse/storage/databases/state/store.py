@@ -47,7 +47,6 @@ from synapse.storage.databases.embedded_engine import get_embedded_engine
 from synapse.storage.databases.state.bg_updates import (
     StateBackgroundUpdateStore,
     _encode_state_hamt_root,
-    _state_hamt_node_key,
     _state_hamt_root_key,
 )
 from synapse.storage.engines import PostgresEngine
@@ -959,11 +958,10 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             return None
         engine = get_embedded_engine(self._embedded_hamt_engine)
 
-        key = _state_hamt_node_key(
-            self._embedded_hamt_namespace, room_prefix, node_hash
+        results = engine.get_state_hamt_nodes_batch(
+            self._embedded_hamt_namespace, room_prefix, [node_hash]
         )
-        results = engine.batch_get([key])
-        return bytes(results[0][1]) if results else None
+        return bytes(results[0]) if results and results[0] is not None else None
 
     def _get_embedded_hamt_nodes_batch(
         self, room_prefix: bytes, node_hashes: list[bytes]
@@ -977,14 +975,14 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             return {}
         engine = get_embedded_engine(self._embedded_hamt_engine)
 
-        key_to_hash = {
-            _state_hamt_node_key(
-                self._embedded_hamt_namespace, room_prefix, node_hash
-            ): node_hash
-            for node_hash in node_hashes
+        results = engine.get_state_hamt_nodes_batch(
+            self._embedded_hamt_namespace, room_prefix, node_hashes
+        )
+        return {
+            node_hash: bytes(data)
+            for node_hash, data in zip(node_hashes, results)
+            if data is not None
         }
-        found = engine.batch_get(list(key_to_hash))
-        return {key_to_hash[bytes(key)]: bytes(value) for key, value in found}
 
     def _store_state_hamt_root_embedded_txn(
         self,

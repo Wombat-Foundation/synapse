@@ -488,7 +488,7 @@ pub fn lookup_state_hamts(
     })
 }
 
-pub type PyRootRecord = (Vec<u8>, Vec<u8>, String);
+pub type PyRootRecord = (i64, Vec<u8>, Vec<u8>, String, Vec<u8>);
 
 #[pyfunction]
 pub fn batch_get_state_hamt_roots(
@@ -504,13 +504,20 @@ pub fn batch_get_state_hamt_roots(
         let records = core::batch_get_state_hamt_roots(&store, &namespace, &groups)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
-        Ok(records
+        Ok(groups
             .into_iter()
-            .map(|rec| {
+            .zip(records)
+            .map(|(group, rec)| {
                 rec.map(|r| {
                     let structural_hash_vec = r.root_hash.as_slice().to_vec();
                     let room_prefix_vec = r.room_prefix.to_vec();
-                    (room_prefix_vec, structural_hash_vec, r.room_id)
+                    (
+                        group,
+                        room_prefix_vec,
+                        structural_hash_vec,
+                        r.room_id,
+                        r.lattice,
+                    )
                 })
             })
             .collect())
@@ -554,9 +561,46 @@ pub fn increment_counters_batch(py: Python<'_>, pairs: Vec<(Vec<u8>, i64)>) -> P
     })
 }
 
+/// Batch-read HAMT nodes from the native mtxdb store using the same
+/// `(room_prefix, structural_hash)` key encoding that `put_state_hamt_nodes`
+/// uses.  Returns one `Option<Vec<u8>>` per requested hash (`None` for misses).
+#[pyfunction]
+pub fn get_state_hamt_nodes_batch(
+    py: Python<'_>,
+    _namespace: String,
+    room_prefix: Vec<u8>,
+    hashes: Vec<Vec<u8>>,
+) -> PyResult<Vec<Option<Vec<u8>>>> {
+    let mut room_id = [0u8; 16];
+    let prefix_len = std::cmp::min(room_prefix.len(), 16);
+    room_id[..prefix_len].copy_from_slice(&room_prefix[..prefix_len]);
+
+    let node_ids: Vec<NodeId> = hashes
+        .iter()
+        .map(|h| {
+            let mut node_id = [0u8; 16];
+            let copy_len = std::cmp::min(h.len(), 16);
+            node_id[..copy_len].copy_from_slice(&h[..copy_len]);
+            node_id
+        })
+        .collect();
+
+    py.detach(|| {
+        let engine = db()?;
+        let results = engine.get_many(&room_id, &node_ids).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb get error: {}", e))
+        })?;
+        Ok(results
+            .into_iter()
+            .map(|opt| opt.map(|d| d.bytes.to_vec()))
+            .collect())
+    })
+}
+
 pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(open_client, m)?)?;
     m.add_function(wrap_pyfunction!(put_state_hamt_nodes, m)?)?;
+    m.add_function(wrap_pyfunction!(get_state_hamt_nodes_batch, m)?)?;
     m.add_function(wrap_pyfunction!(get_auth_chain_links_batch, m)?)?;
     m.add_function(wrap_pyfunction!(put_auth_chain_links_batch, m)?)?;
     m.add_function(wrap_pyfunction!(delete_auth_chain_links_batch, m)?)?;
