@@ -144,7 +144,7 @@ def _print_table_ops() -> None:
     ranked = sorted(_TABLE_OPS.items(), key=lambda kv: kv[1], reverse=True)
     print("\n=== Per-table SQL timing (top 30) ===", file=sys.stderr)
     print(
-        f"  {'table':40s}  {'total':>8s}  {'calls':>6s}  {'rows':>6s}  {'avg':>10s}",
+        f"  {'table':40s}  {'total':>9s}  {'calls':>6s}  {'rows':>6s}  {'avg':>11s}",
         file=sys.stderr,
     )
     for table, total_s in ranked[:30]:
@@ -153,7 +153,7 @@ def _print_table_ops() -> None:
         total_ms = total_s * 1000
         avg_ms = (total_s / count) * 1000 if count else 0.0
         print(
-            f"  {table:40s}  {total_ms:7.1f}ms  {count:6d}  {rows:6d}  {avg_ms:9.3f}ms",
+            f"  {table:40s}  {total_ms:8.1f}ms  {count:6d}  {rows:6d}  {avg_ms:10.3f}ms",
             file=sys.stderr,
         )
     total_time_s = sum(_TABLE_OPS.values())
@@ -163,8 +163,8 @@ def _print_table_ops() -> None:
     avg_ms = (total_time_s / total_count) * 1000 if total_count else 0.0
     print("", file=sys.stderr)
     print(
-        f"  {'TOTAL':40s}  {total_ms:7.1f}ms  "
-        f"{total_count:6d}  {total_rows:6d}  {avg_ms:9.3f}ms",
+        f"  {'TOTAL':40s}  {total_ms:8.1f}ms  "
+        f"{total_count:6d}  {total_rows:6d}  {avg_ms:10.3f}ms",
         file=sys.stderr,
     )
     print("=====================================\n", file=sys.stderr)

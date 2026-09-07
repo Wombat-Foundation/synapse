@@ -145,7 +145,7 @@ def _print_pg_timings() -> None:
         return
     print("\n=== Postgres test-DB lifecycle timings ===", file=sys.stderr)
     print(
-        f"  {'':40s}  {'total':>8s}  {'calls':>6s}  {'avg':>10s}",
+        f"  {'':40s}  {'total':>9s}  {'calls':>6s}  {'avg':>11s}",
         file=sys.stderr,
     )
     for tag in sorted(_PG_TIMINGS):
@@ -154,13 +154,14 @@ def _print_pg_timings() -> None:
         total_ms = total_s * 1000
         avg_ms = (total_s / count) * 1000 if count else 0.0
         print(
-            f"  {tag:40s}  {total_ms:7.1f}ms  {count:6d}  {avg_ms:9.3f}ms",
+            f"  {tag:40s}  {total_ms:8.1f}ms  {count:6d}  {avg_ms:10.3f}ms",
             file=sys.stderr,
         )
     total_s = sum(_PG_TIMINGS.values())
     total_ms = total_s * 1000
+    print("", file=sys.stderr)
     print(
-        f"  {'TOTAL':40s}  {total_ms:7.1f}ms",
+        f"  {'TOTAL':40s}  {total_ms:8.1f}ms",
         file=sys.stderr,
     )
     print("==========================================\n", file=sys.stderr)
