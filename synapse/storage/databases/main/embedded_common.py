@@ -21,8 +21,14 @@ class SyncTier(Enum):
 
 
 def maybe_sync(tier: SyncTier) -> None:
-    """Call sync() if the tier requires durability."""
-    if tier == SyncTier.DURABLE:
-        from synapse.synapse_rust.mtxdb_engine import sync
-
-        sync()
+    """No-op: kept for call-site compatibility and to preserve the DURABLE
+    vs. CACHE classification in each call site's docstring/comments (still
+    meaningful documentation of which writes have no SQL fallback), but an
+    actual fsync is a whole-device write-cache flush, not scoped to the
+    bytes just written -- too expensive to pay per write/per batch (~59ms
+    measured per call). A single periodic background task
+    (`StateGroupDataStore._periodic_embedded_sync`, every ~1s) flushes the
+    one shared shard file for every embedded write from every store
+    instead, bounding the durability window to about a second rather than
+    paying an fsync on the hot path.
+    """

@@ -179,6 +179,25 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     self._drain_embedded_state_hamt_root_deletion_queue,
                     Duration(minutes=5),
                 )
+                # Every write path into the embedded engine above was
+                # changed to *not* fsync per write/per batch -- an fsync
+                # there is a whole-device write-cache flush, not scoped to
+                # those bytes (see the mtxdb shard-sync discussion), so
+                # paying it per state-group/per-event was both wrong
+                # (dominated actual write cost, ~59ms/call measured) and
+                # unnecessary (SQL's own commit durability isn't improved
+                # by it -- these embedded writes have no SQL fallback once
+                # the engine is exclusive, but bounding the durability
+                # window to a few seconds via a timer, instead of an fsync
+                # on every write, is the same tradeoff SQL's own
+                # asynchronous-commit mode makes). One process flushes for
+                # everyone: mtxdb's shard file is a single mmap'd file
+                # shared across workers, so any process holding it open
+                # can fsync all of it regardless of who wrote which bytes.
+                hs.get_clock().looping_call(
+                    self._periodic_embedded_sync,
+                    Duration(seconds=1),
+                )
 
             self.db_pool.updates.register_background_update_handler(
                 self.EMBEDDED_HAMT_MIGRATION_UPDATE_NAME,
@@ -314,9 +333,11 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             engine.put_state_hamt_nodes(
                 self._embedded_hamt_namespace, room_prefix, list(nodes.items())
             )
-            _st_sync = time.monotonic()
-            maybe_sync(SyncTier.DURABLE)
-            _state_timing("state_sync_embedded", time.monotonic() - _st_sync)
+            # No sync here -- a periodic background task flushes the shard
+            # file on a timer instead of per-write (see
+            # _periodic_embedded_sync); an fsync is a whole-device cache
+            # flush, not scoped to this write, so it's too expensive to pay
+            # per state-group/per-event.
             if lattice:
                 self._store_state_hamt_root_embedded_txn(
                     state_group, room_prefix, root_hash, lattice, room_id
@@ -327,13 +348,9 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 migrate_one_txn(
                     txn, state_group, room_prefix, root_hash, lattice, room_id
                 )
-            # Final sync for the last iteration's root write (earlier
-            # iterations' roots are flushed by the next iteration's node
-            # sync, since they share one global shard file).
-            if self._embedded_hamt_engine == "mtxdb":
-                _st_sync = time.monotonic()
-                maybe_sync(SyncTier.DURABLE)
-                _state_timing("state_sync_embedded", time.monotonic() - _st_sync)
+            # No sync here -- see _periodic_embedded_sync. This migration
+            # reads from SQL and is idempotent, so a crash mid-batch just
+            # means re-doing some work on restart, not data loss.
             self.db_pool.updates._background_update_progress_txn(
                 txn,
                 self.EMBEDDED_HAMT_MIGRATION_UPDATE_NAME,
@@ -1182,11 +1199,10 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     txn, state_group, room_id, room_prefix, current_state_ids
                 )
 
-            # Batched sync for all root writes above.
-            if self._embedded_hamt_engine == "mtxdb":
-                _st_sync = time.monotonic()
-                maybe_sync(SyncTier.DURABLE)
-                _state_timing("state_sync_embedded", time.monotonic() - _st_sync)
+            # No sync here -- see _periodic_embedded_sync. This backfill
+            # reads from SQL and is idempotent (already_embedded above
+            # skips groups it finds on retry), so a crash mid-batch just
+            # means re-doing some work on restart, not data loss.
 
             self.db_pool.updates._background_update_progress_txn(
                 txn,
@@ -1403,13 +1419,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 local_roots[sg_after] = (root_hash, lattice)
                 sg_before = sg_after
 
-            # Single batched sync() for all root writes above -- same
-            # reasoning as _store_state_hamt_nodes_txn: they all land in
-            # the same global shard file, so one fsync flushes all of them.
-            if self._embedded_hamt_engine == "mtxdb":
-                _st_sync = time.monotonic()
-                maybe_sync(SyncTier.DURABLE)
-                _state_timing("state_sync_embedded", time.monotonic() - _st_sync)
+            # No sync here -- see _periodic_embedded_sync.
 
             return events_and_context, hamt_writes
 
@@ -1531,15 +1541,13 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     local_roots=initial_roots,
                 )
             )
-            if self._embedded_hamt_engine == "mtxdb":
-                _st_sync = time.monotonic()
-                maybe_sync(SyncTier.DURABLE)
-                _state_timing("state_sync_embedded", time.monotonic() - _st_sync)
+            # No sync here -- see _periodic_embedded_sync.
 
             return state_group, root_structural_hash, lattice, nodes
 
         # Both SQL and (if configured) the embedded engine were already
-        # written synchronously in insert_full_state_txn -- nothing left to
+        # written (not synced -- see _periodic_embedded_sync) in
+        # insert_full_state_txn -- nothing left to
         # publish post-commit.
         state_group, _root_hash, _lattice, _nodes = await self.db_pool.runInteraction(
             "store_state_group.insert_full_state",
@@ -1754,6 +1762,30 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         )
         if self._embedded_hamt_engine == "mtxdb":
             await self._drain_embedded_state_hamt_root_deletion_queue()
+
+    @wrap_as_background_process("periodic_embedded_sync")
+    async def _periodic_embedded_sync(self) -> None:
+        """Flush the embedded engine's shard file on a timer instead of
+        fsyncing on every write/batch -- see the call site in `__init__`
+        for why. Runs on a single worker (gated by `run_background_tasks`
+        the same as the other looping calls here); mtxdb's shard file is
+        shared across all workers via mmap, so this flushes every
+        process's writes, not just this one's.
+
+        Best-effort: an fsync failure here is observability/durability, not
+        correctness -- the data is already written, just not yet forced to
+        disk -- so it's logged and swallowed rather than raised into the
+        reactor's looping-call error handling.
+        """
+        if self._embedded_hamt_engine != "mtxdb":
+            return
+        try:
+            maybe_sync(SyncTier.DURABLE)
+        except Exception:
+            logger.warning(
+                "Periodic embedded-engine sync failed (will retry in ~1s)",
+                exc_info=True,
+            )
 
     @wrap_as_background_process("drain_embedded_state_hamt_root_deletion_queue")
     async def _drain_embedded_state_hamt_root_deletion_queue(self) -> None:
