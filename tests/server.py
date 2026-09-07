@@ -1361,6 +1361,17 @@ def setup_test_homeserver(
             db_engine.attempt_to_set_autocommit(db_conn, True)
             cur = db_conn.cursor()
 
+            # Force-close any other sessions still attached to the test DB
+            # (e.g. a connection pool that hasn't finished tearing down yet)
+            # before we try to drop it, rather than relying purely on
+            # retry-with-sleep below. This is scoped to this test's own
+            # scratch DB via datname, so it can't affect any other test.
+            cur.execute(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                "WHERE datname = %s AND pid <> pg_backend_pid();",
+                (test_db,),
+            )
+
             # Try a few times to drop the DB. Some things may hold on to the
             # database for a few more seconds due to flakiness, preventing
             # us from dropping it when the test is over. If we can't drop
