@@ -1,7 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use mtxdb::{NodeData, NodeId, PackfileStorage, StorageEngine};
+use mtxdb::{
+    is_known_tag, NodeData, NodeId, PackfileStorage, StorageEngine, ENTRY_TYPE_AUTH_CHAIN_LINKS,
+    ENTRY_TYPE_EVENT_JSON, ENTRY_TYPE_EVENT_STATE_GROUP, ENTRY_TYPE_GENERIC_KV,
+    ENTRY_TYPE_HAMT_NODE, ENTRY_TYPE_HAMT_ROOT_FLAT, ENTRY_TYPE_HAMT_ROOT_TYPED,
+    ENTRY_TYPE_STATE_GROUP_REFCOUNT,
+};
 use once_cell::sync::OnceCell;
 use pyo3::prelude::*;
 use sha2::{Digest, Sha256};
@@ -636,31 +641,6 @@ pub fn get_state_hamt_nodes_batch(
 // Entry Type Tags
 // -----------------------------------------------------------------------------
 
-/// Known entry type tags matching mtxdb-core constants.
-const TAG_HAMT_ROOT_FLAT: u8 = 0x01;
-const TAG_HAMT_ROOT_TYPED: u8 = 0x02;
-const TAG_HAMT_NODE: u8 = 0x03;
-const TAG_EVENT_JSON: u8 = 0x04;
-const TAG_EVENT_STATE_GROUP: u8 = 0x05;
-const TAG_STATE_GROUP_REFCOUNT: u8 = 0x06;
-const TAG_AUTH_CHAIN_LINKS: u8 = 0x07;
-const TAG_GENERIC_KV: u8 = 0x08;
-
-/// Returns true if the byte is a recognized entry type tag.
-fn is_known_tag(byte: u8) -> bool {
-    matches!(
-        byte,
-        TAG_HAMT_ROOT_FLAT
-            | TAG_HAMT_ROOT_TYPED
-            | TAG_HAMT_NODE
-            | TAG_EVENT_JSON
-            | TAG_EVENT_STATE_GROUP
-            | TAG_STATE_GROUP_REFCOUNT
-            | TAG_AUTH_CHAIN_LINKS
-            | TAG_GENERIC_KV
-    )
-}
-
 /// Strip a recognized entry type tag from the front of a value, returning
 /// `(tag_byte, remaining_bytes)`. If the first byte is not a known tag,
 /// returns `(0x00, original_bytes)` — legacy/untagged data.
@@ -751,6 +731,15 @@ pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     m.add_function(wrap_pyfunction!(increment_counters_batch, m)?)?;
     m.add_function(wrap_pyfunction!(batch_get_typed, m)?)?;
     m.add_function(wrap_pyfunction!(batch_put_typed, m)?)?;
+
+    m.add("ENTRY_TYPE_HAMT_ROOT_FLAT", ENTRY_TYPE_HAMT_ROOT_FLAT)?;
+    m.add("ENTRY_TYPE_HAMT_ROOT_TYPED", ENTRY_TYPE_HAMT_ROOT_TYPED)?;
+    m.add("ENTRY_TYPE_HAMT_NODE", ENTRY_TYPE_HAMT_NODE)?;
+    m.add("ENTRY_TYPE_EVENT_JSON", ENTRY_TYPE_EVENT_JSON)?;
+    m.add("ENTRY_TYPE_EVENT_STATE_GROUP", ENTRY_TYPE_EVENT_STATE_GROUP)?;
+    m.add("ENTRY_TYPE_STATE_GROUP_REFCOUNT", ENTRY_TYPE_STATE_GROUP_REFCOUNT)?;
+    m.add("ENTRY_TYPE_AUTH_CHAIN_LINKS", ENTRY_TYPE_AUTH_CHAIN_LINKS)?;
+    m.add("ENTRY_TYPE_GENERIC_KV", ENTRY_TYPE_GENERIC_KV)?;
 
     py.import("sys")?
         .getattr("modules")?

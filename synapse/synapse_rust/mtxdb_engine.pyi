@@ -42,6 +42,11 @@ def batch_get_state_hamt_roots(
 ) -> list[tuple[int, bytes, bytes, str, bytes] | None]: ...
 def increment_counters_batch(pairs: Iterable[tuple[bytes, int]]) -> list[int]: ...
 
-TAG_EVENT_JSON: int
-TAG_EVENT_STATE_GROUP: int
-TAG_STATE_GROUP_REFCOUNT: int
+ENTRY_TYPE_HAMT_ROOT_FLAT: int
+ENTRY_TYPE_HAMT_ROOT_TYPED: int
+ENTRY_TYPE_HAMT_NODE: int
+ENTRY_TYPE_EVENT_JSON: int
+ENTRY_TYPE_EVENT_STATE_GROUP: int
+ENTRY_TYPE_STATE_GROUP_REFCOUNT: int
+ENTRY_TYPE_AUTH_CHAIN_LINKS: int
+ENTRY_TYPE_GENERIC_KV: int

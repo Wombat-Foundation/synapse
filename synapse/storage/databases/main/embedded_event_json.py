@@ -118,7 +118,7 @@ def put_event_json_batch(
     `_store_state_hamt_root_embedded_txn`: an mtxdb call is local, no
     network round-trip to justify deferring past commit.
     """
-    from synapse.synapse_rust.mtxdb_engine import TAG_EVENT_JSON, batch_put_typed
+    from synapse.synapse_rust.mtxdb_engine import ENTRY_TYPE_EVENT_JSON, batch_put_typed
 
     pairs = [
         (
@@ -127,7 +127,7 @@ def put_event_json_batch(
         )
         for event_id, internal_metadata, json, format_version in rows
     ]
-    batch_put_typed(pairs, TAG_EVENT_JSON)
+    batch_put_typed(pairs, ENTRY_TYPE_EVENT_JSON)
 
 
 def get_event_json_batch(
@@ -137,11 +137,11 @@ def get_event_json_batch(
     every id found in the embedded engine; a missing id is simply absent
     from the result (the caller falls back to SQL for it).
     """
-    from synapse.synapse_rust.mtxdb_engine import TAG_EVENT_JSON, batch_get_typed
+    from synapse.synapse_rust.mtxdb_engine import ENTRY_TYPE_EVENT_JSON, batch_get_typed
 
     keys = [_event_json_key(event_id) for event_id in event_ids]
     key_to_event_id = dict(zip(keys, event_ids))
-    found = batch_get_typed(keys, TAG_EVENT_JSON)
+    found = batch_get_typed(keys, ENTRY_TYPE_EVENT_JSON)
     return {
         key_to_event_id[bytes(key)]: _decode_event_json_record(bytes(value))
         for key, value in found
