@@ -72,8 +72,11 @@ def _print_state_timings() -> None:
             f"  {tag:40s}  {total:8.3f}s  ({count} calls, {total / count:.4f}s avg)",
             file=sys.stderr,
         )
+    total_time = sum(_STATE_TIMINGS.values())
+    total_count = sum(_STATE_TIMING_COUNTS.values())
+    avg = total_time / total_count if total_count else 0.0
     print(
-        f"  {'TOTAL':40s}  {sum(_STATE_TIMINGS.values()):8.3f}s",
+        f"  {'TOTAL':40s}  {total_time:8.3f}s  ({total_count} calls, {avg:.4f}s avg)",
         file=sys.stderr,
     )
     print("=========================================\n", file=sys.stderr)
