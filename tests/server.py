@@ -180,18 +180,19 @@ def _drop_pending_test_dbs() -> None:
     import psycopg2
 
     from tests.utils import (
-        POSTGRES_BASE_DB,
+        POSTGRES_DBNAME_FOR_INITIAL_CREATE,
         POSTGRES_HOST,
         POSTGRES_PASSWORD,
         POSTGRES_PORT,
         POSTGRES_USER,
     )
 
-    # Connect to the (still-live) template DB, same as the per-test
-    # create/drop calls did -- there's no guarantee a plain "postgres"
-    # maintenance DB exists on whatever Postgres this is pointed at.
+    # Connect to the stable "postgres" maintenance DB -- not
+    # POSTGRES_BASE_DB, which may already have been torn down by
+    # tests/utils.py's own atexit cleanup (runs LIFO, registered later
+    # so it fires first).
     db_conn = psycopg2.connect(
-        dbname=POSTGRES_BASE_DB,
+        dbname=POSTGRES_DBNAME_FOR_INITIAL_CREATE,
         user=POSTGRES_USER,
         host=POSTGRES_HOST,
         port=POSTGRES_PORT,
