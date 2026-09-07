@@ -117,11 +117,17 @@ def put_event_json_batch(
     synchronously in the persisting transaction -- same reasoning as
     `_store_state_hamt_root_embedded_txn`: an mtxdb call is local, no
     network round-trip to justify deferring past commit.
+
+    Deliberately does not call sync() after the write: unlike every other
+    embedded sidecar, get_event_json_batch's caller falls back to SQL on a
+    miss (see its docstring), so an unflushed write lost to a crash before
+    the next fsync just means a slower read via that fallback, not silent
+    data loss -- not worth paying a synchronous fsync on this hot a path
+    for every persisted event.
     """
     from synapse.synapse_rust.mtxdb_engine import (
         ENTRY_TYPE_EVENT_JSON,
         batch_put_typed,
-        sync,
     )
 
     pairs = [
@@ -132,7 +138,6 @@ def put_event_json_batch(
         for event_id, internal_metadata, json, format_version in rows
     ]
     batch_put_typed(pairs, ENTRY_TYPE_EVENT_JSON)
-    sync()
 
 
 def get_event_json_batch(
