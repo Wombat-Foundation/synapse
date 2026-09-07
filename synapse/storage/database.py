@@ -118,6 +118,8 @@ _TABLE_RE = re.compile(
 
 
 def _track_table_op(sql: str, elapsed: float, rowcount: int = 0) -> None:
+    if not os.environ.get("SYNAPSE_PG_TIMINGS"):
+        return
     m = _TABLE_RE.search(sql)
     if not m:
         return

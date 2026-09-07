@@ -1258,7 +1258,7 @@ def setup_test_homeserver(
                 "user": POSTGRES_USER,
                 "port": POSTGRES_PORT,
                 "cp_min": 1,
-                "cp_max": 5,
+                "cp_max": 1,
             },
         }
     else:
@@ -1366,11 +1366,18 @@ def setup_test_homeserver(
             # before we try to drop it, rather than relying purely on
             # retry-with-sleep below. This is scoped to this test's own
             # scratch DB via datname, so it can't affect any other test.
-            cur.execute(
-                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                "WHERE datname = %s AND pid <> pg_backend_pid();",
-                (test_db,),
-            )
+            try:
+                cur.execute(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                    "WHERE datname = %s AND pid <> pg_backend_pid();",
+                    (test_db,),
+                )
+            except psycopg2.Error:
+                warnings.warn(
+                    "Could not terminate backends for %s (non-superuser?)" % (test_db,),
+                    category=UserWarning,
+                    stacklevel=2,
+                )
 
             # Try a few times to drop the DB. Some things may hold on to the
             # database for a few more seconds due to flakiness, preventing

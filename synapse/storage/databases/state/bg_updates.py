@@ -25,6 +25,7 @@ import logging
 import os
 import struct
 import sys
+import threading
 import time
 from collections import defaultdict
 from typing import (
@@ -54,11 +55,22 @@ logger = logging.getLogger(__name__)
 # ── mtxdb-vs-SQL timing (opt-in via SYNAPSE_PG_TIMINGS=1) ───────────────
 _STATE_TIMINGS: dict[str, float] = defaultdict(float)
 _STATE_TIMING_COUNTS: dict[str, int] = defaultdict(int)
+_STATE_TIMING_LOCK: "threading.Lock | None" = (
+    threading.Lock() if os.environ.get("SYNAPSE_PG_TIMINGS") else None
+)
 
 
 def _state_timing(tag: str, elapsed: float) -> None:
-    _STATE_TIMINGS[tag] += elapsed
-    _STATE_TIMING_COUNTS[tag] += 1
+    if not os.environ.get("SYNAPSE_PG_TIMINGS"):
+        return
+    lock = _STATE_TIMING_LOCK
+    if lock is not None:
+        with lock:
+            _STATE_TIMINGS[tag] += elapsed
+            _STATE_TIMING_COUNTS[tag] += 1
+    else:
+        _STATE_TIMINGS[tag] += elapsed
+        _STATE_TIMING_COUNTS[tag] += 1
 
 
 def _print_state_timings() -> None:

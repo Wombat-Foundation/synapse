@@ -144,6 +144,7 @@ class EmbeddedHamtWorkerGuardTestCase(unittest.TestCase):
         with self.assertRaises(ConfigError):
             self._make_worker_config(
                 worker_app="synapse.app.generic_worker",
+                instance_map={"main": {"host": "127.0.0.1", "port": 8008}},
             )
 
     def test_instance_map_raises(self) -> None:

@@ -180,6 +180,7 @@ def make_homeserver_config_obj(config: dict[str, Any]) -> HomeServerConfig:
     # embedded_hamt (mtxdb) is fundamentally single-process. Strip it whenever
     # the config declares worker_app or instance_map to avoid the guard in
     # WorkerConfig.read_config, regardless of which test base class injected them.
+    config = dict(config)
     if config.get("worker_app") is not None or config.get("instance_map"):
         config.pop("embedded_hamt", None)
     config_obj = _parse_config_dict(json.dumps(config, sort_keys=True))
