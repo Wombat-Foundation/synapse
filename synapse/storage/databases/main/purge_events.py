@@ -606,6 +606,7 @@ class PurgeEventsStore(StateGroupWorkerStore, CacheInvalidationWorkerStore):
                     for chain_id, sequence_number in referenced_chain_id_tuples
                     if chain_id is not None
                 ],
+                sync=True,
             )
         else:
             txn.executemany(

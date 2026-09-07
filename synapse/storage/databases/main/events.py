@@ -1238,6 +1238,13 @@ class PersistEventsStore:
             txn, room_id, events_and_contexts
         )
 
+        # One sync for everything this txn wrote to the embedded engine
+        # (event_to_state_groups batch + chain-links batch above), not one
+        # per helper call -- see put_event_to_state_group_batch's and
+        # put_chain_links_batch's docstrings. `maybe_sync` itself no-ops
+        # unless the embedded engine is actually configured.
+        maybe_sync(SyncTier.DURABLE)
+
     def _persist_event_auth_chain_txn(
         self,
         txn: LoggingTransaction,
@@ -1255,6 +1262,7 @@ class PersistEventsStore:
                 new_event_links,
                 resolve_namespace(self),
                 self._embedded_hamt_engine,
+                sync=False,
             )
 
         # We only care about state events, so this if there are no state events.
@@ -1583,6 +1591,7 @@ class PersistEventsStore:
         new_event_links: dict[str, NewEventChainLinks],
         embedded_hamt_namespace: str | None,
         embedded_hamt_engine: str | None,
+        sync: bool = True,
     ) -> None:
         db_pool.simple_insert_many_txn(
             txn,
@@ -1621,7 +1630,7 @@ class PersistEventsStore:
             )
 
             put_chain_links_batch(
-                embedded_hamt_engine, embedded_hamt_namespace, chain_links
+                embedded_hamt_engine, embedded_hamt_namespace, chain_links, sync=sync
             )
             return
 
@@ -3833,10 +3842,11 @@ class PersistEventsStore:
                     if event_id in non_null_state_groups
                 ],
             )
-            # One sync for the whole batch (put + increment above), not one
-            # per helper call -- see put_event_to_state_group_batch's
-            # docstring.
-            maybe_sync(SyncTier.DURABLE)
+            # No sync here: both call sites of this method are within
+            # `_persist_events_txn`'s scope, which does one combined sync
+            # at the very end covering this write plus the chain-links
+            # batch -- see the comment there and
+            # put_event_to_state_group_batch's docstring.
         else:
             self.db_pool.simple_upsert_many_txn(
                 txn,

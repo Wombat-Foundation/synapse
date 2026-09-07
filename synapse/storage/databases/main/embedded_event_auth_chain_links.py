@@ -73,14 +73,23 @@ def put_chain_links_batch(
     engine_name: str | None,
     namespace: str,
     links: list[tuple[int, int, int, int]],
+    sync: bool = False,
 ) -> None:
     """`links`: `(origin_chain_id, origin_sequence_number, target_chain_id,
     target_sequence_number)`.
+
+    `sync`: defaults to `False` -- an fsync here is a whole-device cache
+    flush (see the shard-sync discussion), not scoped to this write, so
+    it's not paid on every batch. Pass `True` only at call sites that are
+    standalone (not already covered by another sync in the same logical
+    transaction) and where losing the last few seconds of these edges on a
+    crash is unacceptable.
     """
     if not links:
         return
     get_embedded_engine(engine_name).put_auth_chain_links_batch(namespace, links)
-    maybe_sync(SyncTier.DURABLE)
+    if sync:
+        maybe_sync(SyncTier.DURABLE)
 
 
 def get_chain_links_batch(
@@ -110,16 +119,22 @@ def delete_chain_links_batch(
     engine_name: str | None,
     namespace: str,
     origin_chain_seq_pairs: list[tuple[int, int]],
+    sync: bool = False,
 ) -> None:
     """Removes every edge whose `(origin_chain_id, origin_sequence_number)`
     matches one of `origin_chain_seq_pairs` -- the embedded-engine
     equivalent of `DELETE FROM event_auth_chain_links WHERE origin_chain_id
     = ? AND origin_sequence_number = ?`. Deliberately does not touch edges
     where these only appear as the *target* (see module docstring).
+
+    `sync`: see `put_chain_links_batch` -- defaults to `False`, pass `True`
+    at standalone call sites (purge, background migration) that aren't
+    already covered by another sync in the same logical transaction.
     """
     if not origin_chain_seq_pairs:
         return
     get_embedded_engine(engine_name).delete_auth_chain_links_batch(
         namespace, origin_chain_seq_pairs
     )
-    maybe_sync(SyncTier.DURABLE)
+    if sync:
+        maybe_sync(SyncTier.DURABLE)

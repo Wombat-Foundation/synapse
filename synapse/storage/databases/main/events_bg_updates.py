@@ -594,7 +594,10 @@ class EventsBackgroundUpdatesStore(
         )
 
         put_chain_links_batch(
-            self._embedded_hamt_engine, self._embedded_hamt_namespace, rows
+            self._embedded_hamt_engine,
+            self._embedded_hamt_namespace,
+            rows,
+            sync=True,
         )
 
         (
@@ -1549,6 +1552,7 @@ class EventsBackgroundUpdatesStore(
                     self._embedded_hamt_engine,
                     embedded_hamt_namespace,
                     unreferenced_chain_id_tuples,
+                    sync=True,
                 )
             else:
                 txn.executemany(
