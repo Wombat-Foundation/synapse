@@ -584,21 +584,13 @@ pub fn increment_counters_batch(pairs: Vec<(Vec<u8>, i64)>) -> PyResult<Vec<i64>
     for (key, delta) in pairs {
         let node_id = kv_node_id(&key);
         let current = match engine.get(&room_id, &node_id) {
-            // Values here are always written tagged now (below), but a
-            // value written by the pre-fix code is a bare untagged 8-byte
-            // integer -- try the stripped (tagged) form first, then fall
-            // back to the original bytes as a raw untagged value, so an
-            // existing counter from before this fix isn't silently reset
-            // to 0.
+            // Values here are always written tagged (below) -- this path
+            // has never shipped untagged, so there's no legacy format to
+            // stay compatible with.
             Ok(Some(data)) => {
                 let (_tag, payload) = strip_tag(&data.bytes);
-                let raw: &[u8] = if payload.len() == 8 {
-                    payload
-                } else {
-                    &data.bytes
-                };
-                if raw.len() == 8 {
-                    i64::from_be_bytes(raw.try_into().unwrap())
+                if payload.len() == 8 {
+                    i64::from_be_bytes(payload.try_into().unwrap())
                 } else {
                     0
                 }
