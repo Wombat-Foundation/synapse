@@ -4,8 +4,7 @@ use std::sync::Arc;
 use mtxdb::{
     is_known_tag, NodeData, NodeId, PackfileStorage, StorageEngine, ENTRY_TYPE_AUTH_CHAIN_LINKS,
     ENTRY_TYPE_EVENT_JSON, ENTRY_TYPE_EVENT_STATE_GROUP, ENTRY_TYPE_GENERIC_KV,
-    ENTRY_TYPE_HAMT_NODE, ENTRY_TYPE_HAMT_ROOT_FLAT, ENTRY_TYPE_HAMT_ROOT_TYPED,
-    ENTRY_TYPE_STATE_GROUP_REFCOUNT,
+    ENTRY_TYPE_HAMT_NODE, ENTRY_TYPE_HAMT_ROOT, ENTRY_TYPE_STATE_GROUP_REFCOUNT,
 };
 use once_cell::sync::OnceCell;
 use pyo3::prelude::*;
@@ -732,8 +731,7 @@ pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     m.add_function(wrap_pyfunction!(batch_get_typed, m)?)?;
     m.add_function(wrap_pyfunction!(batch_put_typed, m)?)?;
 
-    m.add("ENTRY_TYPE_HAMT_ROOT_FLAT", ENTRY_TYPE_HAMT_ROOT_FLAT)?;
-    m.add("ENTRY_TYPE_HAMT_ROOT_TYPED", ENTRY_TYPE_HAMT_ROOT_TYPED)?;
+    m.add("ENTRY_TYPE_HAMT_ROOT", ENTRY_TYPE_HAMT_ROOT)?;
     m.add("ENTRY_TYPE_HAMT_NODE", ENTRY_TYPE_HAMT_NODE)?;
     m.add("ENTRY_TYPE_EVENT_JSON", ENTRY_TYPE_EVENT_JSON)?;
     m.add("ENTRY_TYPE_EVENT_STATE_GROUP", ENTRY_TYPE_EVENT_STATE_GROUP)?;

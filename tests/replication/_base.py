@@ -270,13 +270,6 @@ class BaseMultiWorkerStreamTestCase(unittest.HomeserverTestCase):
         base = super().default_config()
         base["redis"] = {"enabled": True}
         base["instance_map"] = {"main": {"host": "testserv", "port": 8765}}
-        # embedded_hamt (mtxdb) is fundamentally single-process (see the
-        # embedded_hamt + instance_map guard in synapse/config/workers.py) and
-        # these tests run every "worker" as a HomeServer object in one OS
-        # process anyway, so they could never exercise real cross-process
-        # mtxdb behavior even without the guard -- drop it so these tests
-        # keep running under the SYNAPSE_TEST_MTXDB=1 CI job too.
-        base.pop("embedded_hamt", None)
         return base
 
     def setUp(self) -> None:
