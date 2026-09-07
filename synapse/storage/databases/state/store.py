@@ -708,10 +708,11 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             self._store_state_hamt_root_embedded_txn(
                 state_group, room_prefix, root_structural_hash, root_lattice, room_id
             )
-            # _store_state_hamt_root_embedded_txn no longer syncs internally
-            # (see the batched call site in _persist_state_group_snapshot_txn
-            # below) -- this call site persists a single state group, so it
-            # must sync here itself or the write has no durability guarantee.
+            # _store_state_hamt_root_embedded_txn is write-only (no internal
+            # sync -- see its docstring): it's shared with a batched loop in
+            # _persist_state_group_snapshot_txn that syncs once at the end.
+            # This call site persists a single state group outside that
+            # loop, so it must sync here itself.
             maybe_sync(SyncTier.DURABLE)
             _state_timing("state_write_root_embedded", time.monotonic() - _et)
         else:
@@ -891,8 +892,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             self._store_state_hamt_root_embedded_txn(
                 state_group, room_prefix, new_root_hash, new_lattice, room_id
             )
-            # See the matching comment in _persist_state_hamt_txn: this call
-            # site persists a single state group, so it must sync here.
             maybe_sync(SyncTier.DURABLE)
             _state_timing("state_write_root_embedded", time.monotonic() - _et)
         else:
@@ -1047,6 +1046,13 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         falls back to `state_hamt_roots` SQL only inside the bounded
         `EMBEDDED_HAMT_MIGRATION_UPDATE_NAME` window -- see that function's
         docstring.
+
+        Deliberately does NOT call sync() itself: it's shared by callers
+        that persist one state group at a time (which must follow this
+        with their own `maybe_sync(SyncTier.DURABLE)`) and by a batched
+        loop in `_persist_state_group_snapshot_txn` that syncs once after
+        many calls. Do not add an unconditional sync() here -- it silently
+        defeats that batching by fsyncing on every loop iteration again.
         """
         if not self._embedded_hamt_engine:
             return
@@ -1057,7 +1063,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         if self._embedded_hamt_engine == "mtxdb":
             engine = get_embedded_engine(self._embedded_hamt_engine)
             engine.batch_put([(root_key, root_value)])
-            maybe_sync(SyncTier.DURABLE)
 
     async def _background_backfill_state_hamt_roots(
         self, progress: dict, batch_size: int
