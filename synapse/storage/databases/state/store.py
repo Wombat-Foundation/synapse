@@ -629,14 +629,15 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         updates: list[tuple[str, str, str]] | None = None,
         local_nodes: dict[bytes, bytes] | None = None,
         local_roots: dict[int, tuple[bytes, bytes]] | None = None,
-        defer_sync: bool = False,
     ) -> tuple[bytes, bytes, list[tuple[bytes, bytes]]]:
         """Persist a new state_group's HAMT root and nodes.
 
-        `defer_sync`: if True, skip this call's own maybe_sync() after the
-        embedded root write -- the caller is batching multiple state groups
-        in one transaction and will sync once itself after the whole batch
-        (see the loop in `_persist_state_group_snapshot_txn`'s callers).
+        Does not sync() the embedded engine itself -- every caller of this
+        function (directly, or via `_persist_state_group_snapshot_txn`) is
+        responsible for calling `maybe_sync(SyncTier.DURABLE)` once after
+        its own root write(s): a single call syncs immediately after, a
+        batching loop syncs once after the whole batch. See
+        `_store_state_hamt_root_embedded_txn`'s docstring.
 
         If `prev_state_group` has a usable stored root+lattice and
         `updates` names the `(event_type, state_key, event_id)` changes
@@ -674,7 +675,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 updates,
                 local_nodes=local_nodes,
                 local_roots=local_roots,
-                defer_sync=defer_sync,
             )
         if incremental is not None:
             return incremental
@@ -754,7 +754,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         updates: list[tuple[str, str, str]],
         local_nodes: dict[bytes, bytes] | None = None,
         local_roots: dict[int, tuple[bytes, bytes]] | None = None,
-        defer_sync: bool = False,
     ) -> tuple[bytes, bytes, list[tuple[bytes, bytes]]] | None:
         """Apply `updates` -- a delta of any size, from a single state event
         to a whole state-resolution/merge result the caller already computed
@@ -1207,7 +1206,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         updates: list[tuple[str, str, str]] | None = None,
         local_nodes: dict[bytes, bytes] | None = None,
         local_roots: dict[int, tuple[bytes, bytes]] | None = None,
-        defer_sync: bool = False,
     ) -> tuple[bytes, bytes, list[tuple[bytes, bytes]]]:
         self.db_pool.simple_insert_txn(
             txn,
@@ -1264,7 +1262,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             updates=updates,
             local_nodes=local_nodes,
             local_roots=local_roots,
-            defer_sync=defer_sync,
         )
 
     @trace
@@ -1387,7 +1384,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     updates=[(event.type, event.state_key, event.event_id)],
                     local_nodes=local_nodes,
                     local_roots=local_roots,
-                    defer_sync=True,
                 )
                 hamt_writes.append((sg_after, root_hash, lattice, nodes))
                 # Only keep the root node in the local cache for the next iteration.
