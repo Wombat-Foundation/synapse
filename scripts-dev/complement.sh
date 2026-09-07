@@ -461,6 +461,7 @@ main() {
 
   if [[ -n "${SYNAPSE_PG_TIMINGS:-}" ]]; then
     export PASS_SYNAPSE_PG_TIMINGS=1
+    export PASS_SYNAPSE_PG_TIMINGS_FILE=/tmp/synapse_pg_timings.txt
   fi
 
   # ── Run-filter and extra-tags from remaining args ───────────────────────────

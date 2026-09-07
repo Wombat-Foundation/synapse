@@ -30,6 +30,7 @@ import types
 from collections import defaultdict
 from time import monotonic as monotonic_time
 from typing import (
+    IO,
     TYPE_CHECKING,
     Any,
     Awaitable,
@@ -117,6 +118,23 @@ _TABLE_RE = re.compile(
 )
 
 
+def _timings_print(*args: object) -> None:
+    """Print to stderr and optionally to SYNAPSE_PG_TIMINGS_FILE."""
+    print(*args, file=sys.stderr)
+    if _timings_file is not None:
+        print(*args, file=_timings_file)
+
+
+_timings_file: IO[str] | None = None
+if os.environ.get("SYNAPSE_PG_TIMINGS"):
+    _timings_path = os.environ.get("SYNAPSE_PG_TIMINGS_FILE")
+    if _timings_path:
+        try:
+            _timings_file = open(_timings_path, "a")
+        except OSError:
+            pass
+
+
 def _track_table_op(sql: str, elapsed: float, rowcount: int = 0) -> None:
     if not os.environ.get("SYNAPSE_PG_TIMINGS"):
         return
@@ -142,32 +160,30 @@ def _print_table_ops() -> None:
         return
     # Sort by total time descending
     ranked = sorted(_TABLE_OPS.items(), key=lambda kv: kv[1], reverse=True)
-    print("\n=== Per-table SQL timing (top 30) ===", file=sys.stderr)
-    print(
+    _timings_print("\n=== Per-table SQL timing (top 30) ===")
+    _timings_print(
         f"  {'table':40s}  {'total':>9s}  {'calls':>6s}  {'rows':>6s}  {'avg':>11s}",
-        file=sys.stderr,
     )
     for table, total_s in ranked[:30]:
         count = _TABLE_OPS_COUNTS[table]
         rows = _TABLE_OPS_ROWS[table]
         total_ms = total_s * 1000
         avg_ms = (total_s / count) * 1000 if count else 0.0
-        print(
+        _timings_print(
             f"  {table:40s}  {total_ms:8.1f}ms  {count:6d}  {rows:6d}  {avg_ms:10.3f}ms",
-            file=sys.stderr,
         )
     total_time_s = sum(_TABLE_OPS.values())
     total_count = sum(_TABLE_OPS_COUNTS.values())
     total_rows = sum(_TABLE_OPS_ROWS.values())
     total_ms = total_time_s * 1000
     avg_ms = (total_time_s / total_count) * 1000 if total_count else 0.0
-    print("", file=sys.stderr)
-    print(
+    _timings_print("")
+    _timings_print(
         f"  {'TOTAL':40s}  {total_ms:8.1f}ms  "
         f"{total_count:6d}  {total_rows:6d}  {avg_ms:10.3f}ms",
-        file=sys.stderr,
     )
-    print("=====================================\n", file=sys.stderr)
+    _timings_print("=====================================")
+    _timings_print("")
 
 
 if os.environ.get("SYNAPSE_PG_TIMINGS"):
