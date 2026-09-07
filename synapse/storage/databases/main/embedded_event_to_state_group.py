@@ -58,7 +58,6 @@ import logging
 import struct
 
 from synapse.storage.databases.embedded_engine import get_embedded_engine
-from synapse.storage.databases.main.embedded_common import SyncTier, maybe_sync
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +101,13 @@ def put_event_to_state_group_batch(
     event's state group is a placeholder, not an additional reference; see
     its caller for exactly how the refcount is kept accurate across the
     rewrite).
+
+    Does not sync() the embedded engine itself -- callers that combine this
+    with a refcount increment/decrement in the same logical update (e.g.
+    `update_state_for_partial_state_event`, the initial-insert paths in
+    `events.py`/`events_bg_updates.py`) are responsible for calling
+    `maybe_sync(SyncTier.DURABLE)` once after all of their embedded writes,
+    not once per helper call.
     """
     from synapse.synapse_rust.mtxdb_engine import (
         ENTRY_TYPE_EVENT_STATE_GROUP,
@@ -116,7 +122,6 @@ def put_event_to_state_group_batch(
         for event_id, state_group in rows
     ]
     batch_put_typed(pairs, ENTRY_TYPE_EVENT_STATE_GROUP)
-    maybe_sync(SyncTier.DURABLE)
 
 
 def get_state_group_for_events_batch(
@@ -150,12 +155,15 @@ def delete_event_to_state_group_batch(
     `event_to_state_groups` rows are purged, alongside
     `decrement_state_group_refcounts_batch` for the state groups they
     referenced.
+
+    Does not sync() the embedded engine itself -- see
+    `put_event_to_state_group_batch`'s docstring; the caller syncs once
+    after both this and the paired refcount decrement.
     """
     if not event_ids:
         return
     keys = [_event_to_state_group_key(namespace, event_id) for event_id in event_ids]
     get_embedded_engine(engine_name).batch_delete(keys)
-    maybe_sync(SyncTier.DURABLE)
 
 
 def increment_state_group_refcounts_batch(
@@ -166,6 +174,10 @@ def increment_state_group_refcounts_batch(
     group 7's). Call once per newly-inserted `(event_id, state_group)`
     mapping -- not for `update_state_for_partial_state_event`'s rewrite,
     which doesn't add a new reference.
+
+    Does not sync() the embedded engine itself -- see
+    `put_event_to_state_group_batch`'s docstring; the caller syncs once
+    after this and the paired put/delete.
     """
     if not state_groups:
         return
@@ -177,7 +189,6 @@ def increment_state_group_refcounts_batch(
         for state_group, delta in counts.items()
     ]
     get_embedded_engine(engine_name).increment_counters_batch(pairs)
-    maybe_sync(SyncTier.DURABLE)
 
 
 def decrement_state_group_refcounts_batch(
@@ -188,6 +199,10 @@ def decrement_state_group_refcounts_batch(
     negative in practice (every decrement corresponds to a prior increment),
     but doesn't enforce that -- a mismatched call pair is a caller bug, not
     something this function can detect from a single counter value alone.
+
+    Does not sync() the embedded engine itself -- see
+    `put_event_to_state_group_batch`'s docstring; the caller syncs once
+    after this and the paired delete.
     """
     if not state_groups:
         return
@@ -199,7 +214,6 @@ def decrement_state_group_refcounts_batch(
         for state_group, delta in counts.items()
     ]
     get_embedded_engine(engine_name).increment_counters_batch(pairs)
-    maybe_sync(SyncTier.DURABLE)
 
 
 def get_referenced_state_groups_batch(

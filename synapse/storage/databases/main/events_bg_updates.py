@@ -46,6 +46,7 @@ from synapse.storage.database import (
     make_tuple_comparison_clause,
 )
 from synapse.storage.databases.main.cache import CacheInvalidationWorkerStore
+from synapse.storage.databases.main.embedded_common import SyncTier, maybe_sync
 from synapse.storage.databases.main.embedded_event_json import put_event_json_batch
 from synapse.storage.databases.main.embedded_event_to_state_group import (
     get_state_group_for_events_batch,
@@ -502,6 +503,9 @@ class EventsBackgroundUpdatesStore(
             self._embedded_hamt_namespace,
             [state_group for _event_id, state_group in new_rows],
         )
+        # One sync for the whole batch (put + increment above), not one per
+        # helper call -- see put_event_to_state_group_batch's docstring.
+        maybe_sync(SyncTier.DURABLE)
 
         await self.db_pool.updates._background_update_progress(
             self.EMBEDDED_EVENT_TO_STATE_GROUP_MIGRATION_UPDATE_NAME,

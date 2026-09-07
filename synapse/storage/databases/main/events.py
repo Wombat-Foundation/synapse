@@ -66,6 +66,7 @@ from synapse.storage.database import (
     LoggingTransaction,
     make_tuple_in_list_sql_clause,
 )
+from synapse.storage.databases.main.embedded_common import SyncTier, maybe_sync
 from synapse.storage.databases.main.embedded_event_json import (
     open_embedded_event_json_engine,
     put_event_json_batch,
@@ -3832,6 +3833,10 @@ class PersistEventsStore:
                     if event_id in non_null_state_groups
                 ],
             )
+            # One sync for the whole batch (put + increment above), not one
+            # per helper call -- see put_event_to_state_group_batch's
+            # docstring.
+            maybe_sync(SyncTier.DURABLE)
         else:
             self.db_pool.simple_upsert_many_txn(
                 txn,
