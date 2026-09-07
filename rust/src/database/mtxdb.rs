@@ -260,7 +260,21 @@ pub fn put_auth_chain_links_batch(
                     )))
                 }
             };
-            edges.extend(new_edges);
+            // Dedup against what's already stored: a retried caller (e.g. a
+            // retried persist_events transaction, or a re-run background
+            // migration batch) recomputes the same edges and calls this again
+            // -- these writes aren't part of the SQL transaction's rollback,
+            // so a retry after a partial success would otherwise duplicate
+            // edges here forever. Existing edges are deduped first so an edge
+            // already present twice from before this fix existed collapses
+            // down rather than being preserved.
+            let mut seen: HashSet<(i64, i64, i64)> = HashSet::with_capacity(edges.len());
+            edges.retain(|edge| seen.insert(*edge));
+            for edge in new_edges {
+                if seen.insert(edge) {
+                    edges.push(edge);
+                }
+            }
             let bytes = serialize_manifest(&edges);
             pairs_to_put.push((node_id, NodeData::new(bytes::Bytes::from(bytes))));
         }
