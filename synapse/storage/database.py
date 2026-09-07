@@ -19,8 +19,12 @@
 # [This file includes modifications made by New Vector Limited]
 #
 #
+import atexit
 import inspect
 import logging
+import os
+import re
+import sys
 import time
 import types
 from collections import defaultdict
@@ -101,6 +105,57 @@ sql_txn_duration = Counter(
     "sec",
     labelnames=["desc", SERVER_NAME_LABEL],
 )
+
+# ── per-table SQL ops timing (opt-in via SYNAPSE_PG_TIMINGS=1) ──────────
+_TABLE_OPS: dict[str, float] = defaultdict(float)
+_TABLE_OPS_COUNTS: dict[str, int] = defaultdict(int)
+_TABLE_OPS_ROWS: dict[str, int] = defaultdict(int)
+
+_TABLE_RE = re.compile(
+    r"(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM|FROM|JOIN)\s+(\w+)",
+    re.IGNORECASE,
+)
+
+
+def _track_table_op(sql: str, elapsed: float, rowcount: int = 0) -> None:
+    m = _TABLE_RE.search(sql)
+    if not m:
+        return
+    table = m.group(1).lower()
+    _TABLE_OPS[table] += elapsed
+    _TABLE_OPS_COUNTS[table] += 1
+    _TABLE_OPS_ROWS[table] += max(rowcount, 0)
+
+
+def _print_table_ops() -> None:
+    if not os.environ.get("SYNAPSE_PG_TIMINGS"):
+        return
+    if not _TABLE_OPS:
+        return
+    # Sort by total time descending
+    ranked = sorted(_TABLE_OPS.items(), key=lambda kv: kv[1], reverse=True)
+    print("\n=== Per-table SQL timing (top 30) ===", file=sys.stderr)
+    print(
+        f"  {'table':40s}  {'total':>8s}  {'calls':>6s}  {'rows':>6s}  {'avg':>10s}",
+        file=sys.stderr,
+    )
+    for table, total in ranked[:30]:
+        count = _TABLE_OPS_COUNTS[table]
+        rows = _TABLE_OPS_ROWS[table]
+        print(
+            f"  {table:40s}  {total:8.3f}s  {count:6d}  {rows:6d}  {total / count:10.4f}s",
+            file=sys.stderr,
+        )
+    print(
+        f"  {'TOTAL':40s}  {sum(_TABLE_OPS.values()):8.3f}s  "
+        f"{sum(_TABLE_OPS_COUNTS.values()):6d}  {sum(_TABLE_OPS_ROWS.values()):6d}",
+        file=sys.stderr,
+    )
+    print("=====================================\n", file=sys.stderr)
+
+
+if os.environ.get("SYNAPSE_PG_TIMINGS"):
+    atexit.register(_print_table_ops)
 
 
 # Unique indexes which have been added in background updates. Maps from table name
@@ -540,6 +595,7 @@ class LoggingTransaction:
             sql_query_timer.labels(
                 verb=sql.split()[0], **{SERVER_NAME_LABEL: self.server_name}
             ).observe(secs)
+            _track_table_op(sql, secs)
 
     def close(self) -> None:
         self.txn.close()
