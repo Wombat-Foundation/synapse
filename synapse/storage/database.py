@@ -155,6 +155,7 @@ def _print_table_ops() -> None:
     total_rows = sum(_TABLE_OPS_ROWS.values())
     total_ms = total_time_s * 1000
     avg_ms = (total_time_s / total_count) * 1000 if total_count else 0.0
+    print("", file=sys.stderr)
     print(
         f"  {'TOTAL':40s}  {total_ms:7.1f}ms  "
         f"{total_count:6d}  {total_rows:6d}  {avg_ms:9.3f}ms",
