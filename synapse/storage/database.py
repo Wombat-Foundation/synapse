@@ -126,7 +126,13 @@ def _track_table_op(sql: str, elapsed: float, rowcount: int = 0) -> None:
     table = m.group(1).lower()
     _TABLE_OPS[table] += elapsed
     _TABLE_OPS_COUNTS[table] += 1
-    _TABLE_OPS_ROWS[table] += max(rowcount, 0)
+    # rowcount is instrumentation, not correctness -- a test's mock cursor
+    # (e.g. tests.storage.test_base's Mock() txn, when a test doesn't set
+    # .rowcount explicitly) can hand back a non-int Mock attribute instead
+    # of a real DB-API rowcount. This must never turn on-by-default timing
+    # instrumentation into a hard crash of the actual query it's timing.
+    if isinstance(rowcount, int):
+        _TABLE_OPS_ROWS[table] += max(rowcount, 0)
 
 
 def _print_table_ops() -> None:

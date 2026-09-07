@@ -615,7 +615,7 @@ record_result() {
     if [ "${#_display_name}" -gt 80 ]; then
       _display_name="${_display_name:0:79}…"
     fi
-    printf '%s\t%s\t%s\n' "${action^^}" "$_display_name" "$elapsed" >&2
+    printf '%-6s  %-80s  %8s\n' "${action^^}" "$_display_name" "$elapsed" >&2
   fi
 }
 
