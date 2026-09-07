@@ -310,6 +310,9 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             engine.put_state_hamt_nodes(
                 self._embedded_hamt_namespace, room_prefix, list(nodes.items())
             )
+            from synapse.synapse_rust.mtxdb_engine import sync
+
+            sync()
             if lattice:
                 self._store_state_hamt_root_embedded_txn(
                     state_group, room_prefix, root_hash, lattice, room_id
@@ -918,6 +921,9 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             engine.put_state_hamt_nodes(
                 self._embedded_hamt_namespace, room_prefix, nodes
             )
+            from synapse.synapse_rust.mtxdb_engine import sync
+
+            sync()
             _state_timing("state_write_nodes_embedded", time.monotonic() - _et)
             return
 
@@ -1033,6 +1039,9 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         if self._embedded_hamt_engine == "mtxdb":
             engine = get_embedded_engine(self._embedded_hamt_engine)
             engine.batch_put([(root_key, root_value)])
+            from synapse.synapse_rust.mtxdb_engine import sync
+
+            sync()
 
     async def _background_backfill_state_hamt_roots(
         self, progress: dict, batch_size: int

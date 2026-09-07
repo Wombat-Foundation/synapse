@@ -713,6 +713,15 @@ pub fn batch_put_typed(py: Python<'_>, pairs: Vec<(Vec<u8>, Vec<u8>)>, tag: u8) 
 }
 
 #[pyfunction]
+pub fn sync(py: Python<'_>) -> PyResult<()> {
+    py.detach(|| {
+        db()?.sync().map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb sync error: {}", e))
+        })
+    })
+}
+
+#[pyfunction]
 pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(open_client, m)?)?;
     m.add_function(wrap_pyfunction!(put_state_hamt_nodes, m)?)?;
@@ -730,6 +739,7 @@ pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     m.add_function(wrap_pyfunction!(increment_counters_batch, m)?)?;
     m.add_function(wrap_pyfunction!(batch_get_typed, m)?)?;
     m.add_function(wrap_pyfunction!(batch_put_typed, m)?)?;
+    m.add_function(wrap_pyfunction!(sync, m)?)?;
 
     m.add("ENTRY_TYPE_HAMT_ROOT", ENTRY_TYPE_HAMT_ROOT)?;
     m.add("ENTRY_TYPE_HAMT_NODE", ENTRY_TYPE_HAMT_NODE)?;

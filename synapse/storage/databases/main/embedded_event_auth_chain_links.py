@@ -79,6 +79,9 @@ def put_chain_links_batch(
     if not links:
         return
     get_embedded_engine(engine_name).put_auth_chain_links_batch(namespace, links)
+    from synapse.synapse_rust.mtxdb_engine import sync
+
+    sync()
 
 
 def get_chain_links_batch(
@@ -120,3 +123,6 @@ def delete_chain_links_batch(
     get_embedded_engine(engine_name).delete_auth_chain_links_batch(
         namespace, origin_chain_seq_pairs
     )
+    from synapse.synapse_rust.mtxdb_engine import sync
+
+    sync()

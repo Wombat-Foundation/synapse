@@ -1258,14 +1258,7 @@ def setup_test_homeserver(
                 "user": POSTGRES_USER,
                 "port": POSTGRES_PORT,
                 "cp_min": 1,
-                # `make_fake_db_pool` runs every query synchronously on the
-                # test reactor's main thread (see its docstring), so a given
-                # test never has more than one query in flight at once --
-                # `cp_max` above 1 just means opening (and, on teardown,
-                # closing) connections nothing ever uses, one real
-                # socket-connect + session-setup round trip apiece, times
-                # every test in the suite.
-                "cp_max": 1,
+                "cp_max": 5,
             },
         }
     else:

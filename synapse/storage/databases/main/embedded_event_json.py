@@ -118,7 +118,11 @@ def put_event_json_batch(
     `_store_state_hamt_root_embedded_txn`: an mtxdb call is local, no
     network round-trip to justify deferring past commit.
     """
-    from synapse.synapse_rust.mtxdb_engine import ENTRY_TYPE_EVENT_JSON, batch_put_typed
+    from synapse.synapse_rust.mtxdb_engine import (
+        ENTRY_TYPE_EVENT_JSON,
+        batch_put_typed,
+        sync,
+    )
 
     pairs = [
         (
@@ -128,6 +132,7 @@ def put_event_json_batch(
         for event_id, internal_metadata, json, format_version in rows
     ]
     batch_put_typed(pairs, ENTRY_TYPE_EVENT_JSON)
+    sync()
 
 
 def get_event_json_batch(
@@ -159,3 +164,6 @@ def delete_event_json_batch(engine_name: str | None, event_ids: list[str]) -> No
         return
     keys = [_event_json_key(event_id) for event_id in event_ids]
     get_embedded_engine(engine_name).batch_delete(keys)
+    from synapse.synapse_rust.mtxdb_engine import sync
+
+    sync()
