@@ -110,3 +110,59 @@ class DatabaseConfigTestCase(unittest.TestCase):
         dc = self._read_config()
         self.assertIsNone(dc.embedded_hamt_engine)
         self.assertIsNone(dc.embedded_hamt_path)
+
+
+class EmbeddedHamtWorkerGuardTestCase(unittest.TestCase):
+    """Test that embedded_hamt.engine is rejected in multi-worker configs."""
+
+    def _make_worker_config(
+        self,
+        worker_app: str | None = None,
+        instance_map: dict | None = None,
+        embedded_hamt_engine: str | None = "mtxdb",
+    ) -> None:
+        """Build a WorkerConfig and call read_config, triggering the guard."""
+        from unittest.mock import Mock
+
+        from synapse.config.workers import WorkerConfig
+
+        root = Mock()
+        root.database.embedded_hamt_engine = embedded_hamt_engine
+
+        worker_config = WorkerConfig(root)
+        config: dict = {}
+        if worker_app is not None:
+            config["worker_app"] = worker_app
+        if instance_map is not None:
+            config["instance_map"] = instance_map
+        worker_config.read_config(config, allow_secrets_in_config=True)
+
+    def test_worker_app_raises(self) -> None:
+        """embedded_hamt + worker_app → ConfigError."""
+        from synapse.config._base import ConfigError
+
+        with self.assertRaises(ConfigError):
+            self._make_worker_config(
+                worker_app="synapse.app.generic_worker",
+            )
+
+    def test_instance_map_raises(self) -> None:
+        """embedded_hamt + non-empty instance_map (no worker_app) → ConfigError."""
+        from synapse.config._base import ConfigError
+
+        with self.assertRaises(ConfigError):
+            self._make_worker_config(
+                instance_map={"main": {"host": "127.0.0.1", "port": 8008}},
+            )
+
+    def test_single_process_ok(self) -> None:
+        """embedded_hamt alone (no worker_app, no instance_map) → no error."""
+        self._make_worker_config()
+
+    def test_no_embedded_hamt_with_workers_ok(self) -> None:
+        """worker_app + instance_map without embedded_hamt → no error."""
+        self._make_worker_config(
+            worker_app="synapse.app.generic_worker",
+            instance_map={"main": {"host": "127.0.0.1", "port": 8008}},
+            embedded_hamt_engine=None,
+        )
