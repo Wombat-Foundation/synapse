@@ -325,6 +325,11 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 migrate_one_txn(
                     txn, state_group, room_prefix, root_hash, lattice, room_id
                 )
+            # Final sync for the last iteration's root write (earlier
+            # iterations' roots are flushed by the next iteration's node
+            # sync, since they share one global shard file).
+            if self._embedded_hamt_engine == "mtxdb":
+                maybe_sync(SyncTier.DURABLE)
             self.db_pool.updates._background_update_progress_txn(
                 txn,
                 self.EMBEDDED_HAMT_MIGRATION_UPDATE_NAME,
@@ -703,6 +708,11 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             self._store_state_hamt_root_embedded_txn(
                 state_group, room_prefix, root_structural_hash, root_lattice, room_id
             )
+            # _store_state_hamt_root_embedded_txn no longer syncs internally
+            # (see the batched call site in _persist_state_group_snapshot_txn
+            # below) -- this call site persists a single state group, so it
+            # must sync here itself or the write has no durability guarantee.
+            maybe_sync(SyncTier.DURABLE)
             _state_timing("state_write_root_embedded", time.monotonic() - _et)
         else:
             _st = time.monotonic()
@@ -881,6 +891,9 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             self._store_state_hamt_root_embedded_txn(
                 state_group, room_prefix, new_root_hash, new_lattice, room_id
             )
+            # See the matching comment in _persist_state_hamt_txn: this call
+            # site persists a single state group, so it must sync here.
+            maybe_sync(SyncTier.DURABLE)
             _state_timing("state_write_root_embedded", time.monotonic() - _et)
         else:
             _st = time.monotonic()
@@ -1154,6 +1167,10 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     txn, state_group, room_id, room_prefix, current_state_ids
                 )
 
+            # Batched sync for all root writes above.
+            if self._embedded_hamt_engine == "mtxdb":
+                maybe_sync(SyncTier.DURABLE)
+
             self.db_pool.updates._background_update_progress_txn(
                 txn,
                 self.STATE_HAMT_BACKFILL_ROOTS_UPDATE_NAME,
@@ -1369,6 +1386,12 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 local_roots[sg_after] = (root_hash, lattice)
                 sg_before = sg_after
 
+            # Single batched sync() for all root writes above -- same
+            # reasoning as _store_state_hamt_nodes_txn: they all land in
+            # the same global shard file, so one fsync flushes all of them.
+            if self._embedded_hamt_engine == "mtxdb":
+                maybe_sync(SyncTier.DURABLE)
+
             return events_and_context, hamt_writes
 
         # Both SQL and (if configured) the embedded engine were already
@@ -1489,6 +1512,8 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     local_roots=initial_roots,
                 )
             )
+            if self._embedded_hamt_engine == "mtxdb":
+                maybe_sync(SyncTier.DURABLE)
 
             return state_group, root_structural_hash, lattice, nodes
 
