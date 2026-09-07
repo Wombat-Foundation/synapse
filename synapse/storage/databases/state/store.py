@@ -165,10 +165,13 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     f"Failed to open embedded {self._embedded_hamt_engine} engine at {self._embedded_hamt_path}"
                 ) from e
 
-            if hs.config.database.embedded_hamt_namespace:
-                self._embedded_hamt_namespace = (
-                    hs.config.database.embedded_hamt_namespace
-                )
+            # Defaults to the server name when unset (see the comment on
+            # DatabaseConfig.embedded_hamt_namespace) -- must always be
+            # assigned here, since every call site below reads
+            # self._embedded_hamt_namespace unconditionally.
+            self._embedded_hamt_namespace = (
+                hs.config.database.embedded_hamt_namespace or self.server_name
+            )
 
             if hs.config.worker.run_background_tasks:
                 hs.get_clock().looping_call(

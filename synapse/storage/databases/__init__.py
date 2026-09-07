@@ -89,9 +89,7 @@ class Databases(Generic[DataStoreT]):
             _pgt = None
             if _os.environ.get("SYNAPSE_PG_TIMINGS"):
                 try:
-                    _pgt = lambda tag, dt: __import__(
-                        "tests.server", fromlist=["_pg_timing"]
-                    )._pg_timing(tag, dt)
+                    from tests.server import _pg_timing as _pgt
                 except ImportError:
                     pass
 
