@@ -160,6 +160,65 @@ def _print_pg_timings() -> None:
 
 atexit.register(_print_pg_timings)
 
+# ── Deferred Postgres test-DB cleanup ───────────────────────────────────
+# Dropping each test's scratch DB synchronously, right after that test's
+# teardown, puts a `DROP DATABASE` catalog operation on every single test's
+# critical path -- and, when other tests/processes are still connected to
+# *their* DBs concurrently, contends with them for no reason (a Postgres
+# `DROP DATABASE` doesn't touch other databases, but the connection used
+# to issue it is shared work happening on the hot path either way). None of
+# that work needs to happen before the test suite moves on: the DB is never
+# reused, so nothing is lost by leaving it around until the whole run ends.
+# Collect names here instead and drop them all in one pass at exit.
+_PENDING_TEST_DB_DROPS: set[str] = set()
+
+
+def _drop_pending_test_dbs() -> None:
+    if not _PENDING_TEST_DB_DROPS:
+        return
+
+    import psycopg2
+
+    from tests.utils import (
+        POSTGRES_BASE_DB,
+        POSTGRES_HOST,
+        POSTGRES_PASSWORD,
+        POSTGRES_PORT,
+        POSTGRES_USER,
+    )
+
+    # Connect to the (still-live) template DB, same as the per-test
+    # create/drop calls did -- there's no guarantee a plain "postgres"
+    # maintenance DB exists on whatever Postgres this is pointed at.
+    db_conn = psycopg2.connect(
+        dbname=POSTGRES_BASE_DB,
+        user=POSTGRES_USER,
+        host=POSTGRES_HOST,
+        port=POSTGRES_PORT,
+        password=POSTGRES_PASSWORD,
+    )
+    db_conn.autocommit = True
+    cur = db_conn.cursor()
+    failed = []
+    for test_db in sorted(_PENDING_TEST_DB_DROPS):
+        try:
+            cur.execute("DROP DATABASE IF EXISTS %s;" % (test_db,))
+        except psycopg2.OperationalError as e:
+            failed.append((test_db, e))
+    cur.close()
+    db_conn.close()
+
+    if failed:
+        warnings.warn(
+            f"Failed to drop {len(failed)} test DB(s) at exit: "
+            + ", ".join(name for name, _ in failed),
+            category=UserWarning,
+            stacklevel=2,
+        )
+
+
+atexit.register(_drop_pending_test_dbs)
+
 
 class TimedOutException(Exception):
     """
@@ -1353,48 +1412,13 @@ def setup_test_homeserver(
         _pg_timing("create_database", time.monotonic() - _t0)
 
         def cleanup() -> None:
-            import psycopg2
-
-            dropped = False
-
-            # Drop the test database
-            db_conn = db_engine.module.connect(
-                dbname=POSTGRES_BASE_DB,
-                user=POSTGRES_USER,
-                host=POSTGRES_HOST,
-                port=POSTGRES_PORT,
-                password=POSTGRES_PASSWORD,
-            )
-            db_engine.attempt_to_set_autocommit(db_conn, True)
-            cur = db_conn.cursor()
-
-            # Try a few times to drop the DB. Some things may hold on to the
-            # database for a few more seconds due to flakiness, preventing
-            # us from dropping it when the test is over. If we can't drop
-            # it, warn and move on.
-            for _ in range(5):
-                try:
-                    cur.execute("DROP DATABASE IF EXISTS %s;" % (test_db,))
-                    db_conn.commit()
-                    dropped = True
-                    break
-                except psycopg2.OperationalError as e:
-                    warnings.warn(
-                        "Couldn't drop old db: " + str(e),
-                        category=UserWarning,
-                        stacklevel=2,
-                    )
-                    time.sleep(0.5)
-
-            cur.close()
-            db_conn.close()
-
-            if not dropped:
-                warnings.warn(
-                    "Failed to drop old DB.",
-                    category=UserWarning,
-                    stacklevel=2,
-                )
+            # Don't drop the DB now -- that puts a synchronous `DROP DATABASE`
+            # catalog operation on every test's teardown path, and contends
+            # with any other test/process still connected to *its* DB. The DB
+            # is never reused, so nothing is lost by leaving it around; just
+            # remember its name and drop everything in one batch at exit (see
+            # `_drop_pending_test_dbs`).
+            _PENDING_TEST_DB_DROPS.add(test_db)
 
         if not LEAVE_DB:
             # Register the cleanup hook

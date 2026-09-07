@@ -102,6 +102,11 @@ def put_event_to_state_group_batch(
     its caller for exactly how the refcount is kept accurate across the
     rewrite).
     """
+    from synapse.synapse_rust.mtxdb_engine import (
+        TAG_EVENT_STATE_GROUP,
+        batch_put_typed,
+    )
+
     pairs = [
         (
             _event_to_state_group_key(namespace, event_id),
@@ -109,7 +114,7 @@ def put_event_to_state_group_batch(
         )
         for event_id, state_group in rows
     ]
-    get_embedded_engine(engine_name).batch_put(pairs)
+    batch_put_typed(pairs, TAG_EVENT_STATE_GROUP)
 
 
 def get_state_group_for_events_batch(
@@ -118,9 +123,14 @@ def get_state_group_for_events_batch(
     """Returns `event_id -> state_group` for every id found in the embedded
     engine; a missing id is simply absent from the result.
     """
+    from synapse.synapse_rust.mtxdb_engine import (
+        TAG_EVENT_STATE_GROUP,
+        batch_get_typed,
+    )
+
     keys = [_event_to_state_group_key(namespace, event_id) for event_id in event_ids]
     key_to_event_id = dict(zip(keys, event_ids))
-    found = get_embedded_engine(engine_name).batch_get(keys)
+    found = batch_get_typed(keys, TAG_EVENT_STATE_GROUP)
     out = {}
     for key, value in found:
         value = bytes(value)
@@ -194,6 +204,11 @@ def get_referenced_state_groups_batch(
     the embedded-engine equivalent of the SQL `get_referenced_state_groups`
     reverse lookup, backed by the counter instead of a scan/index.
     """
+    from synapse.synapse_rust.mtxdb_engine import (
+        TAG_STATE_GROUP_REFCOUNT,
+        batch_get_typed,
+    )
+
     if not state_groups:
         return set()
     keys = [
@@ -201,7 +216,7 @@ def get_referenced_state_groups_batch(
         for state_group in state_groups
     ]
     key_to_group = dict(zip(keys, state_groups))
-    found = get_embedded_engine(engine_name).batch_get(keys)
+    found = batch_get_typed(keys, TAG_STATE_GROUP_REFCOUNT)
     referenced = set()
     for key, value in found:
         value = bytes(value)

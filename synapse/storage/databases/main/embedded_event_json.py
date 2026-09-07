@@ -76,14 +76,15 @@ def _event_json_key(event_id: str) -> bytes:
 def _encode_event_json_record(
     internal_metadata: str, json: str, format_version: int | None
 ) -> bytes:
+    """Encode event_json record. The entry type tag (0x04) is prepended by
+    batch_put_typed, so this function only encodes the payload."""
     internal_metadata_bytes = internal_metadata.encode("utf-8")
     json_bytes = json.encode("utf-8")
     # format_version is nullable in the schema (older rows); encode as a
     # signed int with -1 standing in for NULL rather than adding a presence
     # flag byte.
     return (
-        b"\x01"
-        + struct.pack(">i", -1 if format_version is None else format_version)
+        struct.pack(">i", -1 if format_version is None else format_version)
         + struct.pack(">I", len(internal_metadata_bytes))
         + internal_metadata_bytes
         + json_bytes
@@ -91,11 +92,14 @@ def _encode_event_json_record(
 
 
 def _decode_event_json_record(value: bytes) -> tuple[str, str, int | None]:
-    if len(value) < 9 or value[0] != 1:
-        raise RuntimeError("invalid or unsupported event_json record version")
-    (format_version_raw,) = struct.unpack(">i", value[1:5])
-    (metadata_len,) = struct.unpack(">I", value[5:9])
-    metadata_start = 9
+    """Decode event_json payload (tag byte already stripped by batch_get_typed).
+    Supports both legacy (tag=0x01) and new (tag=0x04) formats — the payload
+    structure is identical, only the tag byte differs."""
+    if len(value) < 8:
+        raise RuntimeError("truncated event_json record")
+    (format_version_raw,) = struct.unpack(">i", value[0:4])
+    (metadata_len,) = struct.unpack(">I", value[4:8])
+    metadata_start = 8
     json_start = metadata_start + metadata_len
     if len(value) < json_start:
         raise RuntimeError("truncated event_json record")
@@ -114,6 +118,8 @@ def put_event_json_batch(
     `_store_state_hamt_root_embedded_txn`: an mtxdb call is local, no
     network round-trip to justify deferring past commit.
     """
+    from synapse.synapse_rust.mtxdb_engine import TAG_EVENT_JSON, batch_put_typed
+
     pairs = [
         (
             _event_json_key(event_id),
@@ -121,7 +127,7 @@ def put_event_json_batch(
         )
         for event_id, internal_metadata, json, format_version in rows
     ]
-    get_embedded_engine(engine_name).batch_put(pairs)
+    batch_put_typed(pairs, TAG_EVENT_JSON)
 
 
 def get_event_json_batch(
@@ -131,9 +137,11 @@ def get_event_json_batch(
     every id found in the embedded engine; a missing id is simply absent
     from the result (the caller falls back to SQL for it).
     """
+    from synapse.synapse_rust.mtxdb_engine import TAG_EVENT_JSON, batch_get_typed
+
     keys = [_event_json_key(event_id) for event_id in event_ids]
     key_to_event_id = dict(zip(keys, event_ids))
-    found = get_embedded_engine(engine_name).batch_get(keys)
+    found = batch_get_typed(keys, TAG_EVENT_JSON)
     return {
         key_to_event_id[bytes(key)]: _decode_event_json_record(bytes(value))
         for key, value in found

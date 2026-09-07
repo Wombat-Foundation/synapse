@@ -632,6 +632,108 @@ pub fn get_state_hamt_nodes_batch(
     })
 }
 
+// -----------------------------------------------------------------------------
+// Entry Type Tags
+// -----------------------------------------------------------------------------
+
+/// Known entry type tags matching mtxdb-core constants.
+const TAG_HAMT_ROOT_FLAT: u8 = 0x01;
+const TAG_HAMT_ROOT_TYPED: u8 = 0x02;
+const TAG_HAMT_NODE: u8 = 0x03;
+const TAG_EVENT_JSON: u8 = 0x04;
+const TAG_EVENT_STATE_GROUP: u8 = 0x05;
+const TAG_STATE_GROUP_REFCOUNT: u8 = 0x06;
+const TAG_AUTH_CHAIN_LINKS: u8 = 0x07;
+const TAG_GENERIC_KV: u8 = 0x08;
+
+/// Returns true if the byte is a recognized entry type tag.
+fn is_known_tag(byte: u8) -> bool {
+    matches!(
+        byte,
+        TAG_HAMT_ROOT_FLAT
+            | TAG_HAMT_ROOT_TYPED
+            | TAG_HAMT_NODE
+            | TAG_EVENT_JSON
+            | TAG_EVENT_STATE_GROUP
+            | TAG_STATE_GROUP_REFCOUNT
+            | TAG_AUTH_CHAIN_LINKS
+            | TAG_GENERIC_KV
+    )
+}
+
+/// Strip a recognized entry type tag from the front of a value, returning
+/// `(tag_byte, remaining_bytes)`. If the first byte is not a known tag,
+/// returns `(0x00, original_bytes)` — legacy/untagged data.
+fn strip_tag(bytes: &[u8]) -> (u8, &[u8]) {
+    if !bytes.is_empty() && is_known_tag(bytes[0]) {
+        (bytes[0], &bytes[1..])
+    } else {
+        (0x00, bytes)
+    }
+}
+
+/// Prepend an entry type tag to a value, producing `tag_byte || value_bytes`.
+fn apply_tag(tag: u8, value: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(1 + value.len());
+    out.push(tag);
+    out.extend_from_slice(value);
+    out
+}
+
+#[pyfunction]
+pub fn batch_get_typed(
+    py: Python<'_>,
+    keys: Vec<Vec<u8>>,
+    expected_tag: u8,
+) -> PyResult<Vec<(Vec<u8>, Vec<u8>)>> {
+    py.detach(|| {
+        let engine = db()?;
+        let room_id = kv_room_id();
+        let node_ids: Vec<NodeId> = keys.iter().map(|k| kv_node_id(k)).collect();
+        let results = engine.get_many(&room_id, &node_ids).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb get_many error: {}", e))
+        })?;
+        let mut out = Vec::with_capacity(keys.len());
+        for (key, res) in keys.into_iter().zip(results) {
+            if let Some(data) = res {
+                if data.bytes.is_empty() {
+                    continue; // tombstone
+                }
+                let (tag, payload) = strip_tag(&data.bytes);
+                // Return if legacy (no tag) or matches expected tag
+                if tag == 0x00 || tag == expected_tag {
+                    out.push((key, payload.to_vec()));
+                }
+            }
+        }
+        Ok(out)
+    })
+}
+
+#[pyfunction]
+pub fn batch_put_typed(py: Python<'_>, pairs: Vec<(Vec<u8>, Vec<u8>)>, tag: u8) -> PyResult<()> {
+    if !is_known_tag(tag) {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "unknown entry type tag: 0x{tag:02x}"
+        )));
+    }
+    py.detach(|| {
+        let engine = db()?;
+        let room_id = kv_room_id();
+        let puts: Vec<(NodeId, NodeData)> = pairs
+            .into_iter()
+            .map(|(k, v)| {
+                let tagged = apply_tag(tag, &v);
+                (kv_node_id(&k), NodeData::new(bytes::Bytes::from(tagged)))
+            })
+            .collect();
+        engine.put_many(&room_id, &puts).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb put error: {}", e))
+        })
+    })
+}
+
+#[pyfunction]
 pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(open_client, m)?)?;
     m.add_function(wrap_pyfunction!(put_state_hamt_nodes, m)?)?;
@@ -647,6 +749,8 @@ pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     m.add_function(wrap_pyfunction!(lookup_state_hamts, m)?)?;
     m.add_function(wrap_pyfunction!(batch_get_state_hamt_roots, m)?)?;
     m.add_function(wrap_pyfunction!(increment_counters_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(batch_get_typed, m)?)?;
+    m.add_function(wrap_pyfunction!(batch_put_typed, m)?)?;
 
     py.import("sys")?
         .getattr("modules")?
