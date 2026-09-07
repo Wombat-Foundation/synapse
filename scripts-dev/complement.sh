@@ -789,6 +789,38 @@ finish() {
     } >> "$GITHUB_STEP_SUMMARY"
   fi
 
+  # ── Extract timing files from complement containers ──────────────────────
+  if [[ -n "${SYNAPSE_PG_TIMINGS_FILE:-}" ]]; then
+    local timing_dir
+    timing_dir="$(mktemp -d "${main_results_file}.timings.XXXXXX")"
+    local timing_idx=0
+    local container_label="COMPLEMENT_WRAPPER_TOKEN=$COMPLEMENT_WRAPPER_TOKEN"
+    local _containers
+    mapfile -t _containers < <(docker ps -aq --filter "name=complement" 2>/dev/null || true)
+    for _c in "${_containers[@]:-}"; do
+      if docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$_c" 2>/dev/null \
+          | grep -Fxq "$container_label"; then
+        local _dest="${timing_dir}/synapse_pg_timings_${timing_idx}.txt"
+        if docker cp "${_c}:/tmp/synapse_pg_timings.txt" "$_dest" 2>/dev/null; then
+          if [ -s "$_dest" ]; then
+            timing_idx=$((timing_idx + 1))
+          else
+            rm -f "$_dest"
+          fi
+        fi
+      fi
+    done
+    if [ "$timing_idx" -gt 0 ]; then
+      echo "" >&2
+      echo "=== SYNAPSE PG TIMINGS (from containers) ===" >&2
+      for _f in "${timing_dir}"/synapse_pg_timings_*.txt; do
+        echo "--- ${_f##*/} ---" >&2
+        cat "$_f" >&2
+      done
+      echo "=== END SYNAPSE PG TIMINGS ===" >&2
+    fi
+  fi
+
   cleanup_complement_containers
 }
 trap finish EXIT
