@@ -3144,6 +3144,7 @@ class EventsBackgroundUpdatesStore(
                 if getattr(self, "_embedded_event_json_enabled", False):
                     put_event_json_batch(
                         self._embedded_hamt_engine,
+                        self._embedded_hamt_namespace,
                         [
                             (
                                 event_id,

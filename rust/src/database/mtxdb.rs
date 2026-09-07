@@ -584,10 +584,26 @@ pub fn increment_counters_batch(pairs: Vec<(Vec<u8>, i64)>) -> PyResult<Vec<i64>
     for (key, delta) in pairs {
         let node_id = kv_node_id(&key);
         let current = match engine.get(&room_id, &node_id) {
-            Ok(Some(data)) if data.bytes.len() == 8 => {
-                i64::from_be_bytes(data.bytes.as_ref().try_into().unwrap())
+            // Values here are always written tagged now (below), but a
+            // value written by the pre-fix code is a bare untagged 8-byte
+            // integer -- try the stripped (tagged) form first, then fall
+            // back to the original bytes as a raw untagged value, so an
+            // existing counter from before this fix isn't silently reset
+            // to 0.
+            Ok(Some(data)) => {
+                let (_tag, payload) = strip_tag(&data.bytes);
+                let raw: &[u8] = if payload.len() == 8 {
+                    payload
+                } else {
+                    &data.bytes
+                };
+                if raw.len() == 8 {
+                    i64::from_be_bytes(raw.try_into().unwrap())
+                } else {
+                    0
+                }
             }
-            Ok(Some(_)) | Ok(None) => 0,
+            Ok(None) => 0,
             Err(e) => {
                 return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
                     "mtxdb get error reading counter: {}",
@@ -597,9 +613,16 @@ pub fn increment_counters_batch(pairs: Vec<(Vec<u8>, i64)>) -> PyResult<Vec<i64>
         };
         let new_value = current + delta;
         results.push(new_value);
+        // Tagged so batch_get_typed's readers (get_referenced_state_groups_batch)
+        // don't misread an untagged leading 0x00 byte -- which every counter
+        // under 2^56 has -- as ENTRY_TYPE_GENERIC_KV and strip it, corrupting
+        // the value to 7 bytes.
         puts.push((
             node_id,
-            NodeData::new(bytes::Bytes::from(new_value.to_be_bytes().to_vec())),
+            NodeData::new(bytes::Bytes::from(apply_tag(
+                ENTRY_TYPE_STATE_GROUP_REFCOUNT,
+                &new_value.to_be_bytes(),
+            ))),
         ));
     }
 

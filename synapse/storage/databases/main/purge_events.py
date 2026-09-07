@@ -375,6 +375,7 @@ class PurgeEventsStore(StateGroupWorkerStore, CacheInvalidationWorkerStore):
         if getattr(self, "_embedded_event_json_enabled", False):
             delete_event_json_batch(
                 self._embedded_hamt_engine,
+                self._embedded_hamt_namespace,
                 [event_id for event_id, should_delete in event_rows if should_delete],
             )
 
@@ -640,7 +641,11 @@ class PurgeEventsStore(StateGroupWorkerStore, CacheInvalidationWorkerStore):
         # As in _purge_history_txn: the event_json DELETE above only cleared
         # SQL, the embedded mirror needs its own delete pass.
         if room_event_ids:
-            delete_event_json_batch(self._embedded_hamt_engine, room_event_ids)
+            delete_event_json_batch(
+                self._embedded_hamt_engine,
+                self._embedded_hamt_namespace,
+                room_event_ids,
+            )
             # Same for event_to_state_groups: fetch state_groups before
             # deleting so the refcount can be rebalanced.
             event_id_to_state_group = get_state_group_for_events_batch(

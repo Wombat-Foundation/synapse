@@ -23,9 +23,13 @@ beat Postgres 23x at batch=1, 3.8x at batch=100).
 Reuses the same `embedded_hamt_engine`/`embedded_hamt_path` config and mtxdb
 keyspace the state store already opens (one flat keyspace, prefixed keys --
 `hamt:node:...`, `hamt:root:...`, `event_json:...` -- rather than a second
-mtxdb directory/config knob). `event_json` (Postgres) stays authoritative
-and is always written; the embedded engine is consulted first on reads and
-any event_id it's missing falls back to a normal SQL `event_json` fetch.
+mtxdb directory/config knob), and is on whenever that is -- see
+`open_embedded_event_json_engine`. Keys are namespaced by
+`embedded_hamt_namespace`, same scheme as `embedded_event_to_state_group.py`,
+so multiple homeservers sharing one mtxdb file don't collide on event_id.
+`event_json` (Postgres) stays authoritative and is always written; the
+embedded engine is consulted first on reads and any event_id it's missing
+falls back to a normal SQL `event_json` fetch.
 
 Unlike the HAMT nodes/roots this mirrors, `event_json` rows are NOT
 write-once/immutable in practice: censoring and expiry both replace a
@@ -57,21 +61,34 @@ logger = logging.getLogger(__name__)
 
 
 def open_embedded_event_json_engine(hs: "HomeServer") -> bool:
-    """Return whether the optional embedded event-JSON backend is enabled.
+    """Return whether the optional embedded event-JSON backend is enabled --
+    on whenever the embedded engine itself is (`embedded_hamt_engine` +
+    `embedded_hamt_path` configured), same as every other embedded mirror.
 
-    `embedded_hamt` configures only persistent state HAMT storage. It must not
-    enable the independent event-JSON and event-chain stores: those keys are
-    not part of the HAMT namespace and doing so lets separate homeservers
-    sharing an mtxdb file overwrite each other's event data.
-
-    The event-JSON backend has no independent configuration yet, so it remains
-    disabled.
+    Keys are namespaced by `embedded_hamt_namespace` (see `_event_json_key`),
+    same scheme `embedded_event_to_state_group.py`/
+    `embedded_event_auth_chain_links.py` already use, so multiple
+    homeservers sharing one mtxdb file don't collide on event_id.
     """
-    return False
+    return bool(
+        hs.config.database.embedded_hamt_engine
+        and hs.config.database.embedded_hamt_path
+    )
 
 
-def _event_json_key(event_id: str) -> bytes:
-    return b"event_json:" + event_id.encode("utf-8")
+def _namespace_hash(namespace: str) -> bytes:
+    import hashlib
+
+    return hashlib.sha256(namespace.encode("utf-8")).digest()[:16]
+
+
+def _event_json_key(namespace: str, event_id: str) -> bytes:
+    return (
+        b"event_json:"
+        + _namespace_hash(namespace).hex().encode("ascii")
+        + b":"
+        + event_id.encode("utf-8")
+    )
 
 
 def _encode_event_json_record(
@@ -111,7 +128,9 @@ def _decode_event_json_record(value: bytes) -> tuple[str, str, int | None]:
 
 
 def put_event_json_batch(
-    engine_name: str | None, rows: list[tuple[str, str, str, int | None]]
+    engine_name: str | None,
+    namespace: str,
+    rows: list[tuple[str, str, str, int | None]],
 ) -> None:
     """`rows`: `(event_id, internal_metadata, json, format_version)`.
     Called from the event persister only (the sole writer of `event_json`),
@@ -133,7 +152,7 @@ def put_event_json_batch(
 
     pairs = [
         (
-            _event_json_key(event_id),
+            _event_json_key(namespace, event_id),
             _encode_event_json_record(internal_metadata, json, format_version),
         )
         for event_id, internal_metadata, json, format_version in rows
@@ -142,7 +161,7 @@ def put_event_json_batch(
 
 
 def get_event_json_batch(
-    engine_name: str | None, event_ids: list[str]
+    engine_name: str | None, namespace: str, event_ids: list[str]
 ) -> dict[str, tuple[str, str, int | None]]:
     """Returns `event_id -> (internal_metadata, json, format_version)` for
     every id found in the embedded engine; a missing id is simply absent
@@ -150,7 +169,7 @@ def get_event_json_batch(
     """
     from synapse.synapse_rust.mtxdb_engine import ENTRY_TYPE_EVENT_JSON, batch_get_typed
 
-    keys = [_event_json_key(event_id) for event_id in event_ids]
+    keys = [_event_json_key(namespace, event_id) for event_id in event_ids]
     key_to_event_id = dict(zip(keys, event_ids))
     found = batch_get_typed(keys, ENTRY_TYPE_EVENT_JSON)
     return {
@@ -159,7 +178,9 @@ def get_event_json_batch(
     }
 
 
-def delete_event_json_batch(engine_name: str | None, event_ids: list[str]) -> None:
+def delete_event_json_batch(
+    engine_name: str | None, namespace: str, event_ids: list[str]
+) -> None:
     """Removes `event_id`s from the embedded mirror. Must be called wherever
     `event_json` rows are deleted from SQL (purge_events.py) so the mirror
     doesn't retain data the user asked to be purged -- see also
@@ -168,6 +189,6 @@ def delete_event_json_batch(engine_name: str | None, event_ids: list[str]) -> No
     """
     if not event_ids:
         return
-    keys = [_event_json_key(event_id) for event_id in event_ids]
+    keys = [_event_json_key(namespace, event_id) for event_id in event_ids]
     get_embedded_engine(engine_name).batch_delete(keys)
     maybe_sync(SyncTier.DURABLE)
