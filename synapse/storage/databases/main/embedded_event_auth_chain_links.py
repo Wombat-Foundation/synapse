@@ -48,6 +48,7 @@ origin_* searches").
 from __future__ import annotations
 
 from synapse.storage.databases.embedded_engine import get_embedded_engine
+from synapse.storage.databases.main.embedded_common import SyncTier, maybe_sync
 
 
 def resolve_namespace(store: object) -> str | None:
@@ -79,9 +80,7 @@ def put_chain_links_batch(
     if not links:
         return
     get_embedded_engine(engine_name).put_auth_chain_links_batch(namespace, links)
-    from synapse.synapse_rust.mtxdb_engine import sync
-
-    sync()
+    maybe_sync(SyncTier.DURABLE)
 
 
 def get_chain_links_batch(
@@ -123,6 +122,4 @@ def delete_chain_links_batch(
     get_embedded_engine(engine_name).delete_auth_chain_links_batch(
         namespace, origin_chain_seq_pairs
     )
-    from synapse.synapse_rust.mtxdb_engine import sync
-
-    sync()
+    maybe_sync(SyncTier.DURABLE)

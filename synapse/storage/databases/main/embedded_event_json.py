@@ -48,6 +48,7 @@ import struct
 from typing import TYPE_CHECKING
 
 from synapse.storage.databases.embedded_engine import get_embedded_engine
+from synapse.storage.databases.main.embedded_common import SyncTier, maybe_sync
 
 if TYPE_CHECKING:
     from synapse.server import HomeServer
@@ -169,6 +170,4 @@ def delete_event_json_batch(engine_name: str | None, event_ids: list[str]) -> No
         return
     keys = [_event_json_key(event_id) for event_id in event_ids]
     get_embedded_engine(engine_name).batch_delete(keys)
-    from synapse.synapse_rust.mtxdb_engine import sync
-
-    sync()
+    maybe_sync(SyncTier.DURABLE)

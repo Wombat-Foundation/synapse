@@ -58,6 +58,7 @@ import logging
 import struct
 
 from synapse.storage.databases.embedded_engine import get_embedded_engine
+from synapse.storage.databases.main.embedded_common import SyncTier, maybe_sync
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +106,6 @@ def put_event_to_state_group_batch(
     from synapse.synapse_rust.mtxdb_engine import (
         ENTRY_TYPE_EVENT_STATE_GROUP,
         batch_put_typed,
-        sync,
     )
 
     pairs = [
@@ -116,7 +116,7 @@ def put_event_to_state_group_batch(
         for event_id, state_group in rows
     ]
     batch_put_typed(pairs, ENTRY_TYPE_EVENT_STATE_GROUP)
-    sync()
+    maybe_sync(SyncTier.DURABLE)
 
 
 def get_state_group_for_events_batch(
@@ -155,9 +155,7 @@ def delete_event_to_state_group_batch(
         return
     keys = [_event_to_state_group_key(namespace, event_id) for event_id in event_ids]
     get_embedded_engine(engine_name).batch_delete(keys)
-    from synapse.synapse_rust.mtxdb_engine import sync
-
-    sync()
+    maybe_sync(SyncTier.DURABLE)
 
 
 def increment_state_group_refcounts_batch(
@@ -179,9 +177,7 @@ def increment_state_group_refcounts_batch(
         for state_group, delta in counts.items()
     ]
     get_embedded_engine(engine_name).increment_counters_batch(pairs)
-    from synapse.synapse_rust.mtxdb_engine import sync
-
-    sync()
+    maybe_sync(SyncTier.DURABLE)
 
 
 def decrement_state_group_refcounts_batch(
@@ -203,9 +199,7 @@ def decrement_state_group_refcounts_batch(
         for state_group, delta in counts.items()
     ]
     get_embedded_engine(engine_name).increment_counters_batch(pairs)
-    from synapse.synapse_rust.mtxdb_engine import sync
-
-    sync()
+    maybe_sync(SyncTier.DURABLE)
 
 
 def get_referenced_state_groups_batch(

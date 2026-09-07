@@ -44,6 +44,7 @@ from synapse.storage.database import (
     LoggingTransaction,
 )
 from synapse.storage.databases.embedded_engine import get_embedded_engine
+from synapse.storage.databases.main.embedded_common import SyncTier, maybe_sync
 from synapse.storage.databases.state.bg_updates import (
     StateBackgroundUpdateStore,
     _encode_state_hamt_root,
@@ -313,9 +314,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             engine.put_state_hamt_nodes(
                 self._embedded_hamt_namespace, room_prefix, list(nodes.items())
             )
-            from synapse.synapse_rust.mtxdb_engine import sync
-
-            sync()
+            maybe_sync(SyncTier.DURABLE)
             if lattice:
                 self._store_state_hamt_root_embedded_txn(
                     state_group, room_prefix, root_hash, lattice, room_id
@@ -1045,9 +1044,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         if self._embedded_hamt_engine == "mtxdb":
             engine = get_embedded_engine(self._embedded_hamt_engine)
             engine.batch_put([(root_key, root_value)])
-            from synapse.synapse_rust.mtxdb_engine import sync
-
-            sync()
+            maybe_sync(SyncTier.DURABLE)
 
     async def _background_backfill_state_hamt_roots(
         self, progress: dict, batch_size: int
