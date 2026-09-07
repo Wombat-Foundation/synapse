@@ -20,6 +20,7 @@
 #
 
 import logging
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 from synapse.metrics import SERVER_NAME_LABEL, LaterGauge
@@ -86,7 +87,7 @@ class Databases(Generic[DataStoreT]):
             import os as _os
             import time as _time
 
-            _pgt = None
+            _pgt: Callable[[str, float], None] | None = None
             if _os.environ.get("SYNAPSE_PG_TIMINGS"):
                 try:
                     from tests.server import _pg_timing as _pgt
