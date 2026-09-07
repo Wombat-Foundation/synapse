@@ -86,15 +86,14 @@ class Databases(Generic[DataStoreT]):
             import os as _os
             import time as _time
 
-            _pgt = (
-                (
-                    lambda tag, dt: __import__(
+            _pgt = None
+            if _os.environ.get("SYNAPSE_PG_TIMINGS"):
+                try:
+                    _pgt = lambda tag, dt: __import__(
                         "tests.server", fromlist=["_pg_timing"]
                     )._pg_timing(tag, dt)
-                )
-                if _os.environ.get("SYNAPSE_PG_TIMINGS")
-                else None
-            )
+                except ImportError:
+                    pass
 
             _conn_t = _time.monotonic()
             with make_conn(

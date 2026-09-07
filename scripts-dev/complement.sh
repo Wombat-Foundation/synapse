@@ -459,6 +459,10 @@ main() {
     echo "Embedded HAMT engine: ${PASS_SYNAPSE_EMBEDDED_HAMT_ENGINE} at ${PASS_SYNAPSE_EMBEDDED_HAMT_PATH:-<not set>}" >&2
   fi
 
+  if [[ -n "${SYNAPSE_PG_TIMINGS:-}" ]]; then
+    export PASS_SYNAPSE_PG_TIMINGS=1
+  fi
+
   # ── Run-filter and extra-tags from remaining args ───────────────────────────
   # RUN_TESTS=. means "run everything" (the default).
   # -run PATTERN and -run=PATTERN are extracted for package narrowing + anchoring.

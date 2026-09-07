@@ -146,9 +146,13 @@ def _print_table_ops() -> None:
             f"  {table:40s}  {total:8.3f}s  {count:6d}  {rows:6d}  {total / count:10.4f}s",
             file=sys.stderr,
         )
+    total_time = sum(_TABLE_OPS.values())
+    total_count = sum(_TABLE_OPS_COUNTS.values())
+    total_rows = sum(_TABLE_OPS_ROWS.values())
+    avg = total_time / total_count if total_count else 0.0
     print(
-        f"  {'TOTAL':40s}  {sum(_TABLE_OPS.values()):8.3f}s  "
-        f"{sum(_TABLE_OPS_COUNTS.values()):6d}  {sum(_TABLE_OPS_ROWS.values()):6d}",
+        f"  {'TOTAL':40s}  {total_time:8.3f}s  "
+        f"{total_count:6d}  {total_rows:6d}  {avg:10.4f}s",
         file=sys.stderr,
     )
     print("=====================================\n", file=sys.stderr)
