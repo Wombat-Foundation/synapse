@@ -144,15 +144,23 @@ def _print_pg_timings() -> None:
     if not os.environ.get("SYNAPSE_PG_TIMINGS"):
         return
     print("\n=== Postgres test-DB lifecycle timings ===", file=sys.stderr)
+    print(
+        f"  {'':40s}  {'total':>8s}  {'calls':>6s}  {'avg':>10s}",
+        file=sys.stderr,
+    )
     for tag in sorted(_PG_TIMINGS):
-        total = _PG_TIMINGS[tag]
+        total_s = _PG_TIMINGS[tag]
         count = _PG_TIMING_COUNTS[tag]
+        total_ms = total_s * 1000
+        avg_ms = (total_s / count) * 1000 if count else 0.0
         print(
-            f"  {tag:40s}  {total:8.3f}s  ({count} calls, {total / count:.4f}s avg)",
+            f"  {tag:40s}  {total_ms:7.1f}ms  {count:6d}  {avg_ms:9.3f}ms",
             file=sys.stderr,
         )
+    total_s = sum(_PG_TIMINGS.values())
+    total_ms = total_s * 1000
     print(
-        f"  {'TOTAL':40s}  {sum(_PG_TIMINGS.values()):8.3f}s",
+        f"  {'TOTAL':40s}  {total_ms:7.1f}ms",
         file=sys.stderr,
     )
     print("==========================================\n", file=sys.stderr)

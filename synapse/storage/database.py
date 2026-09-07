@@ -141,20 +141,23 @@ def _print_table_ops() -> None:
         f"  {'table':40s}  {'total':>8s}  {'calls':>6s}  {'rows':>6s}  {'avg':>10s}",
         file=sys.stderr,
     )
-    for table, total in ranked[:30]:
+    for table, total_s in ranked[:30]:
         count = _TABLE_OPS_COUNTS[table]
         rows = _TABLE_OPS_ROWS[table]
+        total_ms = total_s * 1000
+        avg_ms = (total_s / count) * 1000 if count else 0.0
         print(
-            f"  {table:40s}  {total:8.3f}s  {count:6d}  {rows:6d}  {total / count:10.4f}s",
+            f"  {table:40s}  {total_ms:7.1f}ms  {count:6d}  {rows:6d}  {avg_ms:9.3f}ms",
             file=sys.stderr,
         )
-    total_time = sum(_TABLE_OPS.values())
+    total_time_s = sum(_TABLE_OPS.values())
     total_count = sum(_TABLE_OPS_COUNTS.values())
     total_rows = sum(_TABLE_OPS_ROWS.values())
-    avg = total_time / total_count if total_count else 0.0
+    total_ms = total_time_s * 1000
+    avg_ms = (total_time_s / total_count) * 1000 if total_count else 0.0
     print(
-        f"  {'TOTAL':40s}  {total_time:8.3f}s  "
-        f"{total_count:6d}  {total_rows:6d}  {avg:10.4f}s",
+        f"  {'TOTAL':40s}  {total_ms:7.1f}ms  "
+        f"{total_count:6d}  {total_rows:6d}  {avg_ms:9.3f}ms",
         file=sys.stderr,
     )
     print("=====================================\n", file=sys.stderr)

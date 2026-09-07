@@ -77,18 +77,25 @@ def _print_state_timings() -> None:
     if not os.environ.get("SYNAPSE_PG_TIMINGS"):
         return
     print("\n=== State store mtxdb-vs-SQL timings ===", file=sys.stderr)
+    print(
+        f"  {'':40s}  {'total':>8s}  {'calls':>6s}  {'avg':>10s}",
+        file=sys.stderr,
+    )
     for tag in sorted(_STATE_TIMINGS):
-        total = _STATE_TIMINGS[tag]
+        total_s = _STATE_TIMINGS[tag]
         count = _STATE_TIMING_COUNTS[tag]
+        total_ms = total_s * 1000
+        avg_ms = (total_s / count) * 1000 if count else 0.0
         print(
-            f"  {tag:40s}  {total:8.3f}s  ({count} calls, {total / count:.4f}s avg)",
+            f"  {tag:40s}  {total_ms:7.1f}ms  {count:6d}  {avg_ms:9.3f}ms",
             file=sys.stderr,
         )
-    total_time = sum(_STATE_TIMINGS.values())
+    total_time_s = sum(_STATE_TIMINGS.values())
     total_count = sum(_STATE_TIMING_COUNTS.values())
-    avg = total_time / total_count if total_count else 0.0
+    total_ms = total_time_s * 1000
+    avg_ms = (total_time_s / total_count) * 1000 if total_count else 0.0
     print(
-        f"  {'TOTAL':40s}  {total_time:8.3f}s  ({total_count} calls, {avg:.4f}s avg)",
+        f"  {'TOTAL':40s}  {total_ms:7.1f}ms  {total_count:6d}  {avg_ms:9.3f}ms",
         file=sys.stderr,
     )
     print("=========================================\n", file=sys.stderr)
