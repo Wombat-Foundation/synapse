@@ -48,6 +48,7 @@ from synapse.storage.databases.state.bg_updates import (
     StateBackgroundUpdateStore,
     _encode_state_hamt_root,
     _state_hamt_root_key,
+    _state_timing,
 )
 from synapse.storage.engines import PostgresEngine
 from synapse.storage.types import Cursor
@@ -693,10 +694,13 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         # same choice for nodes.
         self._store_state_hamt_nodes_txn(txn, room_prefix, nodes)
         if self._embedded_hamt_engine == "mtxdb":
+            _et = time.monotonic()
             self._store_state_hamt_root_embedded_txn(
                 state_group, room_prefix, root_structural_hash, root_lattice, room_id
             )
+            _state_timing("state_write_root_embedded", time.monotonic() - _et)
         else:
+            _st = time.monotonic()
             self.db_pool.simple_insert_txn(
                 txn,
                 table="state_hamt_roots",
@@ -707,6 +711,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     "root_lattice": bytearray(root_lattice),
                 },
             )
+            _state_timing("state_write_root_sql", time.monotonic() - _st)
 
         logger.debug(
             "[gg-state-timing] _persist_state_hamt_txn mode=rebuild "
@@ -753,12 +758,15 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             prev_lattice = None
             mtxdb_active = self._embedded_hamt_engine == "mtxdb"
             if mtxdb_active:
+                _et = time.monotonic()
                 embedded_root = self._get_embedded_hamt_root(prev_state_group)
+                _state_timing("state_read_root_embedded", time.monotonic() - _et)
                 if embedded_root is not None:
                     prev_root_hash, prev_lattice = embedded_root
             if prev_root_hash is None and (
                 not mtxdb_active or self._embedded_hamt_migration_pending_txn(txn)
             ):
+                _st = time.monotonic()
                 prev_root = self.db_pool.simple_select_one_txn(
                     txn,
                     table="state_hamt_roots",
@@ -766,6 +774,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     retcols=("root_structural_hash", "root_lattice"),
                     allow_none=True,
                 )
+                _state_timing("state_read_root_sql", time.monotonic() - _st)
                 if prev_root is not None and prev_root[1] is not None:
                     prev_root_hash, prev_lattice = (
                         bytes(prev_root[0]),
@@ -779,11 +788,14 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         local_nodes = local_nodes or {}
         root_node_bytes = local_nodes.get(prev_root_hash)
         if root_node_bytes is None:
+            _et = time.monotonic()
             root_node_bytes = self._get_embedded_hamt_node(room_prefix, prev_root_hash)
+            _state_timing("state_read_node_embedded", time.monotonic() - _et)
         if root_node_bytes is None and (
             self._embedded_hamt_engine != "mtxdb"
             or self._embedded_hamt_migration_pending_txn(txn)
         ):
+            _st = time.monotonic()
             root_node_bytes = self.db_pool.simple_select_one_onecol_txn(
                 txn,
                 table="state_hamt_nodes",
@@ -791,6 +803,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 retcol="node_bytes",
                 allow_none=True,
             )
+            _state_timing("state_read_node_sql", time.monotonic() - _st)
         if root_node_bytes is None:
             raise RuntimeError(
                 "Missing HAMT root node for state group "
@@ -859,10 +872,13 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
 
         self._store_state_hamt_nodes_txn(txn, room_prefix, new_nodes)
         if self._embedded_hamt_engine == "mtxdb":
+            _et = time.monotonic()
             self._store_state_hamt_root_embedded_txn(
                 state_group, room_prefix, new_root_hash, new_lattice, room_id
             )
+            _state_timing("state_write_root_embedded", time.monotonic() - _et)
         else:
+            _st = time.monotonic()
             self.db_pool.simple_insert_txn(
                 txn,
                 table="state_hamt_roots",
@@ -873,6 +889,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     "root_lattice": bytearray(new_lattice),
                 },
             )
+            _state_timing("state_write_root_sql", time.monotonic() - _st)
         logger.debug(
             "[gg-state-timing] _persist_state_hamt_incremental_txn "
             "group=%d prev=%d updates=%d nodes=%d elapsed_ms=%.1f",
@@ -897,11 +914,14 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         # invisible to it.
         if self._embedded_hamt_engine == "mtxdb":
             engine = get_embedded_engine(self._embedded_hamt_engine)
+            _et = time.monotonic()
             engine.put_state_hamt_nodes(
                 self._embedded_hamt_namespace, room_prefix, nodes
             )
+            _state_timing("state_write_nodes_embedded", time.monotonic() - _et)
             return
 
+        _st = time.monotonic()
         txn.executemany(
             """
             INSERT INTO state_hamt_nodes (structural_hash, node_bytes)
@@ -913,6 +933,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 for structural_hash, node_bytes in nodes
             ],
         )
+        _state_timing("state_write_nodes_sql", time.monotonic() - _st)
 
     def _embedded_hamt_migration_pending_txn(self, txn: LoggingTransaction) -> bool:
         """Whether `EMBEDDED_HAMT_MIGRATION_UPDATE_NAME` is still queued or

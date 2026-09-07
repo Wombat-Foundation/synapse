@@ -19,10 +19,14 @@
 #
 #
 
+import atexit
 import hashlib
 import logging
+import os
 import struct
+import sys
 import time
+from collections import defaultdict
 from typing import (
     TYPE_CHECKING,
     Mapping,
@@ -46,6 +50,37 @@ if TYPE_CHECKING:
     from synapse.server import HomeServer
 
 logger = logging.getLogger(__name__)
+
+# ── mtxdb-vs-SQL timing (opt-in via SYNAPSE_PG_TIMINGS=1) ───────────────
+_STATE_TIMINGS: dict[str, float] = defaultdict(float)
+_STATE_TIMING_COUNTS: dict[str, int] = defaultdict(int)
+
+
+def _state_timing(tag: str, elapsed: float) -> None:
+    _STATE_TIMINGS[tag] += elapsed
+    _STATE_TIMING_COUNTS[tag] += 1
+
+
+def _print_state_timings() -> None:
+    if not os.environ.get("SYNAPSE_PG_TIMINGS"):
+        return
+    print("\n=== State store mtxdb-vs-SQL timings ===", file=sys.stderr)
+    for tag in sorted(_STATE_TIMINGS):
+        total = _STATE_TIMINGS[tag]
+        count = _STATE_TIMING_COUNTS[tag]
+        print(
+            f"  {tag:40s}  {total:8.3f}s  ({count} calls, {total / count:.4f}s avg)",
+            file=sys.stderr,
+        )
+    print(
+        f"  {'TOTAL':40s}  {sum(_STATE_TIMINGS.values()):8.3f}s",
+        file=sys.stderr,
+    )
+    print("=========================================\n", file=sys.stderr)
+
+
+if os.environ.get("SYNAPSE_PG_TIMINGS"):
+    atexit.register(_print_state_timings)
 
 
 MAX_STATE_DELTA_HOPS = 100
@@ -475,6 +510,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
             None
         )
         if use_embedded:
+            _et = time.monotonic()
             if exact_keys is None:
                 bulk_results = self._materialize_state_hamts_from_embedded_txn(
                     txn, groups
@@ -483,7 +519,9 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
                 bulk_selective_results = self._lookup_state_hamts_from_embedded_txn(
                     txn, groups, exact_keys
                 )
+            _state_timing("state_read_embedded", time.monotonic() - _et)
         elif len(groups) > 1:
+            _st = time.monotonic()
             if exact_keys is None:
                 bulk_results = self._materialize_state_hamt_from_postgres_many_txn(
                     txn, groups
@@ -492,6 +530,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
                 bulk_selective_results = self._lookup_state_hamt_from_postgres_many_txn(
                     txn, groups, exact_keys
                 )
+            _state_timing("state_read_sql", time.monotonic() - _st)
 
         for group in groups:
             if exact_keys is not None:
