@@ -606,8 +606,8 @@ cleanup_complement_containers() {
 # ── record_result: one summary line + append to staged results ───────────────
 record_result() {
   local action="$1" test_name="$2" elapsed="$3"
-  jq -nc --arg Action "$action" --arg Test "$test_name" --arg Elapsed "$elapsed" \
-    '{Action: $Action, Test: $Test, Elapsed: $Elapsed}' >>"$staged_results_file"
+  jq -nc --arg Action "$action" --arg Test "$test_name" \
+    '{Action: $Action, Test: $Test}' >>"$staged_results_file"
 
   if [ "$action" != "skip" ]; then
     # Truncate only the printed name (the full name is still recorded
@@ -781,7 +781,7 @@ finish() {
   echo "" >&2
 
   # ── Stats: slowest tests + time by suite ───────────────────────────────────
-  if [ -f "$staged_results_file" ] && [ -s "$staged_results_file" ]; then
+  if [ -f "$staged_log_file" ] && [ -s "$staged_log_file" ]; then
     python3 -c "
 import json, sys
 from collections import defaultdict
@@ -797,11 +797,9 @@ for line in open(sys.argv[1]):
         continue
     if r.get('Action') not in ('pass', 'fail'):
         continue
-    elapsed_str = r.get('Elapsed', '0s').rstrip('s')
-    try:
-        elapsed = float(elapsed_str)
-    except ValueError:
-        elapsed = 0.0
+    if not r.get('Test'):
+        continue
+    elapsed = r.get('Elapsed', 0) or 0
     results.append((r['Test'], r['Action'], elapsed))
 
 if not results:
@@ -824,7 +822,7 @@ print()
 print('--- Time by suite ---')
 for suite, total in sorted(suite_times.items(), key=lambda x: -x[1]):
     print(f'  {total:8.2f}s  {suite_counts[suite]:4d} tests  {suite}')
-" "$staged_results_file" >&2
+" "$staged_log_file" >&2
     echo "" >&2
   fi
 
