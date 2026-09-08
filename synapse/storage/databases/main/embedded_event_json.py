@@ -51,7 +51,6 @@ import logging
 import struct
 from typing import TYPE_CHECKING
 
-from synapse.storage.databases.embedded_engine import get_embedded_engine
 from synapse.storage.databases.main.embedded_common import SyncTier, maybe_sync
 
 if TYPE_CHECKING:
@@ -95,7 +94,7 @@ def _encode_event_json_record(
     internal_metadata: str, json: str, format_version: int | None
 ) -> bytes:
     """Encode event_json record. The entry type tag (0x04) is prepended by
-    batch_put_typed, so this function only encodes the payload."""
+    batch_put, so this function only encodes the payload."""
     internal_metadata_bytes = internal_metadata.encode("utf-8")
     json_bytes = json.encode("utf-8")
     # format_version is nullable in the schema (older rows); encode as a
@@ -110,9 +109,7 @@ def _encode_event_json_record(
 
 
 def _decode_event_json_record(value: bytes) -> tuple[str, str, int | None]:
-    """Decode event_json payload (tag byte already stripped by batch_get_typed).
-    Supports both legacy (tag=0x01) and new (tag=0x04) formats — the payload
-    structure is identical, only the tag byte differs."""
+    """Decode an event_json payload returned by `batch_get`."""
     if len(value) < 8:
         raise RuntimeError("truncated event_json record")
     (format_version_raw,) = struct.unpack(">i", value[0:4])
@@ -145,10 +142,7 @@ def put_event_json_batch(
     data loss -- not worth paying a synchronous fsync on this hot a path
     for every persisted event.
     """
-    from synapse.synapse_rust.mtxdb_engine import (
-        ENTRY_TYPE_EVENT_JSON,
-        batch_put_typed,
-    )
+    from synapse.synapse_rust.mtxdb_engine import batch_put
 
     pairs = [
         (
@@ -157,7 +151,7 @@ def put_event_json_batch(
         )
         for event_id, internal_metadata, json, format_version in rows
     ]
-    batch_put_typed(pairs, ENTRY_TYPE_EVENT_JSON)
+    batch_put(pairs)
 
 
 def get_event_json_batch(
@@ -167,11 +161,11 @@ def get_event_json_batch(
     every id found in the embedded engine; a missing id is simply absent
     from the result (the caller falls back to SQL for it).
     """
-    from synapse.synapse_rust.mtxdb_engine import ENTRY_TYPE_EVENT_JSON, batch_get_typed
+    from synapse.synapse_rust.mtxdb_engine import batch_get
 
     keys = [_event_json_key(namespace, event_id) for event_id in event_ids]
     key_to_event_id = dict(zip(keys, event_ids))
-    found = batch_get_typed(keys, ENTRY_TYPE_EVENT_JSON)
+    found = batch_get(keys)
     return {
         key_to_event_id[bytes(key)]: _decode_event_json_record(bytes(value))
         for key, value in found
@@ -190,5 +184,7 @@ def delete_event_json_batch(
     if not event_ids:
         return
     keys = [_event_json_key(namespace, event_id) for event_id in event_ids]
-    get_embedded_engine(engine_name).batch_delete(keys)
+    from synapse.synapse_rust.mtxdb_engine import batch_delete
+
+    batch_delete(keys)
     maybe_sync(SyncTier.DURABLE)

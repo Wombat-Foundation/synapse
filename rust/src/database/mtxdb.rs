@@ -1,18 +1,20 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use mtxdb::{
-    is_known_tag, NodeData, NodeId, PackfileStorage, StorageEngine, ENTRY_TYPE_AUTH_CHAIN_LINKS,
-    ENTRY_TYPE_EVENT_JSON, ENTRY_TYPE_EVENT_STATE_GROUP, ENTRY_TYPE_GENERIC_KV,
-    ENTRY_TYPE_HAMT_NODE, ENTRY_TYPE_HAMT_ROOT, ENTRY_TYPE_STATE_GROUP_REFCOUNT,
-};
+use mtxdb::{DatabaseLayout, NodeData, NodeId, PackfileStorage, ShardType, StorageEngine};
 use once_cell::sync::OnceCell;
 use pyo3::prelude::*;
 use sha2::{Digest, Sha256};
 
 use crate::database::core::{NodeStore, ROOM_PREFIX_LEN};
 
-static DB: OnceCell<Arc<dyn StorageEngine>> = OnceCell::new();
+struct MtxdbPools {
+    state: Arc<dyn StorageEngine>,
+    event_dag: Arc<dyn StorageEngine>,
+    auth_chain: Arc<dyn StorageEngine>,
+}
+
+static DBS: OnceCell<MtxdbPools> = OnceCell::new();
 /// Serialize all read-modify-write cycles through the embedded engine.
 /// The mtxdb `StorageEngine` trait has no atomic increment or transaction API,
 /// so we hold this across get→put_many for counters and auth-chain manifests.
@@ -20,9 +22,37 @@ static DB: OnceCell<Arc<dyn StorageEngine>> = OnceCell::new();
 /// negligible.
 static RMW_LOCK: Mutex<()> = Mutex::new(());
 
-fn db() -> PyResult<&'static Arc<dyn StorageEngine>> {
-    DB.get()
+fn pools() -> PyResult<&'static MtxdbPools> {
+    DBS.get()
         .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("mtxdb not opened"))
+}
+
+fn state_db() -> PyResult<&'static Arc<dyn StorageEngine>> {
+    Ok(&pools()?.state)
+}
+
+fn event_dag_db() -> PyResult<&'static Arc<dyn StorageEngine>> {
+    Ok(&pools()?.event_dag)
+}
+
+fn auth_chain_db() -> PyResult<&'static Arc<dyn StorageEngine>> {
+    Ok(&pools()?.auth_chain)
+}
+
+fn shard_type_for_key(key: &[u8]) -> ShardType {
+    if key.starts_with(b"event_json:") || key.starts_with(b"prev_event_edges:") {
+        ShardType::EventDag
+    } else {
+        ShardType::State
+    }
+}
+
+fn db_for_shard_type(shard_type: ShardType) -> PyResult<&'static Arc<dyn StorageEngine>> {
+    match shard_type {
+        ShardType::State => state_db(),
+        ShardType::EventDag => event_dag_db(),
+        ShardType::AuthChain => auth_chain_db(),
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -79,20 +109,18 @@ impl NodeStore for MtxdbStore {
                 }
             }))
         } else {
-            // Treat anything else (e.g., hamt:root:... keys) as a global KV lookup
+            // Hamt roots live in the state pool's flat-KV namespace.
             let room_id = kv_room_id();
             let node_id = kv_node_id(key);
             let result = self
                 .engine
                 .get(&room_id, &node_id)
                 .map_err(|e| e.to_string())?;
-            Ok(result.and_then(|data| {
-                if data.bytes.is_empty() {
-                    None
-                } else {
-                    Some(data.bytes.to_vec())
-                }
-            }))
+            match result {
+                None => Ok(None),
+                Some(data) if data.bytes.is_empty() => Ok(None),
+                Some(data) => Ok(Some(data.bytes.to_vec())),
+            }
         }
     }
 }
@@ -153,17 +181,39 @@ fn deserialize_manifest(bytes: &[u8]) -> Vec<(i64, i64, i64)> {
 #[pyfunction]
 pub fn open_client(py: Python<'_>, path: String) -> PyResult<()> {
     py.detach(|| {
-        if DB.get().is_some() {
+        if DBS.get().is_some() {
             return Ok(());
         }
-        std::fs::create_dir_all(&path).map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!("failed to create directory: {}", e))
+        let layout = DatabaseLayout::open(std::path::PathBuf::from(&path)).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("failed to open mtxdb layout: {}", e))
         })?;
-
-        let storage = PackfileStorage::open(std::path::PathBuf::from(&path)).map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!("failed to open mtxdb: {}", e))
-        })?;
-        let _ = DB.set(Arc::new(storage));
+        let open_pool = |pool| {
+            let path = layout.pool_dir(pool)?;
+            PackfileStorage::open(path)
+        };
+        let state = Arc::new(open_pool(ShardType::State).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "failed to open mtxdb state pool: {}",
+                e
+            ))
+        })?);
+        let event_dag = Arc::new(open_pool(ShardType::EventDag).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "failed to open mtxdb event-dag pool: {}",
+                e
+            ))
+        })?);
+        let auth_chain = Arc::new(open_pool(ShardType::AuthChain).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "failed to open mtxdb auth-chain pool: {}",
+                e
+            ))
+        })?);
+        let _ = DBS.set(MtxdbPools {
+            state,
+            event_dag,
+            auth_chain,
+        });
         Ok(())
     })
 }
@@ -201,7 +251,7 @@ pub fn put_state_hamt_nodes(
         .collect();
 
     py.detach(|| {
-        let engine = db()?;
+        let engine = state_db()?;
         engine.put_many(&room_id, &pairs).map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb put error: {}", e))
         })
@@ -217,7 +267,7 @@ pub fn get_auth_chain_links_batch(
     chain_ids: Vec<i64>,
 ) -> PyResult<Vec<AuthChainLinksForChain>> {
     py.detach(|| {
-        let engine = db()?;
+        let engine = auth_chain_db()?;
         let room_id = namespace_room_id(&namespace);
         let node_ids: Vec<NodeId> = chain_ids.iter().map(|&c| chain_node_id(c)).collect();
 
@@ -247,7 +297,7 @@ pub fn put_auth_chain_links_batch(
         .lock()
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("lock poison: {}", e)))?;
     // No `py.detach` here — see increment_counters_batch's comment for why.
-    let engine = db()?;
+    let engine = auth_chain_db()?;
     let room_id = namespace_room_id(&namespace);
 
     let mut grouped: HashMap<i64, Vec<(i64, i64, i64)>> = HashMap::new();
@@ -303,7 +353,7 @@ pub fn delete_auth_chain_links_batch(namespace: String, pairs: Vec<(i64, i64)>) 
         .lock()
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("lock poison: {}", e)))?;
     // No `py.detach` here — see increment_counters_batch's comment for why.
-    let engine = db()?;
+    let engine = auth_chain_db()?;
     let room_id = namespace_room_id(&namespace);
 
     let mut grouped: HashMap<i64, HashSet<i64>> = HashMap::new();
@@ -352,57 +402,85 @@ fn kv_node_id(key: &[u8]) -> [u8; 16] {
     id
 }
 
+/// Fetch flat-KV records, routing each key to its shard type internally.
 #[pyfunction]
 pub fn batch_get(py: Python<'_>, keys: Vec<Vec<u8>>) -> PyResult<Vec<(Vec<u8>, Vec<u8>)>> {
     py.detach(|| {
-        let engine = db()?;
-        let room_id = kv_room_id();
-        let node_ids: Vec<NodeId> = keys.iter().map(|k| kv_node_id(k)).collect();
-        let results = engine.get_many(&room_id, &node_ids).map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb get_many error: {}", e))
-        })?;
-        let mut out = Vec::with_capacity(keys.len());
-        for (key, res) in keys.into_iter().zip(results) {
-            if let Some(data) = res {
-                if !data.bytes.is_empty() {
-                    out.push((key, data.bytes.to_vec()));
-                }
+        let mut state_ids = Vec::new();
+        let mut event_ids = Vec::new();
+        for (position, key) in keys.iter().enumerate() {
+            let entry = (position, kv_node_id(key));
+            match shard_type_for_key(key) {
+                ShardType::State => state_ids.push(entry),
+                ShardType::EventDag => event_ids.push(entry),
+                ShardType::AuthChain => unreachable!("flat KV never routes to auth-chain"),
             }
         }
-        Ok(out)
+        let mut values = vec![None; keys.len()];
+        for (shard_type, ids) in [
+            (ShardType::State, state_ids),
+            (ShardType::EventDag, event_ids),
+        ] {
+            if ids.is_empty() {
+                continue;
+            }
+            let node_ids: Vec<NodeId> = ids.iter().map(|(_, id)| *id).collect();
+            let found = db_for_shard_type(shard_type)?
+                .get_many(&kv_room_id(), &node_ids)
+                .map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb get_many error: {e}"))
+                })?;
+            for ((position, _), value) in ids.into_iter().zip(found) {
+                values[position] = value;
+            }
+        }
+        Ok(keys
+            .into_iter()
+            .zip(values)
+            .filter_map(|(key, value)| {
+                value
+                    .filter(|data| !data.bytes.is_empty())
+                    .map(|data| (key, data.bytes.to_vec()))
+            })
+            .collect())
     })
 }
 
+/// Store flat-KV records, routing each key to its shard type internally.
 #[pyfunction]
 pub fn batch_put(py: Python<'_>, pairs: Vec<(Vec<u8>, Vec<u8>)>) -> PyResult<()> {
     py.detach(|| {
-        let engine = db()?;
-        let room_id = kv_room_id();
-        let puts: Vec<(NodeId, NodeData)> = pairs
-            .into_iter()
-            .map(|(k, v)| (kv_node_id(&k), NodeData::new(bytes::Bytes::from(v))))
-            .collect();
-        engine.put_many(&room_id, &puts).map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb put error: {}", e))
-        })
+        let mut state_puts = Vec::new();
+        let mut event_puts = Vec::new();
+        for (key, value) in pairs {
+            let entry = (kv_node_id(&key), NodeData::new(bytes::Bytes::from(value)));
+            match shard_type_for_key(&key) {
+                ShardType::State => state_puts.push(entry),
+                ShardType::EventDag => event_puts.push(entry),
+                ShardType::AuthChain => unreachable!("flat KV never routes to auth-chain"),
+            }
+        }
+        for (shard_type, puts) in [
+            (ShardType::State, state_puts),
+            (ShardType::EventDag, event_puts),
+        ] {
+            if !puts.is_empty() {
+                db_for_shard_type(shard_type)?
+                    .put_many(&kv_room_id(), &puts)
+                    .map_err(|e| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb put error: {e}"))
+                    })?;
+            }
+        }
+        Ok(())
     })
 }
 
+/// Tombstone flat-KV records in the shard type selected from each key.
 #[pyfunction]
 pub fn batch_delete(py: Python<'_>, keys: Vec<Vec<u8>>) -> PyResult<()> {
-    py.detach(|| {
-        let engine = db()?;
-        let room_id = kv_room_id();
-        let puts: Vec<(NodeId, NodeData)> = keys
-            .into_iter()
-            .map(|k| {
-                (kv_node_id(&k), NodeData::new(bytes::Bytes::new())) // Empty byte tombstone
-            })
-            .collect();
-        engine.put_many(&room_id, &puts).map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb put error: {}", e))
-        })
-    })
+    let pairs = keys.into_iter().map(|key| (key, Vec::new())).collect();
+    batch_put(py, pairs)
 }
 
 // -----------------------------------------------------------------------------
@@ -440,7 +518,7 @@ pub fn materialize_state_hamt(
     let structural_key = room_structural_key_raw(room_id);
 
     py.detach(|| {
-        let engine = db()?;
+        let engine = state_db()?;
         let store = MtxdbStore {
             engine: Arc::clone(engine),
         };
@@ -482,7 +560,7 @@ pub fn materialize_state_hamts(
         .collect::<PyResult<Vec<_>>>()?;
 
     py.detach(|| {
-        let engine = db()?;
+        let engine = state_db()?;
         let store = MtxdbStore {
             engine: Arc::clone(engine),
         };
@@ -520,7 +598,7 @@ pub fn lookup_state_hamts(
         .collect::<PyResult<Vec<_>>>()?;
 
     py.detach(|| {
-        let engine = db()?;
+        let engine = state_db()?;
         let store = MtxdbStore {
             engine: Arc::clone(engine),
         };
@@ -539,7 +617,7 @@ pub fn batch_get_state_hamt_roots(
     groups: Vec<i64>,
 ) -> PyResult<Vec<Option<PyRootRecord>>> {
     py.detach(|| {
-        let engine = db()?;
+        let engine = state_db()?;
         let store = MtxdbStore {
             engine: Arc::clone(engine),
         };
@@ -576,7 +654,7 @@ pub fn increment_counters_batch(pairs: Vec<(Vec<u8>, i64)>) -> PyResult<Vec<i64>
     // stays held for the duration (#[pyfunction] holds it by default), which
     // also serializes concurrent Python callers — so this is safe and fast
     // for local mmap I/O.
-    let engine = db()?;
+    let engine = state_db()?;
     let room_id = kv_room_id();
     let mut results = Vec::with_capacity(pairs.len());
     let mut puts = Vec::with_capacity(pairs.len());
@@ -584,13 +662,9 @@ pub fn increment_counters_batch(pairs: Vec<(Vec<u8>, i64)>) -> PyResult<Vec<i64>
     for (key, delta) in pairs {
         let node_id = kv_node_id(&key);
         let current = match engine.get(&room_id, &node_id) {
-            // Values here are always written tagged (below) -- this path
-            // has never shipped untagged, so there's no legacy format to
-            // stay compatible with.
             Ok(Some(data)) => {
-                let (_tag, payload) = strip_tag(&data.bytes);
-                if payload.len() == 8 {
-                    i64::from_be_bytes(payload.try_into().unwrap())
+                if data.bytes.len() == 8 {
+                    i64::from_be_bytes(data.bytes.as_ref().try_into().unwrap())
                 } else {
                     0
                 }
@@ -605,16 +679,9 @@ pub fn increment_counters_batch(pairs: Vec<(Vec<u8>, i64)>) -> PyResult<Vec<i64>
         };
         let new_value = current + delta;
         results.push(new_value);
-        // Tagged so batch_get_typed's readers (get_referenced_state_groups_batch)
-        // don't misread an untagged leading 0x00 byte -- which every counter
-        // under 2^56 has -- as ENTRY_TYPE_GENERIC_KV and strip it, corrupting
-        // the value to 7 bytes.
         puts.push((
             node_id,
-            NodeData::new(bytes::Bytes::from(apply_tag(
-                ENTRY_TYPE_STATE_GROUP_REFCOUNT,
-                &new_value.to_be_bytes(),
-            ))),
+            NodeData::new(bytes::Bytes::copy_from_slice(&new_value.to_be_bytes())),
         ));
     }
 
@@ -652,7 +719,7 @@ pub fn get_state_hamt_nodes_batch(
         .collect();
 
     py.detach(|| {
-        let engine = db()?;
+        let engine = state_db()?;
         let results = engine.get_many(&room_id, &node_ids).map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb get error: {}", e))
         })?;
@@ -663,88 +730,21 @@ pub fn get_state_hamt_nodes_batch(
     })
 }
 
-// -----------------------------------------------------------------------------
-// Entry Type Tags
-// -----------------------------------------------------------------------------
-
-/// Strip a recognized entry type tag from the front of a value, returning
-/// `(tag_byte, remaining_bytes)`. If the first byte is not a known tag,
-/// returns `(0x00, original_bytes)` — legacy/untagged data.
-fn strip_tag(bytes: &[u8]) -> (u8, &[u8]) {
-    if !bytes.is_empty() && is_known_tag(bytes[0]) {
-        (bytes[0], &bytes[1..])
-    } else {
-        (0x00, bytes)
-    }
-}
-
-/// Prepend an entry type tag to a value, producing `tag_byte || value_bytes`.
-fn apply_tag(tag: u8, value: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(1 + value.len());
-    out.push(tag);
-    out.extend_from_slice(value);
-    out
-}
-
-#[pyfunction]
-pub fn batch_get_typed(
-    py: Python<'_>,
-    keys: Vec<Vec<u8>>,
-    expected_tag: u8,
-) -> PyResult<Vec<(Vec<u8>, Vec<u8>)>> {
-    py.detach(|| {
-        let engine = db()?;
-        let room_id = kv_room_id();
-        let node_ids: Vec<NodeId> = keys.iter().map(|k| kv_node_id(k)).collect();
-        let results = engine.get_many(&room_id, &node_ids).map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb get_many error: {}", e))
-        })?;
-        let mut out = Vec::with_capacity(keys.len());
-        for (key, res) in keys.into_iter().zip(results) {
-            if let Some(data) = res {
-                if data.bytes.is_empty() {
-                    continue; // tombstone
-                }
-                let (tag, payload) = strip_tag(&data.bytes);
-                // Return if legacy (no tag) or matches expected tag
-                if tag == 0x00 || tag == expected_tag {
-                    out.push((key, payload.to_vec()));
-                }
-            }
-        }
-        Ok(out)
-    })
-}
-
-#[pyfunction]
-pub fn batch_put_typed(py: Python<'_>, pairs: Vec<(Vec<u8>, Vec<u8>)>, tag: u8) -> PyResult<()> {
-    if !is_known_tag(tag) {
-        return Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "unknown entry type tag: 0x{tag:02x}"
-        )));
-    }
-    py.detach(|| {
-        let engine = db()?;
-        let room_id = kv_room_id();
-        let puts: Vec<(NodeId, NodeData)> = pairs
-            .into_iter()
-            .map(|(k, v)| {
-                let tagged = apply_tag(tag, &v);
-                (kv_node_id(&k), NodeData::new(bytes::Bytes::from(tagged)))
-            })
-            .collect();
-        engine.put_many(&room_id, &puts).map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb put error: {}", e))
-        })
-    })
-}
-
 #[pyfunction]
 pub fn sync(py: Python<'_>) -> PyResult<()> {
     py.detach(|| {
-        db()?.sync().map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb sync error: {}", e))
-        })
+        for (name, engine) in [
+            ("state", state_db()?),
+            ("event-dag", event_dag_db()?),
+            ("auth-chain", auth_chain_db()?),
+        ] {
+            engine.sync().map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "mtxdb sync error for {name} pool: {e}"
+                ))
+            })?;
+        }
+        Ok(())
     })
 }
 
@@ -764,20 +764,7 @@ pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     m.add_function(wrap_pyfunction!(lookup_state_hamts, m)?)?;
     m.add_function(wrap_pyfunction!(batch_get_state_hamt_roots, m)?)?;
     m.add_function(wrap_pyfunction!(increment_counters_batch, m)?)?;
-    m.add_function(wrap_pyfunction!(batch_get_typed, m)?)?;
-    m.add_function(wrap_pyfunction!(batch_put_typed, m)?)?;
     m.add_function(wrap_pyfunction!(sync, m)?)?;
-
-    m.add("ENTRY_TYPE_HAMT_ROOT", ENTRY_TYPE_HAMT_ROOT)?;
-    m.add("ENTRY_TYPE_HAMT_NODE", ENTRY_TYPE_HAMT_NODE)?;
-    m.add("ENTRY_TYPE_EVENT_JSON", ENTRY_TYPE_EVENT_JSON)?;
-    m.add("ENTRY_TYPE_EVENT_STATE_GROUP", ENTRY_TYPE_EVENT_STATE_GROUP)?;
-    m.add(
-        "ENTRY_TYPE_STATE_GROUP_REFCOUNT",
-        ENTRY_TYPE_STATE_GROUP_REFCOUNT,
-    )?;
-    m.add("ENTRY_TYPE_AUTH_CHAIN_LINKS", ENTRY_TYPE_AUTH_CHAIN_LINKS)?;
-    m.add("ENTRY_TYPE_GENERIC_KV", ENTRY_TYPE_GENERIC_KV)?;
 
     py.import("sys")?
         .getattr("modules")?

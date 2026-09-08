@@ -109,10 +109,7 @@ def put_event_to_state_group_batch(
     `maybe_sync(SyncTier.DURABLE)` once after all of their embedded writes,
     not once per helper call.
     """
-    from synapse.synapse_rust.mtxdb_engine import (
-        ENTRY_TYPE_EVENT_STATE_GROUP,
-        batch_put_typed,
-    )
+    from synapse.synapse_rust.mtxdb_engine import batch_put
 
     pairs = [
         (
@@ -121,7 +118,7 @@ def put_event_to_state_group_batch(
         )
         for event_id, state_group in rows
     ]
-    batch_put_typed(pairs, ENTRY_TYPE_EVENT_STATE_GROUP)
+    batch_put(pairs)
 
 
 def get_state_group_for_events_batch(
@@ -130,14 +127,11 @@ def get_state_group_for_events_batch(
     """Returns `event_id -> state_group` for every id found in the embedded
     engine; a missing id is simply absent from the result.
     """
-    from synapse.synapse_rust.mtxdb_engine import (
-        ENTRY_TYPE_EVENT_STATE_GROUP,
-        batch_get_typed,
-    )
+    from synapse.synapse_rust.mtxdb_engine import batch_get
 
     keys = [_event_to_state_group_key(namespace, event_id) for event_id in event_ids]
     key_to_event_id = dict(zip(keys, event_ids))
-    found = batch_get_typed(keys, ENTRY_TYPE_EVENT_STATE_GROUP)
+    found = batch_get(keys)
     out = {}
     for key, value in found:
         value = bytes(value)
@@ -163,7 +157,9 @@ def delete_event_to_state_group_batch(
     if not event_ids:
         return
     keys = [_event_to_state_group_key(namespace, event_id) for event_id in event_ids]
-    get_embedded_engine(engine_name).batch_delete(keys)
+    from synapse.synapse_rust.mtxdb_engine import batch_delete
+
+    batch_delete(keys)
 
 
 def increment_state_group_refcounts_batch(
@@ -223,10 +219,7 @@ def get_referenced_state_groups_batch(
     the embedded-engine equivalent of the SQL `get_referenced_state_groups`
     reverse lookup, backed by the counter instead of a scan/index.
     """
-    from synapse.synapse_rust.mtxdb_engine import (
-        ENTRY_TYPE_STATE_GROUP_REFCOUNT,
-        batch_get_typed,
-    )
+    from synapse.synapse_rust.mtxdb_engine import batch_get
 
     if not state_groups:
         return set()
@@ -235,7 +228,7 @@ def get_referenced_state_groups_batch(
         for state_group in state_groups
     ]
     key_to_group = dict(zip(keys, state_groups))
-    found = batch_get_typed(keys, ENTRY_TYPE_STATE_GROUP_REFCOUNT)
+    found = batch_get(keys)
     referenced = set()
     for key, value in found:
         value = bytes(value)
