@@ -606,8 +606,8 @@ cleanup_complement_containers() {
 # ── record_result: one summary line + append to staged results ───────────────
 record_result() {
   local action="$1" test_name="$2" elapsed="$3"
-  jq -nc --arg Action "$action" --arg Test "$test_name" \
-    '{Action: $Action, Test: $Test}' >>"$staged_results_file"
+  jq -nc --arg Action "$action" --arg Test "$test_name" --arg Elapsed "$elapsed" \
+    '{Action: $Action, Test: $Test, Elapsed: $Elapsed}' >>"$staged_results_file"
 
   if [ "$action" != "skip" ]; then
     # Truncate only the printed name (the full name is still recorded
@@ -779,6 +779,54 @@ finish() {
   echo "complement results staged at $staged_results_file" >&2
   echo "complement results merged into $main_results_file" >&2
   echo "" >&2
+
+  # ── Stats: slowest tests + time by suite ───────────────────────────────────
+  if [ -f "$staged_results_file" ] && [ -s "$staged_results_file" ]; then
+    python3 -c "
+import json, sys
+from collections import defaultdict
+
+results = []
+for line in open(sys.argv[1]):
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        r = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    if r.get('Action') not in ('pass', 'fail'):
+        continue
+    elapsed_str = r.get('Elapsed', '0s').rstrip('s')
+    try:
+        elapsed = float(elapsed_str)
+    except ValueError:
+        elapsed = 0.0
+    results.append((r['Test'], r['Action'], elapsed))
+
+if not results:
+    sys.exit(0)
+
+# Slowest 10 tests
+print('--- Slowest tests ---')
+for test, action, elapsed in sorted(results, key=lambda x: -x[2])[:10]:
+    print(f'  {elapsed:7.2f}s  {action.upper():6s}  {test}')
+
+# Time by suite (first path component after Test)
+suite_times = defaultdict(float)
+suite_counts = defaultdict(int)
+for test, action, elapsed in results:
+    suite = test.split('/')[0]
+    suite_times[suite] += elapsed
+    suite_counts[suite] += 1
+
+print()
+print('--- Time by suite ---')
+for suite, total in sorted(suite_times.items(), key=lambda x: -x[1]):
+    print(f'  {total:8.2f}s  {suite_counts[suite]:4d} tests  {suite}')
+" "$staged_results_file" >&2
+    echo "" >&2
+  fi
 
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     {
