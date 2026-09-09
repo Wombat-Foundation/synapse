@@ -7,8 +7,6 @@ on:
       - synapse/storage/schema/*/full_schemas/**
       - .github/workflows/schema_diff.yml
 
-env:
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
