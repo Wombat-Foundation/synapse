@@ -162,7 +162,7 @@ def _print_table_ops() -> None:
     ranked = sorted(_TABLE_OPS.items(), key=lambda kv: kv[1], reverse=True)
     _timings_print("\n=== Per-table SQL timing (top 30) ===")
     _timings_print(
-        f"  {'table':40s}  {'total':>9s}  {'calls':>6s}  {'rows':>6s}  {'avg':>11s}",
+        f"  {'table':40s}  {'total':>10s}  {'calls':>6s}  {'rows':>6s}  {'avg':>13s}",
     )
     for table, total_s in ranked[:30]:
         count = _TABLE_OPS_COUNTS[table]
@@ -188,6 +188,21 @@ def _print_table_ops() -> None:
 
 if os.environ.get("SYNAPSE_PG_TIMINGS"):
     atexit.register(_print_table_ops)
+
+    import signal as _signal
+    from types import FrameType as _FrameType
+
+    _original_sigterm_table_ops = _signal.getsignal(_signal.SIGTERM)
+
+    def _flush_table_ops_on_sigterm(signum: int, frame: _FrameType | None) -> None:
+        _print_table_ops()
+        if callable(_original_sigterm_table_ops):
+            _original_sigterm_table_ops(signum, frame)
+        elif _original_sigterm_table_ops == _signal.SIG_DFL:
+            _signal.signal(_signal.SIGTERM, _signal.SIG_DFL)
+            _signal.raise_signal(_signal.SIGTERM)
+
+    _signal.signal(_signal.SIGTERM, _flush_table_ops_on_sigterm)
 
 
 # Unique indexes which have been added in background updates. Maps from table name

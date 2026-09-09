@@ -94,16 +94,34 @@ def _print_state_timings() -> None:
         return
     _timings_print("\n=== State store mtxdb-vs-SQL timings ===")
     _timings_print(
-        f"  {'':40s}  {'total':>9s}  {'calls':>6s}  {'avg':>11s}",
+        f"  {'':40s}  {'total':>10s}  {'calls':>6s}  {'avg':>13s}",
     )
-    for tag in sorted(_STATE_TIMINGS):
-        total_s = _STATE_TIMINGS[tag]
-        count = _STATE_TIMING_COUNTS[tag]
-        total_ms = total_s * 1000
-        avg_ms = (total_s / count) * 1000 if count else 0.0
-        _timings_print(
-            f"  {tag:40s}  {total_ms:8.1f}ms  {count:6d}  {avg_ms:10.3f}ms",
-        )
+
+    embedded_tags = sorted(t for t in _STATE_TIMINGS if t.endswith("_embedded"))
+    sql_tags = sorted(t for t in _STATE_TIMINGS if t.endswith("_sql"))
+    other_tags = sorted(
+        t for t in _STATE_TIMINGS if not t.endswith(("_embedded", "_sql"))
+    )
+
+    def _print_tag_group(label: str, tags: list[str]) -> None:
+        if not tags:
+            return
+        _timings_print(f"  -- {label} --")
+        for tag in tags:
+            total_s = _STATE_TIMINGS[tag]
+            count = _STATE_TIMING_COUNTS[tag]
+            total_ms = total_s * 1000
+            avg_ms = (total_s / count) * 1000 if count else 0.0
+            _timings_print(
+                f"  {tag:40s}  {total_ms:8.1f}ms  {count:6d}  {avg_ms:10.3f}ms",
+            )
+
+    _print_tag_group("hits (embedded)", embedded_tags)
+    _timings_print("")
+    _print_tag_group("misses (sql)", sql_tags)
+    _timings_print("")
+    _print_tag_group("other", other_tags)
+
     total_time_s = sum(_STATE_TIMINGS.values())
     total_count = sum(_STATE_TIMING_COUNTS.values())
     total_ms = total_time_s * 1000
@@ -118,6 +136,21 @@ def _print_state_timings() -> None:
 
 if os.environ.get("SYNAPSE_PG_TIMINGS"):
     atexit.register(_print_state_timings)
+
+    import signal as _signal
+    from types import FrameType as _FrameType
+
+    _original_sigterm_state_timings = _signal.getsignal(_signal.SIGTERM)
+
+    def _flush_state_timings_on_sigterm(signum: int, frame: _FrameType | None) -> None:
+        _print_state_timings()
+        if callable(_original_sigterm_state_timings):
+            _original_sigterm_state_timings(signum, frame)
+        elif _original_sigterm_state_timings == _signal.SIG_DFL:
+            _signal.signal(_signal.SIGTERM, _signal.SIG_DFL)
+            _signal.raise_signal(_signal.SIGTERM)
+
+    _signal.signal(_signal.SIGTERM, _flush_state_timings_on_sigterm)
 
 
 MAX_STATE_DELTA_HOPS = 100

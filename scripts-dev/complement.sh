@@ -666,6 +666,27 @@ run_one_pattern() {
   local _events_fifo="${_events_dir}/events"
   mkfifo "$_events_fifo"
 
+  # ── Real-time docker log capture for PG timings ────────────────────────────
+  # Complement removes containers during test teardown, so we cannot docker-cp
+  # files after go test exits.  Instead, watch for container starts via
+  # docker-events and follow their logs; timing sections land in the captured
+  # files when the SIGTERM/exit handlers in Synapse flush them to stderr.
+  _pg_timing_dir=""
+  _pg_log_watcher_pid=""
+  if [[ -n "${SYNAPSE_PG_TIMINGS:-}" ]]; then
+    _pg_timing_dir="$(mktemp -d "${staged_results_file}.pgtimings.XXXXXX")"
+    local _container_label="COMPLEMENT_WRAPPER_TOKEN=$COMPLEMENT_WRAPPER_TOKEN"
+    (
+      docker events --filter 'event=start' --format '{{.ID}}' 2>/dev/null | while IFS= read -r _cid; do
+        if docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$_cid" 2>/dev/null \
+            | grep -Fxq "$_container_label"; then
+          docker logs -f "$_cid" >>"${_pg_timing_dir}/${_cid}.log" 2>&1 || true
+        fi
+      done
+    ) &
+    _pg_log_watcher_pid=$!
+  fi
+
   local _go_exit=0
   set +e
   # Enable job control just for this launch so the subshell (and the
@@ -706,6 +727,16 @@ run_one_pattern() {
   _active_producer=""
   set -e
   rm -rf "$_events_dir"
+
+  # Stop the PG timing log watcher (if running) and stash its directory
+  # for the extraction block in finish().
+  if [[ -n "${_pg_log_watcher_pid:-}" ]]; then
+    kill "$_pg_log_watcher_pid" 2>/dev/null || true
+    wait "$_pg_log_watcher_pid" 2>/dev/null || true
+    _pg_log_watcher_pid=""
+  fi
+  export _PG_TIMING_DIR="${_pg_timing_dir:-}"
+
   return "$_go_exit"
 }
 
@@ -835,35 +866,35 @@ for suite, total in sorted(suite_times.items(), key=lambda x: -x[1]):
     } >> "$GITHUB_STEP_SUMMARY"
   fi
 
-  # ── Extract timing files from complement containers ──────────────────────
-  if [[ -n "${SYNAPSE_PG_TIMINGS_FILE:-}" ]]; then
-    local timing_dir
-    timing_dir="$(mktemp -d "${main_results_file}.timings.XXXXXX")"
-    local timing_idx=0
-    local container_label="COMPLEMENT_WRAPPER_TOKEN=$COMPLEMENT_WRAPPER_TOKEN"
-    local _containers
-    mapfile -t _containers < <(docker ps -aq --filter "name=complement" 2>/dev/null || true)
-    for _c in "${_containers[@]:-}"; do
-      if docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$_c" 2>/dev/null \
-          | grep -Fxq "$container_label"; then
-        local _dest="${timing_dir}/synapse_pg_timings_${timing_idx}.txt"
-        if docker cp "${_c}:/tmp/synapse_pg_timings.txt" "$_dest" 2>/dev/null; then
-          if [ -s "$_dest" ]; then
-            timing_idx=$((timing_idx + 1))
-          else
-            rm -f "$_dest"
+  # ── Extract timing from captured docker logs ─────────────────────────────
+  if [[ -n "${SYNAPSE_PG_TIMINGS:-}" ]] && [[ -n "${_PG_TIMING_DIR:-}" ]]; then
+    local _found_timing=0
+    if [[ -d "$_PG_TIMING_DIR" ]]; then
+      for _f in "${_PG_TIMING_DIR}"/*.log; do
+        [ -f "$_f" ] || continue
+        # Extract the three timing sections from the captured log.
+        local _sections
+        _sections=$(awk '
+          /^=== Per-table SQL timing/ { p=1 }
+          /^=== State store mtxdb-vs-SQL timings/ { p=1 }
+          /^=== Postgres test-DB lifecycle timings/ { p=1 }
+          /^=== END SYNAPSE PG TIMINGS ===/ { p=0 }
+          /^================================/ { if(p) { print; p=0; next } }
+          { if(p) print }
+        ' "$_f" 2>/dev/null)
+        if [[ -n "$_sections" ]]; then
+          if [ "$_found_timing" -eq 0 ]; then
+            echo "" >&2
+            echo "=== SYNAPSE PG TIMINGS (from containers) ===" >&2
+            _found_timing=1
           fi
+          echo "--- ${_f##*/} ---" >&2
+          echo "$_sections" >&2
         fi
-      fi
-    done
-    if [ "$timing_idx" -gt 0 ]; then
-      echo "" >&2
-      echo "=== SYNAPSE PG TIMINGS (from containers) ===" >&2
-      for _f in "${timing_dir}"/synapse_pg_timings_*.txt; do
-        echo "--- ${_f##*/} ---" >&2
-        cat "$_f" >&2
       done
-      echo "=== END SYNAPSE PG TIMINGS ===" >&2
+      if [ "$_found_timing" -eq 1 ]; then
+        echo "=== END SYNAPSE PG TIMINGS ===" >&2
+      fi
     fi
   fi
 
