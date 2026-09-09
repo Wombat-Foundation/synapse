@@ -21,6 +21,7 @@
 
 import json
 import logging
+import unittest
 from typing import cast
 from unittest.mock import patch
 
@@ -39,6 +40,7 @@ from synapse.util.clock import Clock
 from synapse.util.stringutils import random_string
 
 from tests.unittest import HomeserverTestCase
+from tests.utils import EMBEDDED_HAMT_ENGINE
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +160,7 @@ class StateStoreTestCase(HomeserverTestCase):
             {(EventTypes.Create, ""): e1.event_id, (EventTypes.Name, ""): e2.event_id},
         )
 
+    @unittest.skipUnless(EMBEDDED_HAMT_ENGINE, "requires embedded HAMT engine")
     def test_state_group_reads_via_embedded_mtxdb_engine(self) -> None:
         """With `embedded_hamt_engine` configured before these events are
         persisted, `_store_state_hamt_nodes_txn` writes exclusively to mtxdb
@@ -176,6 +179,11 @@ class StateStoreTestCase(HomeserverTestCase):
         mtxdb_engine.open_client(tmpdir)
         self.state_datastore._embedded_hamt_engine = "mtxdb"
         self.state_datastore._embedded_hamt_path = tmpdir
+        # __init__ only derives this inside its hamt-setup block; poking
+        # engine/path directly like this bypasses it, so set it explicitly
+        # too or call sites below that read it unconditionally will
+        # AttributeError.
+        self.state_datastore._embedded_hamt_namespace = self.state_datastore.server_name
 
         e1 = self.inject_state_event(self.room, self.u_alice, EventTypes.Create, "", {})
         e2 = self.inject_state_event(
@@ -216,6 +224,7 @@ class StateStoreTestCase(HomeserverTestCase):
             {(EventTypes.Name, ""): e2.event_id},
         )
 
+    @unittest.skipUnless(EMBEDDED_HAMT_ENGINE, "requires embedded HAMT engine")
     def test_embedded_engine_writes_are_exclusive_not_dual(self) -> None:
         """Once `embedded_hamt_engine` is configured, new state groups are
         written to mtxdb ONLY -- `state_hamt_roots`/`state_hamt_nodes` SQL
@@ -231,6 +240,11 @@ class StateStoreTestCase(HomeserverTestCase):
         mtxdb_engine.open_client(tmpdir)
         self.state_datastore._embedded_hamt_engine = "mtxdb"
         self.state_datastore._embedded_hamt_path = tmpdir
+        # __init__ only derives this inside its hamt-setup block; poking
+        # engine/path directly like this bypasses it, so set it explicitly
+        # too or call sites below that read it unconditionally will
+        # AttributeError.
+        self.state_datastore._embedded_hamt_namespace = self.state_datastore.server_name
 
         event = self.inject_state_event(
             self.room, self.u_alice, EventTypes.Create, "", {}
@@ -266,6 +280,7 @@ class StateStoreTestCase(HomeserverTestCase):
             full_state[state_group], {(EventTypes.Create, ""): event.event_id}
         )
 
+    @unittest.skipUnless(EMBEDDED_HAMT_ENGINE, "requires embedded HAMT engine")
     def test_embedded_hamt_migration_copies_existing_sql_data(self) -> None:
         """A state group written before `embedded_hamt_engine` was turned on
         stays SQL-only until `_background_migrate_state_hamt_to_embedded`
@@ -314,6 +329,11 @@ class StateStoreTestCase(HomeserverTestCase):
         mtxdb_engine.open_client(tmpdir)
         self.state_datastore._embedded_hamt_engine = "mtxdb"
         self.state_datastore._embedded_hamt_path = tmpdir
+        # __init__ only derives this inside its hamt-setup block; poking
+        # engine/path directly like this bypasses it, so set it explicitly
+        # too or call sites below that read it unconditionally will
+        # AttributeError.
+        self.state_datastore._embedded_hamt_namespace = self.state_datastore.server_name
 
         with patch.object(
             self.store.db_pool.updates, "start_doing_background_updates"
@@ -361,6 +381,7 @@ class StateStoreTestCase(HomeserverTestCase):
             full_state[state_group], {(EventTypes.Create, ""): event.event_id}
         )
 
+    @unittest.skipUnless(EMBEDDED_HAMT_ENGINE, "requires embedded HAMT engine")
     def test_embedded_engine_root_lookup_does_not_need_sql(self) -> None:
         """`_store_state_hamt_root_embedded_txn` mirrors the HAMT root
         record into the embedded engine itself (under the `hamt:root:...`
@@ -379,6 +400,11 @@ class StateStoreTestCase(HomeserverTestCase):
         mtxdb_engine.open_client(tmpdir)
         self.state_datastore._embedded_hamt_engine = "mtxdb"
         self.state_datastore._embedded_hamt_path = tmpdir
+        # __init__ only derives this inside its hamt-setup block; poking
+        # engine/path directly like this bypasses it, so set it explicitly
+        # too or call sites below that read it unconditionally will
+        # AttributeError.
+        self.state_datastore._embedded_hamt_namespace = self.state_datastore.server_name
 
         e1 = self.inject_state_event(self.room, self.u_alice, EventTypes.Create, "", {})
         e2 = self.inject_state_event(

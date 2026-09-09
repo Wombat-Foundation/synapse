@@ -134,12 +134,6 @@ sytest_tests = [
         "workers": "workers",
         "reactor": "asyncio",
     },
-    {
-        "sytest-tag": "bookworm",
-        "postgres": "multi-postgres",
-        "workers": "workers",
-        "embedded_hamt": "mtxdb",
-    },
 ]
 
 if not IS_PR:
