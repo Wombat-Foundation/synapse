@@ -33,7 +33,8 @@ from synapse.types import StateMap
 from synapse.util.clock import Clock
 
 from tests.test_utils.event_builders import make_test_pdu_event
-from tests.unittest import HomeserverTestCase
+from tests.unittest import HomeserverTestCase, skip_unless
+from tests.utils import EMBEDDED_HAMT_ENGINE
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,7 @@ class EventsTestCase(HomeserverTestCase):
     ) -> None:
         self._store = self.hs.get_datastores().main
 
+    @skip_unless(EMBEDDED_HAMT_ENGINE is not None, "requires embedded HAMT engine")
     def test_get_event_via_embedded_mtxdb_engine(self) -> None:
         """`_store_event_txn` mirrors event_json into mtxdb when
         embedded_hamt_engine is configured; `_fetch_event_json_for_ids_txn`

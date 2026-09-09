@@ -449,7 +449,7 @@ class WorkerConfig(Config):
         if embedded_hamt_engine and (
             self.worker_app is not None or len(self.instance_map) > 0
         ):
-            raise ConfigError(
+            logger.warning(
                 f"embedded_hamt.engine is set to {embedded_hamt_engine!r}, but this "
                 "deployment is configured to run multiple worker processes "
                 "(worker_app and/or instance_map is set). The embedded HAMT "

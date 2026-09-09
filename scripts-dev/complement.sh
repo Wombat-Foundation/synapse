@@ -461,7 +461,6 @@ main() {
 
   if [[ -n "${SYNAPSE_PG_TIMINGS:-}" ]]; then
     export PASS_SYNAPSE_PG_TIMINGS=1
-    export PASS_SYNAPSE_PG_TIMINGS_FILE=/tmp/synapse_pg_timings.txt
   fi
 
   # ── Run-filter and extra-tags from remaining args ───────────────────────────
@@ -676,7 +675,17 @@ run_one_pattern() {
   if [[ -n "${SYNAPSE_PG_TIMINGS:-}" ]]; then
     _pg_timing_dir="$(mktemp -d "${staged_results_file}.pgtimings.XXXXXX")"
     local _container_label="COMPLEMENT_WRAPPER_TOKEN=$COMPLEMENT_WRAPPER_TOKEN"
+    # Follow logs from complement containers as they start.  Also catch any
+    # containers that are already running (race with docker-events connect).
     (
+      # Already-running containers
+      for _cid in $(docker ps -q 2>/dev/null); do
+        if docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$_cid" 2>/dev/null \
+            | grep -Fxq "$_container_label"; then
+          docker logs -f "$_cid" >>"${_pg_timing_dir}/${_cid}.log" 2>&1 &
+        fi
+      done
+      # New containers
       docker events --filter 'event=start' --format '{{.ID}}' 2>/dev/null | while IFS= read -r _cid; do
         if docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$_cid" 2>/dev/null \
             | grep -Fxq "$_container_label"; then
@@ -872,7 +881,7 @@ for suite, total in sorted(suite_times.items(), key=lambda x: -x[1]):
     if [[ -d "$_PG_TIMING_DIR" ]]; then
       for _f in "${_PG_TIMING_DIR}"/*.log; do
         [ -f "$_f" ] || continue
-        # Extract the three timing sections from the captured log.
+        # Extract the timing sections from the captured log.
         local _sections
         _sections=$(awk '
           /^=== Per-table SQL timing/ { p=1 }

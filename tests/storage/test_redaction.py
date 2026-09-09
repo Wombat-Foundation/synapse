@@ -34,7 +34,8 @@ from synapse.types import JsonDict, RoomID, UserID
 from synapse.util.clock import Clock
 
 from tests import unittest
-from tests.utils import create_room
+from tests.unittest import skip_unless
+from tests.utils import EMBEDDED_HAMT_ENGINE, create_room
 
 
 class RedactionTestCase(unittest.HomeserverTestCase):
@@ -387,6 +388,7 @@ class RedactionTestCase(unittest.HomeserverTestCase):
 
         self.assert_dict({"content": {}}, json.loads(event_json))
 
+    @skip_unless(EMBEDDED_HAMT_ENGINE is not None, "requires embedded HAMT engine")
     def test_expire_event_updates_embedded_mirror(self) -> None:
         """`_censor_event_txn` (shared by censoring and expiry) must update
         the embedded mtxdb mirror, not just SQL -- otherwise `get_event`
