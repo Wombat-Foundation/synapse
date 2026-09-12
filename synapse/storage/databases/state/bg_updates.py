@@ -116,7 +116,18 @@ def _print_state_timings() -> None:
                 f"  {tag:40s}  {total_ms:8.1f}ms  {count:6d}  {avg_ms:10.3f}ms",
             )
 
+    def _print_subtotal(label: str, tags: list[str]) -> None:
+        total_s = sum(_STATE_TIMINGS[tag] for tag in tags)
+        count = sum(_STATE_TIMING_COUNTS[tag] for tag in tags)
+        total_ms = total_s * 1000
+        avg_ms = (total_s / count) * 1000 if count else 0.0
+        _timings_print(
+            f"  {label:40s}  {total_ms:8.1f}ms  {count:6d}  {avg_ms:10.3f}ms",
+        )
+
     _print_tag_group("hits (embedded)", embedded_tags)
+    _timings_print("")
+    _print_subtotal("SUB-TOTAL (hits embedded)", embedded_tags)
     _timings_print("")
     _print_tag_group("misses (sql)", sql_tags)
     _timings_print("")
@@ -999,13 +1010,10 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
 
         `groups` is a bare list of `state_group` ints spanning arbitrary,
         unknown rooms by design (this is the generic materialize/lookup-by
-        -groups path) -- roots themselves now live in per-room mtxdb
-        collections (`get_state_hamt_roots_for_room`), not one shared
-        collection, so this first resolves each group's room via
-        `get_room_index` (the flat-file `state_group -> room_prefix` index
-        written alongside every root -- see `put_room_index`'s doc comment
-        in `rust/src/database/mtxdb.rs`), groups by the resolved room, and
-        reads each room's roots in one call.
+        -groups path). Roots live in per-room mtxdb collections, so the Rust
+        bulk API resolves each group's room via the flat-file room index,
+        groups the reads by room, and decodes their records before returning
+        to Python. This keeps the whole operation to one FFI crossing.
         """
         engine = get_embedded_engine(getattr(self, "_embedded_hamt_engine", None))
         namespace = getattr(self, "_embedded_hamt_namespace", None)
@@ -1013,32 +1021,14 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         still_missing: list[int] = []
 
         _diag_t0 = time.monotonic()
-        room_prefixes = engine.get_room_index(namespace, groups)
-        _diag_t1 = time.monotonic()
-        by_room: dict[bytes, list[int]] = {}
-        for group, room_prefix in zip(groups, room_prefixes):
-            if room_prefix is None:
+        roots = engine.get_state_hamt_roots_bulk(namespace, groups)
+        for group, root in zip(groups, roots):
+            if root is None:
                 still_missing.append(group)
                 continue
-            by_room.setdefault(bytes(room_prefix), []).append(group)
-        _diag_t2 = time.monotonic()
-
-        for room_prefix, room_groups in by_room.items():
-            raw_roots = engine.get_state_hamt_roots_for_room(
-                namespace, room_prefix, room_groups
-            )
-            for group, raw in zip(room_groups, raw_roots):
-                if raw is None:
-                    still_missing.append(group)
-                    continue
-                _room_prefix, root_hash, _lattice, room_id = _decode_state_hamt_root(
-                    bytes(raw)
-                )
-                found[group] = (room_prefix, root_hash, room_id)
-        _diag_t3 = time.monotonic()
-        _state_timing("diag_get_room_index", _diag_t1 - _diag_t0)
-        _state_timing("diag_by_room_grouping", _diag_t2 - _diag_t1)
-        _state_timing("diag_roots_fetch_and_decode", _diag_t3 - _diag_t2)
+            room_prefix, root_hash, room_id = root
+            found[group] = (bytes(room_prefix), bytes(root_hash), room_id)
+        _state_timing("diag_roots_fetch_bulk", time.monotonic() - _diag_t0)
 
         if not still_missing:
             return found

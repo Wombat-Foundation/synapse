@@ -19,6 +19,12 @@ format: ##H Format with ruff
 lint: ##H Lint the code with mypy
 	uv run mypy
 	cargo +nightly clippy --all-targets --all-features
+
+
+.PHONY: sync
+sync:	##H Runs: uv run maturin develop
+	uv run maturin develop
+
 p ?=
 
 .PHONY: test
@@ -27,13 +33,15 @@ test: ##H Run tests, e.g., on tests/storage/
 	if [ -n "$$SYNAPSE_POSTGRES" ] && [ -z "$$SYNAPSE_POSTGRES_HOST" ]; then eval "$$(scripts-dev/start_test_postgres.sh)" || exit 1; fi; \
 	uv run python scripts-dev/trial_ctrlc.py $(p)
 
-.PHONY: build
-build: ##H Build the package (requires hatch)
-	uv run --with hatch hatch build
 
-.PHONY: publish
-publish: build ##H Upload the package to PyPI using twine
-	uv run --with twine twine upload dist/*
+# .PHONY: build
+# build: ##H Build the package (requires hatch)
+# 	uv run --with hatch hatch build
+
+# .PHONY: publish
+# publish: build ##H Upload the package to PyPI using twine
+# 	uv run --with twine twine upload dist/*
+
 
 .PHONY: clean
 clean: ##H Clean the virtual environment and caches
@@ -41,6 +49,7 @@ clean: ##H Clean the virtual environment and caches
 	find . -type f -name '*.pyc' -delete
 	find . -type d -name '__pycache__' -exec rm -rf {} +
 	rm -rf .mypy_cache
+
 
 .PHONY: _help
 _help: ##H Show this help, list available targets

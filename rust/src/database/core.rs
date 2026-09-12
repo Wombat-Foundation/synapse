@@ -50,6 +50,94 @@ pub type SelectiveQuery = (
 const NODE_CACHE_CAPACITY: usize = 100_000;
 pub type NodeCache = Mutex<LruCache<Vec<u8>, Arc<HamtNode<String, String>>>>;
 
+// TEMPORARY diagnostic counters for the bulk Rust HAMT walks. Not for commit;
+// remove after determining whether misses, backing reads, decode, or traversal
+// work is responsible for the read cost.
+#[derive(Default)]
+struct WalkTiming {
+    calls: u64,
+    total_ns: u128,
+    cache_probe_ns: u128,
+    backing_read_ns: u128,
+    decode_ns: u128,
+    traversal_ns: u128,
+    cache_hits: u64,
+    cache_misses: u64,
+    backing_reads: u64,
+    nodes_decoded: u64,
+    bfs_rounds: u64,
+}
+
+impl WalkTiming {
+    const fn new() -> Self {
+        Self {
+            calls: 0,
+            total_ns: 0,
+            cache_probe_ns: 0,
+            backing_read_ns: 0,
+            decode_ns: 0,
+            traversal_ns: 0,
+            cache_hits: 0,
+            cache_misses: 0,
+            backing_reads: 0,
+            nodes_decoded: 0,
+            bfs_rounds: 0,
+        }
+    }
+
+    fn add(&mut self, other: &Self) {
+        self.calls += other.calls;
+        self.total_ns += other.total_ns;
+        self.cache_probe_ns += other.cache_probe_ns;
+        self.backing_read_ns += other.backing_read_ns;
+        self.decode_ns += other.decode_ns;
+        self.traversal_ns += other.traversal_ns;
+        self.cache_hits += other.cache_hits;
+        self.cache_misses += other.cache_misses;
+        self.backing_reads += other.backing_reads;
+        self.nodes_decoded += other.nodes_decoded;
+        self.bfs_rounds += other.bfs_rounds;
+    }
+}
+
+static DIAG_MATERIALIZE_WALK: Mutex<WalkTiming> = Mutex::new(WalkTiming::new());
+static DIAG_LOOKUP_WALK: Mutex<WalkTiming> = Mutex::new(WalkTiming::new());
+
+fn average_ns(total: u128, calls: u64) -> u128 {
+    if calls > 0 {
+        total / calls as u128
+    } else {
+        0
+    }
+}
+
+fn format_walk_timing(name: &str, timing: &WalkTiming) -> String {
+    format!(
+        "[DIAG-RUST] {name}: calls={} avg_total_ns={} avg_cache_probe_ns={} avg_backing_read_ns={} avg_decode_ns={} avg_traversal_ns={} cache_hits={} cache_misses={} backing_reads={} nodes_decoded={} bfs_rounds={}",
+        timing.calls,
+        average_ns(timing.total_ns, timing.calls),
+        average_ns(timing.cache_probe_ns, timing.calls),
+        average_ns(timing.backing_read_ns, timing.calls),
+        average_ns(timing.decode_ns, timing.calls),
+        average_ns(timing.traversal_ns, timing.calls),
+        timing.cache_hits,
+        timing.cache_misses,
+        timing.backing_reads,
+        timing.nodes_decoded,
+        timing.bfs_rounds,
+    )
+}
+
+pub fn diag_dump_state_hamt_walk_timing() -> String {
+    let materialize = DIAG_MATERIALIZE_WALK.lock().unwrap();
+    let lookup = DIAG_LOOKUP_WALK.lock().unwrap();
+    format!(
+        "{}\n{}",
+        format_walk_timing("core::materialize_state_hamts", &materialize),
+        format_walk_timing("core::lookup_state_hamts", &lookup),
+    )
+}
+
 pub fn new_node_cache() -> NodeCache {
     Mutex::new(LruCache::new(
         NonZeroUsize::new(NODE_CACHE_CAPACITY).expect("cache capacity is nonzero"),
@@ -306,25 +394,34 @@ pub fn materialize_state_hamts(
     namespace: &str,
     roots: Vec<NodeLocation>,
 ) -> Result<Vec<StateEntries>, String> {
+    let overall_start = std::time::Instant::now();
+    let mut timing = WalkTiming {
+        calls: 1,
+        ..Default::default()
+    };
     let mut node_map: HashMap<NodeLocation, Arc<HamtNode<String, String>>> = HashMap::new();
     let mut seen: HashSet<NodeLocation> = roots.iter().copied().collect();
     let mut to_fetch = seen.clone();
 
     while !to_fetch.is_empty() {
+        timing.bfs_rounds += 1;
         let current_batch: Vec<NodeLocation> = to_fetch.drain().collect();
 
         for chunk in current_batch.chunks(NODE_FETCH_BATCH_SIZE) {
             let mut still_missing = Vec::with_capacity(chunk.len());
             {
+                let cache_probe_start = std::time::Instant::now();
                 let mut cache = cache.lock().unwrap();
                 for (room_prefix, structural_key, hash) in chunk {
                     let key = node_key(namespace, room_prefix, hash);
                     match cache.get(&key) {
                         Some(node) => {
                             if node.structural_hash != *hash {
+                                timing.cache_misses += 1;
                                 cache.pop(&key);
                                 still_missing.push((key, *room_prefix, *structural_key, *hash));
                             } else {
+                                timing.cache_hits += 1;
                                 let node = node.clone();
                                 for child in &node.children {
                                     let child_location =
@@ -336,17 +433,27 @@ pub fn materialize_state_hamts(
                                 node_map.insert((*room_prefix, *structural_key, *hash), node);
                             }
                         }
-                        None => still_missing.push((key, *room_prefix, *structural_key, *hash)),
+                        None => {
+                            timing.cache_misses += 1;
+                            still_missing.push((key, *room_prefix, *structural_key, *hash));
+                        }
                     }
                 }
+                timing.cache_probe_ns += cache_probe_start.elapsed().as_nanos();
             }
 
             for (key, room_prefix, structural_key, expected_hash) in still_missing {
+                timing.backing_reads += 1;
+                let backing_read_start = std::time::Instant::now();
                 let node_bytes = store
                     .get_raw(&key)?
                     .ok_or_else(|| "Missing HAMT node".to_owned())?;
+                timing.backing_read_ns += backing_read_start.elapsed().as_nanos();
+                let decode_start = std::time::Instant::now();
                 let node =
                     decode_persisted_node_verified(&node_bytes, &structural_key, expected_hash)?;
+                timing.decode_ns += decode_start.elapsed().as_nanos();
+                timing.nodes_decoded += 1;
 
                 for child in &node.children {
                     let child_location = (room_prefix, structural_key, child.structural_hash());
@@ -370,7 +477,8 @@ pub fn materialize_state_hamts(
             .insert(hash, node);
     }
 
-    roots
+    let traversal_start = std::time::Instant::now();
+    let result = roots
         .into_iter()
         .map(|(room_prefix, _, root_hash)| {
             let nodes = nodes_by_prefix.get(&room_prefix).ok_or_else(|| {
@@ -381,7 +489,11 @@ pub fn materialize_state_hamts(
             })?;
             materialize_from_node_map(&root_hash, nodes)
         })
-        .collect()
+        .collect();
+    timing.traversal_ns += traversal_start.elapsed().as_nanos();
+    timing.total_ns = overall_start.elapsed().as_nanos();
+    DIAG_MATERIALIZE_WALK.lock().unwrap().add(&timing);
+    result
 }
 
 pub fn lookup_state_hamts(
@@ -390,46 +502,66 @@ pub fn lookup_state_hamts(
     namespace: &str,
     queries: Vec<SelectiveQuery>,
 ) -> Result<Vec<StateEntries>, String> {
+    let overall_start = std::time::Instant::now();
+    let mut timing = WalkTiming {
+        calls: 1,
+        ..Default::default()
+    };
     let mut node_map: HashMap<NodeLocation, Arc<HamtNode<String, String>>> = HashMap::new();
     let mut seen: HashSet<NodeLocation> = queries.iter().map(|(p, h, k, _)| (*p, *k, *h)).collect();
     let mut to_fetch: HashSet<NodeLocation> = seen.clone();
 
     while !to_fetch.is_empty() {
+        timing.bfs_rounds += 1;
         let current_batch: Vec<NodeLocation> = to_fetch.drain().collect();
 
         for chunk in current_batch.chunks(NODE_FETCH_BATCH_SIZE) {
             let mut still_missing = Vec::with_capacity(chunk.len());
             {
+                let cache_probe_start = std::time::Instant::now();
                 let mut cache = cache.lock().unwrap();
                 for (room_prefix, structural_key, hash) in chunk {
                     let key = node_key(namespace, room_prefix, hash);
                     match cache.get(&key) {
                         Some(node) => {
                             if node.structural_hash != *hash {
+                                timing.cache_misses += 1;
                                 cache.pop(&key);
                                 still_missing.push((key, *room_prefix, *structural_key, *hash));
                             } else {
+                                timing.cache_hits += 1;
                                 node_map
                                     .insert((*room_prefix, *structural_key, *hash), node.clone());
                             }
                         }
-                        None => still_missing.push((key, *room_prefix, *structural_key, *hash)),
+                        None => {
+                            timing.cache_misses += 1;
+                            still_missing.push((key, *room_prefix, *structural_key, *hash));
+                        }
                     }
                 }
+                timing.cache_probe_ns += cache_probe_start.elapsed().as_nanos();
             }
 
             for (key, room_prefix, structural_key, expected_hash) in still_missing {
+                timing.backing_reads += 1;
+                let backing_read_start = std::time::Instant::now();
                 let node_bytes = store
                     .get_raw(&key)?
                     .ok_or_else(|| "Missing HAMT node".to_owned())?;
+                timing.backing_read_ns += backing_read_start.elapsed().as_nanos();
+                let decode_start = std::time::Instant::now();
                 let node =
                     decode_persisted_node_verified(&node_bytes, &structural_key, expected_hash)?;
+                timing.decode_ns += decode_start.elapsed().as_nanos();
+                timing.nodes_decoded += 1;
 
                 cache.lock().unwrap().put(key, node.clone());
                 node_map.insert((room_prefix, structural_key, expected_hash), node);
             }
         }
 
+        let traversal_start = std::time::Instant::now();
         type PrefixNodeMap = HashMap<StructuralHash, Arc<HamtNode<String, String>>>;
         let mut nodes_by_prefix: HashMap<[u8; ROOM_PREFIX_LEN], PrefixNodeMap> = HashMap::new();
         for ((room_prefix, _, hash), node) in &node_map {
@@ -453,6 +585,7 @@ pub fn lookup_state_hamts(
                 }
             }
         }
+        timing.traversal_ns += traversal_start.elapsed().as_nanos();
     }
 
     type PrefixNodeMap = HashMap<StructuralHash, Arc<HamtNode<String, String>>>;
@@ -464,7 +597,8 @@ pub fn lookup_state_hamts(
             .insert(hash, node);
     }
 
-    queries
+    let traversal_start = std::time::Instant::now();
+    let result = queries
         .into_iter()
         .map(|(room_prefix, root_hash, structural_key, keys)| {
             let prefix_nodes = nodes_by_prefix.get(&room_prefix).ok_or_else(|| {
@@ -483,5 +617,9 @@ pub fn lookup_state_hamts(
             }
             Ok(entries)
         })
-        .collect()
+        .collect();
+    timing.traversal_ns += traversal_start.elapsed().as_nanos();
+    timing.total_ns = overall_start.elapsed().as_nanos();
+    DIAG_LOOKUP_WALK.lock().unwrap().add(&timing);
+    result
 }

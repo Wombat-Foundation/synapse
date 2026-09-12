@@ -201,6 +201,32 @@ static DIAG_FIRST_NS: Mutex<u128> = Mutex::new(0);
 static DIAG_FIRST_COUNT: Mutex<u64> = Mutex::new(0);
 static DIAG_REPEAT_NS: Mutex<u128> = Mutex::new(0);
 static DIAG_REPEAT_COUNT: Mutex<u64> = Mutex::new(0);
+// TEMPORARY diagnostic counters for the bulk root-reader's internal phases.
+// Not for commit; remove after identifying the dominant phase.
+static DIAG_BULK_ROOM_INDEX_NS: Mutex<u128> = Mutex::new(0);
+static DIAG_BULK_GROUPING_NS: Mutex<u128> = Mutex::new(0);
+static DIAG_BULK_REQUEST_PREP_NS: Mutex<u128> = Mutex::new(0);
+static DIAG_BULK_ENGINE_GET_MANY_NS: Mutex<u128> = Mutex::new(0);
+static DIAG_BULK_DECODE_NS: Mutex<u128> = Mutex::new(0);
+static DIAG_BULK_CALLS: Mutex<u64> = Mutex::new(0);
+static DIAG_BULK_ROOM_READS: Mutex<u64> = Mutex::new(0);
+static DIAG_BULK_RECORDS: Mutex<u64> = Mutex::new(0);
+
+fn average_ns(total: u128, calls: u64) -> u128 {
+    if calls > 0 {
+        total / calls as u128
+    } else {
+        0
+    }
+}
+
+fn average_fixed_3(total: u128, calls: u64) -> (u128, u128) {
+    if calls == 0 {
+        return (0, 0);
+    }
+    let thousandths = total * 1_000 / calls as u128;
+    (thousandths / 1_000, thousandths % 1_000)
+}
 
 #[pyfunction]
 pub fn diag_dump_room_read_timing() -> String {
@@ -208,10 +234,28 @@ pub fn diag_dump_room_read_timing() -> String {
     let fns = *DIAG_FIRST_NS.lock().unwrap();
     let rc = *DIAG_REPEAT_COUNT.lock().unwrap();
     let rns = *DIAG_REPEAT_NS.lock().unwrap();
+    let bulk_calls = *DIAG_BULK_CALLS.lock().unwrap();
+    let bulk_room_reads = *DIAG_BULK_ROOM_READS.lock().unwrap();
+    let bulk_records = *DIAG_BULK_RECORDS.lock().unwrap();
+    let bulk_room_index_ns = *DIAG_BULK_ROOM_INDEX_NS.lock().unwrap();
+    let bulk_grouping_ns = *DIAG_BULK_GROUPING_NS.lock().unwrap();
+    let bulk_request_prep_ns = *DIAG_BULK_REQUEST_PREP_NS.lock().unwrap();
+    let bulk_engine_get_many_ns = *DIAG_BULK_ENGINE_GET_MANY_NS.lock().unwrap();
+    let bulk_decode_ns = *DIAG_BULK_DECODE_NS.lock().unwrap();
+    let (avg_room_reads_whole, avg_room_reads_fraction) =
+        average_fixed_3(bulk_room_reads as u128, bulk_calls);
+    let (avg_records_whole, avg_records_fraction) =
+        average_fixed_3(bulk_records as u128, bulk_calls);
     format!(
-        "[DIAG-RUST] get_state_hamt_roots_for_room: first_touch calls={fc} avg_ns={} | repeat calls={rc} avg_ns={}",
-        if fc > 0 { fns / fc as u128 } else { 0 },
-        if rc > 0 { rns / rc as u128 } else { 0 },
+        "[DIAG-RUST] get_state_hamt_roots_for_room: first_touch calls={fc} avg_ns={} | repeat calls={rc} avg_ns={}\n[DIAG-RUST] get_state_hamt_roots_bulk: calls={bulk_calls} avg_room_index_ns={} avg_grouping_ns={} avg_request_prep_ns={} avg_engine_get_many_ns={} avg_decode_and_result_ns={} avg_room_reads={avg_room_reads_whole}.{avg_room_reads_fraction:03} avg_records={avg_records_whole}.{avg_records_fraction:03}\n{}",
+        average_ns(fns, fc),
+        average_ns(rns, rc),
+        average_ns(bulk_room_index_ns, bulk_calls),
+        average_ns(bulk_grouping_ns, bulk_calls),
+        average_ns(bulk_request_prep_ns, bulk_calls),
+        average_ns(bulk_engine_get_many_ns, bulk_calls),
+        average_ns(bulk_decode_ns, bulk_calls),
+        core::diag_dump_state_hamt_walk_timing(),
     )
 }
 
@@ -263,6 +307,126 @@ pub fn get_state_hamt_roots_for_room(
                 })
             })
             .collect())
+    })
+}
+
+/// Decode the root format written by Python's `_encode_state_hamt_root`.
+///
+/// Keeping this beside the bulk reader lets that reader cross the Python/Rust
+/// boundary only once: it returns just the fields its caller needs rather than
+/// raw records for Python to unpack one at a time.
+fn decode_state_hamt_root(value: &[u8]) -> PyResult<(Vec<u8>, Vec<u8>, String)> {
+    if value.len() < 5 || value[0] != 1 {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "invalid or unsupported HAMT root record version",
+        ));
+    }
+
+    let prefix_len = u16::from_be_bytes([value[1], value[2]]) as usize;
+    let room_id_len_offset = 3 + prefix_len;
+    if value.len() < room_id_len_offset + 2 {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "truncated HAMT root record",
+        ));
+    }
+
+    let room_id_len =
+        u16::from_be_bytes([value[room_id_len_offset], value[room_id_len_offset + 1]]) as usize;
+    let room_id_start = room_id_len_offset + 2;
+    let root_start = room_id_start + room_id_len;
+    if value.len() < root_start + 32 {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "truncated HAMT root record",
+        ));
+    }
+
+    let room_id = std::str::from_utf8(&value[room_id_start..root_start])
+        .map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "invalid UTF-8 room ID in HAMT root record: {e}"
+            ))
+        })?
+        .to_owned();
+    Ok((
+        value[3..room_id_len_offset].to_vec(),
+        value[root_start..root_start + 32].to_vec(),
+        room_id,
+    ))
+}
+
+/// Resolve each state group's room, fetch its HAMT root, and decode the
+/// published root record in one Python/Rust FFI call. The output is aligned
+/// with `state_groups`; `None` represents either a missing room-index entry or
+/// a missing/tombstoned root record.
+#[pyfunction]
+#[allow(clippy::type_complexity)]
+pub fn get_state_hamt_roots_bulk(
+    py: Python<'_>,
+    namespace: String,
+    state_groups: Vec<i64>,
+) -> PyResult<Vec<Option<(Vec<u8>, Vec<u8>, String)>>> {
+    py.detach(|| {
+        let room_index_start = std::time::Instant::now();
+        let room_prefixes = room_index::get_many(&namespace, &state_groups)?;
+        let room_index_elapsed = room_index_start.elapsed().as_nanos();
+
+        let grouping_start = std::time::Instant::now();
+        let mut groups_by_room: HashMap<Vec<u8>, Vec<(usize, i64)>> = HashMap::new();
+        for (index, (&state_group, room_prefix)) in
+            state_groups.iter().zip(room_prefixes).enumerate()
+        {
+            if let Some(room_prefix) = room_prefix {
+                groups_by_room
+                    .entry(room_prefix)
+                    .or_default()
+                    .push((index, state_group));
+            }
+        }
+        let grouping_elapsed = grouping_start.elapsed().as_nanos();
+
+        let mut roots = vec![None; state_groups.len()];
+        let engine = state_db()?;
+        let mut request_prep_elapsed = 0;
+        let mut engine_get_many_elapsed = 0;
+        let mut decode_elapsed = 0;
+        let mut room_reads = 0;
+        let mut records = 0;
+        for (room_prefix, room_groups) in groups_by_room {
+            room_reads += 1;
+            records += room_groups.len() as u64;
+            let request_prep_start = std::time::Instant::now();
+            let room_id = room_id_from_prefix(&room_prefix);
+            let node_ids: Vec<NodeId> = room_groups
+                .iter()
+                .map(|(_, state_group)| root_node_id(&namespace, *state_group))
+                .collect();
+            request_prep_elapsed += request_prep_start.elapsed().as_nanos();
+
+            let engine_get_many_start = std::time::Instant::now();
+            let response_records = engine.get_many(&room_id, &node_ids).map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb get_many error: {e}"))
+            })?;
+            engine_get_many_elapsed += engine_get_many_start.elapsed().as_nanos();
+
+            let decode_start = std::time::Instant::now();
+            for ((index, _), record) in room_groups.into_iter().zip(response_records) {
+                if let Some(record) = record.filter(|record| !record.bytes.is_empty()) {
+                    roots[index] = Some(decode_state_hamt_root(&record.bytes)?);
+                }
+            }
+            decode_elapsed += decode_start.elapsed().as_nanos();
+        }
+
+        *DIAG_BULK_ROOM_INDEX_NS.lock().unwrap() += room_index_elapsed;
+        *DIAG_BULK_GROUPING_NS.lock().unwrap() += grouping_elapsed;
+        *DIAG_BULK_REQUEST_PREP_NS.lock().unwrap() += request_prep_elapsed;
+        *DIAG_BULK_ENGINE_GET_MANY_NS.lock().unwrap() += engine_get_many_elapsed;
+        *DIAG_BULK_DECODE_NS.lock().unwrap() += decode_elapsed;
+        *DIAG_BULK_CALLS.lock().unwrap() += 1;
+        *DIAG_BULK_ROOM_READS.lock().unwrap() += room_reads;
+        *DIAG_BULK_RECORDS.lock().unwrap() += records;
+
+        Ok(roots)
     })
 }
 
@@ -1234,6 +1398,7 @@ pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     m.add_function(wrap_pyfunction!(batch_get_state_hamt_roots, m)?)?;
     m.add_function(wrap_pyfunction!(put_state_hamt_roots, m)?)?;
     m.add_function(wrap_pyfunction!(get_state_hamt_roots_for_room, m)?)?;
+    m.add_function(wrap_pyfunction!(get_state_hamt_roots_bulk, m)?)?;
     m.add_function(wrap_pyfunction!(diag_dump_room_read_timing, m)?)?;
     m.add_function(wrap_pyfunction!(delete_state_hamt_roots_for_room, m)?)?;
     m.add_function(wrap_pyfunction!(put_room_index, m)?)?;
