@@ -14,6 +14,10 @@ struct MtxdbPools {
     auth_chain: Arc<dyn StorageEngine>,
 }
 
+/// Base directory for the state_group -> room_prefix room-index files (see
+/// `room_index` module below), set once by `open_client`.
+static ROOM_INDEX_DIR: OnceCell<std::path::PathBuf> = OnceCell::new();
+
 static DBS: OnceCell<MtxdbPools> = OnceCell::new();
 /// Serialize all read-modify-write cycles through the embedded engine.
 /// The mtxdb `StorageEngine` trait has no atomic increment or transaction API,
@@ -183,6 +187,147 @@ pub fn get_state_hamt_roots_for_room(
     })
 }
 
+/// A flat, direct-offset `state_group -> room_prefix` index: entry N lives
+/// at byte offset `N * 16` in a per-namespace file under
+/// `<embedded_hamt_path>/room_index/<namespace_hash>.bin`. Exists so
+/// `_fetch_hamt_roots_for_embedded_txn` (bg_updates.py) -- which only ever
+/// has a bare `state_group` int, by design, and needs to resolve which
+/// room's mtxdb collection to look a root up in -- doesn't have to touch
+/// SQL or a shared PackfileStorage collection (whose per-write clone cost
+/// scales with the server's *total* state-group count, the exact problem
+/// this index exists to avoid). `state_group` is a small, dense, sequential
+/// integer (not a content hash), so direct offset addressing needs no hash
+/// table, no clone, and no rebuild -- write and read are both a single
+/// syscall at a computed offset.
+///
+/// Three invariants this design depends on, stated explicitly:
+///
+/// 1. **Concurrent multi-worker writes need no locking.** Different
+///    workers write disjoint `state_group` ids (ids are allocated once,
+///    server-wide, by `_state_group_seq_gen`, never reused), so their
+///    `pwrite`s land at disjoint, non-overlapping byte ranges. POSIX
+///    requires no coordination between writers of non-overlapping regions
+///    of the same regular file. Unlike `ShardPool`, this file needs no
+///    `WriterLock`: two writers can never target the same offset.
+/// 2. **All-zero is a valid "not (yet) written" sentinel, not ambiguous
+///    with a real value.** A real `room_prefix` is derived from a hashed
+///    `room_id` (`state_hamt.room_hamt_prefix`), so the chance of a
+///    genuine value being 16 zero bytes is negligible (~2^-128) -- the
+///    same margin already relied on elsewhere in this file (`kv_node_id`,
+///    `chain_node_id`) for hash-derived ids. A reader that sees all-zero
+///    (sparse-file default, or a `pwrite` mid-flight and not yet
+///    reflected) treats it as a miss. `pwrite`/`pread` of one 16-byte
+///    value, well within a single page, is applied atomically at the
+///    page-cache level on Linux -- a concurrent reader observes either the
+///    complete old or complete new value, never a torn mix.
+/// 3. **This index has the same bounded durability window as the rest of
+///    the embedded engine, not a weaker one.** There is no per-write
+///    fsync here (matching the engine-wide move away from per-write
+///    fsyncs -- see `_periodic_embedded_sync`): a crash can lose a very
+///    recent mapping along with the root record it points to, since both
+///    are written in the same uncommitted window. That's consistent, not
+///    a new gap -- the root itself has no stronger guarantee in that same
+///    window. A resulting miss falls through to
+///    `_fetch_hamt_roots_for_embedded_txn`'s existing SQL fallback,
+///    exactly as a genuine migration-window miss already does today.
+mod room_index {
+    use std::fs::OpenOptions;
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    use pyo3::PyResult;
+    use sha2::{Digest, Sha256};
+
+    use super::ROOM_INDEX_DIR;
+
+    const RECORD_LEN: u64 = 16;
+
+    fn index_path(namespace: &str) -> PyResult<std::path::PathBuf> {
+        let dir = ROOM_INDEX_DIR
+            .get()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("mtxdb not opened"))?;
+        std::fs::create_dir_all(dir).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "failed to create room_index dir: {e}"
+            ))
+        })?;
+        let namespace_hash = Sha256::digest(namespace.as_bytes());
+        Ok(dir.join(format!("{}.bin", hex::encode(&namespace_hash[..16]))))
+    }
+
+    pub fn put(namespace: &str, entries: &[(i64, Vec<u8>)]) -> PyResult<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let path = index_path(namespace)?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "failed to open room_index file: {e}"
+                ))
+            })?;
+        for (state_group, room_prefix) in entries {
+            let mut record = [0u8; RECORD_LEN as usize];
+            let n = std::cmp::min(room_prefix.len(), RECORD_LEN as usize);
+            record[..n].copy_from_slice(&room_prefix[..n]);
+            let offset = (*state_group as u64).saturating_mul(RECORD_LEN);
+            file.seek(SeekFrom::Start(offset)).map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "room_index seek failed: {e}"
+                ))
+            })?;
+            file.write_all(&record).map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "room_index write failed: {e}"
+                ))
+            })?;
+        }
+        Ok(())
+    }
+
+    pub fn get_many(namespace: &str, state_groups: &[i64]) -> PyResult<Vec<Option<Vec<u8>>>> {
+        let path = index_path(namespace)?;
+        let mut file = match OpenOptions::new().read(true).open(&path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(vec![None; state_groups.len()]);
+            }
+            Err(e) => {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "failed to open room_index file: {e}"
+                )))
+            }
+        };
+        let mut out = Vec::with_capacity(state_groups.len());
+        for &state_group in state_groups {
+            let offset = (state_group as u64).saturating_mul(RECORD_LEN);
+            let mut record = [0u8; RECORD_LEN as usize];
+            let value = match file.seek(SeekFrom::Start(offset)) {
+                Ok(_) => match file.read_exact(&mut record) {
+                    Ok(()) if record.iter().any(|&b| b != 0) => Some(record.to_vec()),
+                    _ => None, // all-zero (sentinel) or short read past EOF: miss.
+                },
+                Err(_) => None,
+            };
+            out.push(value);
+        }
+        Ok(out)
+    }
+}
+
+#[pyfunction]
+pub fn put_room_index(namespace: String, entries: Vec<(i64, Vec<u8>)>) -> PyResult<()> {
+    room_index::put(&namespace, &entries)
+}
+
+#[pyfunction]
+pub fn get_room_index(namespace: String, state_groups: Vec<i64>) -> PyResult<Vec<Option<Vec<u8>>>> {
+    room_index::get_many(&namespace, &state_groups)
+}
+
 pub struct MtxdbStore {
     pub engine: Arc<dyn StorageEngine>,
 }
@@ -324,6 +469,7 @@ pub fn open_client(py: Python<'_>, path: String) -> PyResult<()> {
             event_dag,
             auth_chain,
         });
+        let _ = ROOM_INDEX_DIR.set(std::path::PathBuf::from(&path).join("room_index"));
         Ok(())
     })
 }
@@ -873,6 +1019,8 @@ pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     m.add_function(wrap_pyfunction!(batch_get_state_hamt_roots, m)?)?;
     m.add_function(wrap_pyfunction!(put_state_hamt_roots, m)?)?;
     m.add_function(wrap_pyfunction!(get_state_hamt_roots_for_room, m)?)?;
+    m.add_function(wrap_pyfunction!(put_room_index, m)?)?;
+    m.add_function(wrap_pyfunction!(get_room_index, m)?)?;
     m.add_function(wrap_pyfunction!(increment_counters_batch, m)?)?;
     m.add_function(wrap_pyfunction!(sync, m)?)?;
 
