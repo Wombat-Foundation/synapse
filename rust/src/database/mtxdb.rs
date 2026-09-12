@@ -252,10 +252,11 @@ pub fn get_state_hamt_roots_for_room(
 ///    with a real value.** A real `room_prefix` is derived from a hashed
 ///    `room_id` (`state_hamt.room_hamt_prefix`), so the chance of a
 ///    genuine value being `ROOM_PREFIX_LEN` zero bytes is negligible
-///    (~2^-64) -- the same margin already relied on elsewhere in this file
-///    (`kv_node_id`, `chain_node_id`) for hash-derived ids. A reader that
-///    sees all-zero (sparse-file default, or a `pwrite` mid-flight and not
-///    yet reflected) treats it as a miss. `pwrite`/`pread` of one
+///    (~2^-64) -- a smaller but still negligible margin than the 2^-128
+///    this file relies on elsewhere (`kv_node_id`, `chain_node_id`, both
+///    full 16-byte hashes) for the same kind of hash-derived id. A reader
+///    that sees all-zero (sparse-file default, or a `pwrite` mid-flight and
+///    not yet reflected) treats it as a miss. `pwrite`/`pread` of one
 ///    `ROOM_PREFIX_LEN`-byte value, well within a single page, is applied
 ///    atomically at the page-cache level on Linux -- a concurrent reader
 ///    observes either the complete old or complete new value, never a torn

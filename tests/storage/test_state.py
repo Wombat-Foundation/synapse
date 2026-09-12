@@ -198,6 +198,26 @@ class StateStoreTestCase(HomeserverTestCase):
         )
         assert state_group is not None
 
+        # The room index is the lookup bridge from a bare state-group id to
+        # its per-room mtxdb collection. Its on-disk records must contain the
+        # real eight-byte HAMT prefix, rather than an internally padded value:
+        # the Rust materialize/lookup APIs reject any other length.
+        from synapse.synapse_rust import state_hamt
+
+        expected_room_prefix = bytes(
+            state_hamt.room_hamt_prefix(
+                self.room.to_string(),
+                e3.room_version.msc4291_room_ids_as_hashes,
+            )
+        )
+        self.assertEqual(
+            mtxdb_engine.get_room_index(
+                self.state_datastore._embedded_hamt_namespace,
+                [state_group],
+            ),
+            [expected_room_prefix],
+        )
+
         # Full materialize via the embedded engine.
         full_state = self.get_success(
             self.state_datastore._get_state_groups_from_groups(
