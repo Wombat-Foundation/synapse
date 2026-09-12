@@ -16,8 +16,7 @@ use rezzy::hamt::{HamtNode, StructuralHash};
 use sha2::{Digest, Sha256};
 
 use crate::state_hamt::{
-    decode_persisted_node_verified, lookup_from_node_map, lookup_from_node_map_preencoded,
-    materialize_from_node_map,
+    decode_persisted_node_verified, lookup_from_node_map_preencoded, materialize_from_node_map,
 };
 
 /// Minimal point-lookup/write surface every embedded HAMT KV backend must
@@ -626,4 +625,72 @@ pub fn lookup_state_hamts(
     timing.total_ns = overall_start.elapsed().as_nanos();
     DIAG_LOOKUP_WALK.lock().unwrap().add(&timing);
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::{lookup_state_hamts, new_node_cache, node_key, NodeStore};
+    use crate::state_hamt::{
+        build_root_handle_and_nodes, room_hamt_prefix_raw, room_structural_key_raw,
+    };
+
+    struct MemoryStore(HashMap<Vec<u8>, Vec<u8>>);
+
+    impl NodeStore for MemoryStore {
+        fn get_raw(&self, key: &[u8]) -> Result<Option<Vec<u8>>, String> {
+            Ok(self.0.get(key).cloned())
+        }
+    }
+
+    #[test]
+    fn lookup_returns_entry_resolved_by_the_last_fetch_round() {
+        let room_id = "!lookup:test.example";
+        let namespace = "test";
+        let entries = (0..1_000)
+            .map(|index| {
+                (
+                    "m.room.member".to_owned(),
+                    format!("@user-{index}:test.example"),
+                    format!("${index}"),
+                )
+            })
+            .collect();
+        let ((root_hash, _), nodes) =
+            build_root_handle_and_nodes(room_id, entries).expect("HAMT root should build");
+        let room_prefix = room_hamt_prefix_raw(room_id, false).expect("valid room prefix");
+        let structural_key = room_structural_key_raw(room_id);
+        let store = MemoryStore(
+            nodes
+                .into_iter()
+                .map(|(hash, bytes)| (node_key(namespace, &room_prefix, &hash), bytes))
+                .collect(),
+        );
+
+        let result = lookup_state_hamts(
+            &store,
+            &new_node_cache(),
+            namespace,
+            vec![(
+                room_prefix,
+                root_hash,
+                structural_key,
+                vec![(
+                    "m.room.member".to_owned(),
+                    "@user-42:test.example".to_owned(),
+                )],
+            )],
+        )
+        .expect("lookup should resolve nodes fetched by the final round");
+
+        assert_eq!(
+            result,
+            vec![vec![(
+                "m.room.member".to_owned(),
+                "@user-42:test.example".to_owned(),
+                "$42".to_owned(),
+            )]]
+        );
+    }
 }
