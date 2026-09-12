@@ -192,7 +192,17 @@ pub fn open_client(py: Python<'_>, path: String) -> PyResult<()> {
             let path = layout.pool_dir(pool)?;
             PackfileStorage::open(path)
         };
-        let state = Arc::new(open_pool(ShardType::State).map_err(|e| {
+        // State pool holds HAMT nodes, roots, and state-group sidecars --
+        // dense structural hashes, not text. zstd never shrinks them (see
+        // mtxdb's own compression bench), so every write there was still
+        // paying the compressor's full match-finding pass for nothing.
+        // open_with_compression(.., false) skips the attempt entirely; the
+        // event-dag/auth-chain pools (JSON-ish payloads) keep compression on.
+        let open_state_pool = || {
+            let path = layout.pool_dir(ShardType::State)?;
+            PackfileStorage::open_with_compression(path, false)
+        };
+        let state = Arc::new(open_state_pool().map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!(
                 "failed to open mtxdb state pool: {}",
                 e
