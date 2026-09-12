@@ -83,6 +83,106 @@ fn parse_node_key(key: &[u8]) -> Option<([u8; ROOM_PREFIX_LEN], [u8; 32])> {
     Some((room_prefix, hash))
 }
 
+/// Derive a HAMT root's `NodeId` within its room's own State collection --
+/// a fixed `b"hamt:root:"` tag plus the namespace (still needed here: a
+/// room's own collection is otherwise keyed only by the bare `state_group`
+/// int, and different trial-test namespaces sharing one physical mtxdb
+/// store can otherwise collide on the same state_group id -- see
+/// tests/utils.py's default_config) plus the state_group, hashed and
+/// truncated the same way kv_node_id/chain_node_id already derive node
+/// ids from non-hash-shaped keys. Distinct from any real structural-hash
+/// node id in that collection with overwhelming probability, the same
+/// margin already relied on for kv_node_id's own use.
+fn root_node_id(namespace: &str, state_group: i64) -> [u8; 16] {
+    let mut buf = Vec::with_capacity(b"hamt:root:".len() + namespace.len() + 8);
+    buf.extend_from_slice(b"hamt:root:");
+    buf.extend_from_slice(namespace.as_bytes());
+    buf.extend_from_slice(&state_group.to_be_bytes());
+    let hash = Sha256::digest(&buf);
+    let mut id = [0u8; 16];
+    id.copy_from_slice(&hash[..16]);
+    id
+}
+
+fn room_id_from_prefix(room_prefix: &[u8]) -> [u8; 16] {
+    let mut room_id = [0u8; 16];
+    let prefix_len = std::cmp::min(room_prefix.len(), 16);
+    room_id[..prefix_len].copy_from_slice(&room_prefix[..prefix_len]);
+    room_id
+}
+
+/// Store HAMT root records in their room's own State collection, rather
+/// than the single global flat-KV collection every other caller shares
+/// (`kv_room_id()`). A root write/read is naturally room-scoped -- every
+/// caller either already has `room_prefix` in hand or can derive it
+/// cheaply (`state_hamt.room_hamt_prefix`) -- and mtxdb clones a
+/// collection's entire index on every write, so parking every room's
+/// roots in one shared collection meant a single root write's clone cost
+/// scaled with the *server's total* accumulated root count instead of one
+/// room's, growing without bound as a trial run persists more rooms. This
+/// mirrors `put_state_hamt_nodes`'s existing per-room routing exactly.
+#[pyfunction]
+pub fn put_state_hamt_roots(
+    py: Python<'_>,
+    namespace: String,
+    room_prefix: Vec<u8>,
+    roots: Vec<(i64, Vec<u8>)>,
+) -> PyResult<()> {
+    let room_id = room_id_from_prefix(&room_prefix);
+    let pairs: Vec<(NodeId, NodeData)> = roots
+        .into_iter()
+        .map(|(state_group, value)| {
+            (
+                root_node_id(&namespace, state_group),
+                NodeData::new(bytes::Bytes::from(value)),
+            )
+        })
+        .collect();
+    py.detach(|| {
+        let engine = state_db()?;
+        engine.put_many(&room_id, &pairs).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb put error: {}", e))
+        })
+    })
+}
+
+/// Point/batch-read HAMT root records from their room's own State
+/// collection -- the read counterpart of `put_state_hamt_roots`. Returns
+/// the raw encoded root value (as written by `_encode_state_hamt_root`)
+/// for each `state_group`, or `None` on a miss; decoding stays in Python
+/// (`_decode_state_hamt_root`) rather than duplicating that format here.
+#[pyfunction]
+pub fn get_state_hamt_roots_for_room(
+    py: Python<'_>,
+    namespace: String,
+    room_prefix: Vec<u8>,
+    state_groups: Vec<i64>,
+) -> PyResult<Vec<Option<Vec<u8>>>> {
+    let room_id = room_id_from_prefix(&room_prefix);
+    let node_ids: Vec<NodeId> = state_groups
+        .iter()
+        .map(|&sg| root_node_id(&namespace, sg))
+        .collect();
+    py.detach(|| {
+        let engine = state_db()?;
+        let results = engine.get_many(&room_id, &node_ids).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb get_many error: {}", e))
+        })?;
+        Ok(results
+            .into_iter()
+            .map(|res| {
+                res.and_then(|data| {
+                    if data.bytes.is_empty() {
+                        None
+                    } else {
+                        Some(data.bytes.to_vec())
+                    }
+                })
+            })
+            .collect())
+    })
+}
+
 pub struct MtxdbStore {
     pub engine: Arc<dyn StorageEngine>,
 }
@@ -235,9 +335,7 @@ pub fn put_state_hamt_nodes(
     room_prefix: Vec<u8>,
     nodes: Vec<(Vec<u8>, Vec<u8>)>,
 ) -> PyResult<()> {
-    let mut room_id = [0u8; 16];
-    let prefix_len = std::cmp::min(room_prefix.len(), 16);
-    room_id[..prefix_len].copy_from_slice(&room_prefix[..prefix_len]);
+    let room_id = room_id_from_prefix(&room_prefix);
 
     let pairs: Vec<(NodeId, NodeData)> = nodes
         .into_iter()
@@ -773,6 +871,8 @@ pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     m.add_function(wrap_pyfunction!(materialize_state_hamts, m)?)?;
     m.add_function(wrap_pyfunction!(lookup_state_hamts, m)?)?;
     m.add_function(wrap_pyfunction!(batch_get_state_hamt_roots, m)?)?;
+    m.add_function(wrap_pyfunction!(put_state_hamt_roots, m)?)?;
+    m.add_function(wrap_pyfunction!(get_state_hamt_roots_for_room, m)?)?;
     m.add_function(wrap_pyfunction!(increment_counters_batch, m)?)?;
     m.add_function(wrap_pyfunction!(sync, m)?)?;
 
