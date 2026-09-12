@@ -1360,7 +1360,9 @@ def setup_test_homeserver(
         )
         db_engine.attempt_to_set_autocommit(db_conn, True)
         cur = db_conn.cursor()
-        cur.execute("DROP DATABASE IF EXISTS %s;" % (test_db,))
+        # `test_db` contains a freshly generated UUID, so it cannot collide with a
+        # previous test database. Avoid an unnecessary round trip before cloning
+        # the base database.
         cur.execute(
             "CREATE DATABASE %s WITH TEMPLATE %s;" % (test_db, POSTGRES_BASE_DB)
         )
