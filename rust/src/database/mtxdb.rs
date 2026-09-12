@@ -293,9 +293,11 @@ pub fn get_state_hamt_roots_for_room(
 mod room_index {
     use std::collections::HashMap;
     use std::fs::{File, OpenOptions};
+    use std::num::NonZeroUsize;
     use std::os::unix::fs::FileExt;
     use std::sync::{Arc, Mutex};
 
+    use lru::LruCache;
     use pyo3::PyResult;
     use sha2::{Digest, Sha256};
 
@@ -309,6 +311,15 @@ mod room_index {
     // (`lookup_state_hamts` et al.) enforces the true 8-byte length, so a
     // padded value failed downstream with "room_prefix must be 8 bytes".
     const RECORD_LEN: u64 = ROOM_PREFIX_LEN as u64;
+
+    // Keep recent mappings in-process after a successful write or read. This
+    // is an optimization only: the direct-offset file remains authoritative,
+    // so a worker that has not seen another worker's write simply falls back
+    // to `pread`. Bounded retention keeps a long-running monolith from
+    // turning the index into an unbounded second copy of all state groups.
+    const PREFIX_CACHE_CAPACITY: usize = 100_000;
+    static PREFIX_CACHE: Mutex<Option<LruCache<(String, i64), [u8; ROOM_PREFIX_LEN]>>> =
+        Mutex::new(None);
 
     /// Cached file handles, one per namespace, so a batch of N `put`/`get`
     /// calls (e.g. one per state group in a persist loop) pays one `open()`
@@ -382,22 +393,73 @@ mod room_index {
                 pyo3::exceptions::PyRuntimeError::new_err(format!("room_index write failed: {e}"))
             })?;
         }
+        let mut cache = PREFIX_CACHE
+            .lock()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("lock poison: {e}")))?;
+        let cache = cache.get_or_insert_with(|| {
+            LruCache::new(NonZeroUsize::new(PREFIX_CACHE_CAPACITY).expect("nonzero capacity"))
+        });
+        for (state_group, room_prefix) in entries {
+            let mut record = [0u8; ROOM_PREFIX_LEN];
+            let n = std::cmp::min(room_prefix.len(), ROOM_PREFIX_LEN);
+            record[..n].copy_from_slice(&room_prefix[..n]);
+            // Preserve the on-disk all-zero sentinel's miss semantics even
+            // for a malformed caller-provided empty prefix.
+            if record.iter().any(|&b| b != 0) {
+                cache.put((namespace.to_owned(), *state_group), record);
+            }
+        }
         Ok(())
     }
 
     pub fn get_many(namespace: &str, state_groups: &[i64]) -> PyResult<Vec<Option<Vec<u8>>>> {
+        let mut out: Vec<Option<Vec<u8>>> = vec![None; state_groups.len()];
+        let mut missing = Vec::new();
+        {
+            let mut cache = PREFIX_CACHE.lock().map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("lock poison: {e}"))
+            })?;
+            if let Some(cache) = cache.as_mut() {
+                for (index, &state_group) in state_groups.iter().enumerate() {
+                    if let Some(room_prefix) = cache.get(&(namespace.to_owned(), state_group)) {
+                        out[index] = Some(room_prefix.to_vec());
+                    } else {
+                        missing.push((index, state_group));
+                    }
+                }
+            } else {
+                missing.extend(state_groups.iter().copied().enumerate());
+            }
+        }
+        if missing.is_empty() {
+            return Ok(out);
+        }
         let Some(file) = cached_handle(namespace, false)? else {
-            return Ok(vec![None; state_groups.len()]);
+            return Ok(out);
         };
-        let mut out = Vec::with_capacity(state_groups.len());
-        for &state_group in state_groups {
+        let mut read_records = Vec::new();
+        for (index, state_group) in missing {
             let offset = (state_group as u64).saturating_mul(RECORD_LEN);
             let mut record = [0u8; RECORD_LEN as usize];
             let value = match file.read_exact_at(&mut record, offset) {
-                Ok(()) if record.iter().any(|&b| b != 0) => Some(record.to_vec()),
+                Ok(()) if record.iter().any(|&b| b != 0) => {
+                    read_records.push((state_group, record));
+                    Some(record.to_vec())
+                }
                 _ => None, // all-zero (sentinel) or short read past EOF: miss.
             };
-            out.push(value);
+            out[index] = value;
+        }
+        if !read_records.is_empty() {
+            let mut cache = PREFIX_CACHE.lock().map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("lock poison: {e}"))
+            })?;
+            let cache = cache.get_or_insert_with(|| {
+                LruCache::new(NonZeroUsize::new(PREFIX_CACHE_CAPACITY).expect("nonzero capacity"))
+            });
+            for (state_group, record) in read_records {
+                cache.put((namespace.to_owned(), state_group), record);
+            }
         }
         Ok(out)
     }
