@@ -231,8 +231,10 @@ pub fn get_state_hamt_roots_for_room(
 ///    `_fetch_hamt_roots_for_embedded_txn`'s existing SQL fallback,
 ///    exactly as a genuine migration-window miss already does today.
 mod room_index {
-    use std::fs::OpenOptions;
-    use std::io::{Read, Seek, SeekFrom, Write};
+    use std::collections::HashMap;
+    use std::fs::{File, OpenOptions};
+    use std::os::unix::fs::FileExt;
+    use std::sync::{Arc, Mutex};
 
     use pyo3::PyResult;
     use sha2::{Digest, Sha256};
@@ -240,6 +242,17 @@ mod room_index {
     use super::ROOM_INDEX_DIR;
 
     const RECORD_LEN: u64 = 16;
+
+    /// Cached file handles, one per namespace, so a batch of N `put`/`get`
+    /// calls (e.g. one per state group in a persist loop) pays one `open()`
+    /// for the whole batch rather than one per call -- the same overhead
+    /// this index otherwise avoids by skipping mtxdb's clone-on-write
+    /// entirely. `FileExt::write_at`/`read_at` (pread/pwrite) take an
+    /// explicit offset per call, so a shared handle needs no seek and no
+    /// per-call mutable state -- safe to hand out from behind a `Mutex`
+    /// that's only ever held for the duration of a HashMap lookup/insert,
+    /// never across the actual I/O.
+    static HANDLES: Mutex<Option<HashMap<String, std::sync::Arc<File>>>> = Mutex::new(None);
 
     fn index_path(namespace: &str) -> PyResult<std::path::PathBuf> {
         let dir = ROOM_INDEX_DIR
@@ -254,30 +267,46 @@ mod room_index {
         Ok(dir.join(format!("{}.bin", hex::encode(&namespace_hash[..16]))))
     }
 
+    fn cached_handle(namespace: &str, create: bool) -> PyResult<Option<std::sync::Arc<File>>> {
+        let mut guard = HANDLES
+            .lock()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("lock poison: {e}")))?;
+        let map = guard.get_or_insert_with(HashMap::new);
+        if let Some(file) = map.get(namespace) {
+            return Ok(Some(Arc::clone(file)));
+        }
+        let path = index_path(namespace)?;
+        let opened = OpenOptions::new()
+            .create(create)
+            .truncate(false)
+            .read(true)
+            .write(create)
+            .open(&path);
+        let file = match opened {
+            Ok(f) => f,
+            Err(e) if !create && e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "failed to open room_index file: {e}"
+                )))
+            }
+        };
+        let file = Arc::new(file);
+        map.insert(namespace.to_string(), Arc::clone(&file));
+        Ok(Some(file))
+    }
+
     pub fn put(namespace: &str, entries: &[(i64, Vec<u8>)]) -> PyResult<()> {
         if entries.is_empty() {
             return Ok(());
         }
-        let path = index_path(namespace)?;
-        let mut file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&path)
-            .map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "failed to open room_index file: {e}"
-                ))
-            })?;
+        let file = cached_handle(namespace, true)?.expect("create=true never returns None");
         for (state_group, room_prefix) in entries {
             let mut record = [0u8; RECORD_LEN as usize];
             let n = std::cmp::min(room_prefix.len(), RECORD_LEN as usize);
             record[..n].copy_from_slice(&room_prefix[..n]);
             let offset = (*state_group as u64).saturating_mul(RECORD_LEN);
-            file.seek(SeekFrom::Start(offset)).map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!("room_index seek failed: {e}"))
-            })?;
-            file.write_all(&record).map_err(|e| {
+            file.write_at(&record, offset).map_err(|e| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!("room_index write failed: {e}"))
             })?;
         }
@@ -285,28 +314,16 @@ mod room_index {
     }
 
     pub fn get_many(namespace: &str, state_groups: &[i64]) -> PyResult<Vec<Option<Vec<u8>>>> {
-        let path = index_path(namespace)?;
-        let mut file = match OpenOptions::new().read(true).open(&path) {
-            Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(vec![None; state_groups.len()]);
-            }
-            Err(e) => {
-                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "failed to open room_index file: {e}"
-                )))
-            }
+        let Some(file) = cached_handle(namespace, false)? else {
+            return Ok(vec![None; state_groups.len()]);
         };
         let mut out = Vec::with_capacity(state_groups.len());
         for &state_group in state_groups {
             let offset = (state_group as u64).saturating_mul(RECORD_LEN);
             let mut record = [0u8; RECORD_LEN as usize];
-            let value = match file.seek(SeekFrom::Start(offset)) {
-                Ok(_) => match file.read_exact(&mut record) {
-                    Ok(()) if record.iter().any(|&b| b != 0) => Some(record.to_vec()),
-                    _ => None, // all-zero (sentinel) or short read past EOF: miss.
-                },
-                Err(_) => None,
+            let value = match file.read_exact_at(&mut record, offset) {
+                Ok(()) if record.iter().any(|&b| b != 0) => Some(record.to_vec()),
+                _ => None, // all-zero (sentinel) or short read past EOF: miss.
             };
             out.push(value);
         }

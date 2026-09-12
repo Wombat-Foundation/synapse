@@ -1145,6 +1145,14 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         )
         if self._embedded_hamt_engine == "mtxdb":
             engine = get_embedded_engine(self._embedded_hamt_engine)
+            # Written eagerly, ahead of root_value itself when
+            # pending_room_roots defers the latter: if the enclosing SQL
+            # transaction then rolls back before the deferred root flush
+            # runs, this index entry outlives a root that was never
+            # written. Harmless -- state_group ids come from a
+            # non-transactional sequence generator (_state_group_seq_gen),
+            # so a rolled-back transaction's id is never reissued, and
+            # nothing will ever look this state_group up again.
             engine.put_room_index(
                 self._embedded_hamt_namespace, [(state_group, room_prefix)]
             )
