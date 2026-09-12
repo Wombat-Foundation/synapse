@@ -266,9 +266,28 @@ pub fn get_state_hamt_roots_for_room(
 ///    recent mapping along with the root record it points to, since both
 ///    are written in the same uncommitted window. That's consistent, not
 ///    a new gap -- the root itself has no stronger guarantee in that same
-///    window. A resulting miss falls through to
-///    `_fetch_hamt_roots_for_embedded_txn`'s existing SQL fallback,
-///    exactly as a genuine migration-window miss already does today.
+///    window. A resulting miss for a group still inside the
+///    `EMBEDDED_HAMT_MIGRATION_UPDATE_NAME` window falls through to
+///    `_fetch_hamt_roots_for_embedded_txn`'s SQL fallback, same as a
+///    genuine migration-window miss.
+///
+/// **Outside that window, a miss does not degrade gracefully.** A
+/// missing or stale entry for an already-migrated, already-backfilled
+/// `state_group` is not a slower read and does not self-heal on the next
+/// read -- `_fetch_hamt_roots_for_embedded_txn` returns it as missing,
+/// and `_get_state_groups_from_groups_txn` (store.py) then raises
+/// `RuntimeError("State group(s) exist in SQL but have no HAMT root:
+/// ...")`, since a group with a SQL `state_groups` row and no HAMT root
+/// is treated as data corruption once both background updates have
+/// finished. This fails loud, not silently, but it is a hard failure,
+/// not a fallback. The only way an entry gets (re)written is a write
+/// through `put_room_index` (called from
+/// `_store_state_hamt_root_embedded_txn`) or a fresh run of the
+/// `state_hamt_backfill_roots` background update -- never a plain read.
+/// Anything that deletes or reinterprets this directory's files (e.g. a
+/// change to `RECORD_LEN`/the on-disk record layout, applied in place
+/// against files written under the old layout) hits this same failure
+/// mode for every group it doesn't happen to already cover.
 mod room_index {
     use std::collections::HashMap;
     use std::fs::{File, OpenOptions};
