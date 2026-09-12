@@ -677,6 +677,185 @@ class StateStoreTestCase(HomeserverTestCase):
             RuntimeError,
         )
 
+    def _setup_embedded_engine_for_room(self, prefix: str) -> None:
+        """Point `self.state_datastore` at a fresh embedded mtxdb client,
+        mirroring the other `test_embedded_*` tests in this file."""
+        import shutil
+        import tempfile
+
+        from synapse.synapse_rust import mtxdb_engine
+
+        tmpdir = tempfile.mkdtemp(prefix=prefix)
+        self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
+        mtxdb_engine.open_client(tmpdir)
+        self.state_datastore._embedded_hamt_engine = "mtxdb"
+        self.state_datastore._embedded_hamt_path = tmpdir
+        # Note: __init__ already set self._embedded_hamt_namespace to a
+        # unique per-test value (see tests/utils.py's default_config).
+
+    def test_purge_unreferenced_state_groups_deletes_embedded_root(self) -> None:
+        """Regression test: `purge_unreferenced_state_groups` used to call
+        `batch_delete` against the old global root collection, which
+        nothing writes to any more (roots live per-room -- see
+        `put_state_hamt_roots`) -- making the purge a silent no-op that
+        reported success while leaving the purged group's root permanently
+        readable. Verify the root is actually gone afterwards.
+        """
+        self._setup_embedded_engine_for_room("test-purge-embedded-mtxdb-")
+
+        e1 = self.inject_state_event(self.room, self.u_alice, EventTypes.Create, "", {})
+        e2 = self.inject_state_event(
+            self.room, self.u_alice, EventTypes.Name, "", {"name": "test room"}
+        )
+        state_group = self.get_success(
+            self.store._get_state_group_for_event(e2.event_id)
+        )
+        assert state_group is not None
+
+        from synapse.synapse_rust import state_hamt
+
+        room_version = self.get_success(
+            self.store.get_room_version(self.room.to_string())
+        )
+        room_prefix = state_hamt.room_hamt_prefix(
+            self.room.to_string(), room_version.msc4291_room_ids_as_hashes
+        )
+
+        # Sanity check: the root really is there before purging.
+        self.assertIsNotNone(
+            self.state_datastore._get_embedded_hamt_root(room_prefix, state_group)
+        )
+
+        with patch.object(
+            self.state_datastore,
+            "_purge_unreferenced_state_groups",
+            return_value=(True, {state_group}),
+        ):
+            deleted = self.get_success(
+                self.state_datastore.purge_unreferenced_state_groups(
+                    self.room.to_string(), {state_group: 0}
+                )
+            )
+        self.assertTrue(deleted)
+
+        self.assertIsNone(
+            self.state_datastore._get_embedded_hamt_root(room_prefix, state_group)
+        )
+        # e1's create-event state group must be untouched.
+        prev_state_group = self.get_success(
+            self.store._get_state_group_for_event(e1.event_id)
+        )
+        assert prev_state_group is not None
+        self.assertIsNotNone(
+            self.state_datastore._get_embedded_hamt_root(room_prefix, prev_state_group)
+        )
+
+    def test_drain_embedded_root_deletion_queue_deletes_and_empties_queue(
+        self,
+    ) -> None:
+        """Regression test: the deletion-queue drain had the same
+        defunct-global-collection bug as `purge_unreferenced_state_groups`.
+        Verify it resolves the room via the room-index, actually deletes
+        the embedded root, and drains the SQL queue row.
+        """
+        self._setup_embedded_engine_for_room("test-drain-queue-embedded-mtxdb-")
+
+        e1 = self.inject_state_event(self.room, self.u_alice, EventTypes.Create, "", {})
+        state_group = self.get_success(
+            self.store._get_state_group_for_event(e1.event_id)
+        )
+        assert state_group is not None
+
+        from synapse.synapse_rust import state_hamt
+
+        room_version = self.get_success(
+            self.store.get_room_version(self.room.to_string())
+        )
+        room_prefix = state_hamt.room_hamt_prefix(
+            self.room.to_string(), room_version.msc4291_room_ids_as_hashes
+        )
+        self.assertIsNotNone(
+            self.state_datastore._get_embedded_hamt_root(room_prefix, state_group)
+        )
+
+        self.get_success(
+            self.store.db_pool.simple_insert(
+                table="state_hamt_root_deletion_queue",
+                values={"state_group": state_group},
+                desc="test_drain_queue.enqueue",
+            )
+        )
+
+        self.get_success(
+            self.state_datastore._drain_embedded_state_hamt_root_deletion_queue()
+        )
+
+        self.assertIsNone(
+            self.state_datastore._get_embedded_hamt_root(room_prefix, state_group)
+        )
+        remaining = self.get_success(
+            self.store.db_pool.simple_select_list(
+                table="state_hamt_root_deletion_queue",
+                keyvalues={},
+                retcols=("state_group",),
+                desc="test_drain_queue.check_empty",
+            )
+        )
+        self.assertEqual(remaining, [])
+
+    def test_backfill_state_hamt_roots_skips_already_embedded_groups(self) -> None:
+        """Regression test: the backfill's `already_embedded` dedup check
+        used to read via `batch_get_state_hamt_roots` against the same
+        defunct global collection, so it always came back empty post-
+        migration and the backfill silently re-persisted every already-
+        migrated group on every pass forever. Verify a second pass over a
+        group that already has an embedded root does not call
+        `_persist_state_hamt_txn` for it again.
+        """
+        self._setup_embedded_engine_for_room("test-backfill-dedup-embedded-mtxdb-")
+
+        e1 = self.inject_state_event(self.room, self.u_alice, EventTypes.Create, "", {})
+        state_group = self.get_success(
+            self.store._get_state_group_for_event(e1.event_id)
+        )
+        assert state_group is not None
+
+        # The background update only picks up groups with no SQL
+        # `state_hamt_roots` row (LEFT JOIN ... IS NULL) -- which is the
+        # normal state for every group once the embedded engine is
+        # exclusive, since nothing writes that SQL row any more. Simulate
+        # the backfill re-scanning a group it already handled.
+        # This background update already ran to completion at homeserver
+        # startup (before this test created any state groups); reinsert its
+        # row so `_background_update_progress_txn` has something to update.
+        self.get_success(
+            self.store.db_pool.simple_insert(
+                table="background_updates",
+                values={
+                    "update_name": self.state_datastore.STATE_HAMT_BACKFILL_ROOTS_UPDATE_NAME,
+                    "progress_json": "{}",
+                },
+                desc="test_backfill_dedup.reinsert_bg_update",
+            )
+        )
+
+        with patch.object(
+            self.state_datastore,
+            "_persist_state_hamt_txn",
+            side_effect=AssertionError("must not re-persist a group already embedded"),
+        ):
+            progress: dict = {}
+            num_processed = self.get_success(
+                self.state_datastore._background_backfill_state_hamt_roots(
+                    progress, batch_size=100
+                )
+            )
+        # The row(s) are still reported as processed (progress advances, so
+        # the background update doesn't loop forever on them) even though
+        # nothing was re-persisted -- the AssertionError patched above would
+        # have propagated and failed this test otherwise.
+        self.assertGreaterEqual(num_processed, 1)
+
     def test_nonexistent_group_returns_empty_dict(self) -> None:
         """Verify that a nonexistent state group (not in SQL) returns {} without raising."""
         nonexistent_group = 9999991
