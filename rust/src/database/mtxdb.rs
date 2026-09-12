@@ -150,6 +150,45 @@ pub fn put_state_hamt_roots(
     })
 }
 
+/// Tombstone HAMT root records in their room's own State collection --
+/// the delete counterpart of `put_state_hamt_roots`, needed by
+/// `purge_unreferenced_state_groups` and the root-deletion-queue drain.
+/// mtxdb-core's `StorageEngine` trait exposes no per-key delete (only
+/// `delete_collection`, a whole-collection range delete, which would drop
+/// every other state_group's root in the room too) -- but `batch_delete`
+/// on the old global collection was never anything more than `put_many`
+/// with an empty `NodeData` value, the same "empty means absent" tombstone
+/// convention `get_state_hamt_roots_for_room` and `batch_get` already
+/// check for. Reuse that convention here instead of adding a new
+/// mtxdb-core primitive. The corresponding room_index entry is left in
+/// place: a tombstoned root reads back as a miss regardless, and
+/// `state_group` ids are never reused (see the `room_index` module doc),
+/// so the stale mapping is never looked up in a way that matters.
+#[pyfunction]
+pub fn delete_state_hamt_roots_for_room(
+    py: Python<'_>,
+    namespace: String,
+    room_prefix: Vec<u8>,
+    state_groups: Vec<i64>,
+) -> PyResult<()> {
+    let room_id = room_id_from_prefix(&room_prefix);
+    let pairs: Vec<(NodeId, NodeData)> = state_groups
+        .into_iter()
+        .map(|state_group| {
+            (
+                root_node_id(&namespace, state_group),
+                NodeData::new(bytes::Bytes::new()),
+            )
+        })
+        .collect();
+    py.detach(|| {
+        let engine = state_db()?;
+        engine.put_many(&room_id, &pairs).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb delete error: {}", e))
+        })
+    })
+}
+
 /// Point/batch-read HAMT root records from their room's own State
 /// collection -- the read counterpart of `put_state_hamt_roots`. Returns
 /// the raw encoded root value (as written by `_encode_state_hamt_root`)
@@ -1063,6 +1102,7 @@ pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     m.add_function(wrap_pyfunction!(batch_get_state_hamt_roots, m)?)?;
     m.add_function(wrap_pyfunction!(put_state_hamt_roots, m)?)?;
     m.add_function(wrap_pyfunction!(get_state_hamt_roots_for_room, m)?)?;
+    m.add_function(wrap_pyfunction!(delete_state_hamt_roots_for_room, m)?)?;
     m.add_function(wrap_pyfunction!(put_room_index, m)?)?;
     m.add_function(wrap_pyfunction!(get_room_index, m)?)?;
     m.add_function(wrap_pyfunction!(increment_counters_batch, m)?)?;

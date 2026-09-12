@@ -49,7 +49,6 @@ from synapse.storage.databases.state.bg_updates import (
     StateBackgroundUpdateStore,
     _decode_state_hamt_root,
     _encode_state_hamt_root,
-    _state_hamt_root_key,
     _state_timing,
 )
 from synapse.storage.engines import PostgresEngine
@@ -1243,17 +1242,29 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         already_embedded: set[int] = set()
         if self._embedded_hamt_engine == "mtxdb":
             engine = get_embedded_engine(self._embedded_hamt_engine)
-            state_groups = [state_group for state_group, _ in rows]
-            already_embedded = {
-                state_group
+            # Roots live in their room's own collection now (see
+            # put_state_hamt_roots), not the old global one
+            # batch_get_state_hamt_roots still reads -- that call always
+            # returns "not found" post-migration, which used to make this
+            # set permanently empty and re-persist every already-migrated
+            # group on every pass of this backfill forever (wasted work,
+            # not data loss, since _persist_state_hamt_txn is idempotent).
+            # Group by room and use the per-room read instead.
+            by_room: dict[str, list[int]] = {}
+            for state_group, room_id in rows:
+                by_room.setdefault(room_id, []).append(state_group)
+            for room_id, state_groups in by_room.items():
+                room_prefix = room_prefixes.get(room_id)
+                if room_prefix is None:
+                    continue
                 for state_group, record in zip(
                     state_groups,
-                    engine.batch_get_state_hamt_roots(
-                        self._embedded_hamt_namespace, state_groups
+                    engine.get_state_hamt_roots_for_room(
+                        self._embedded_hamt_namespace, room_prefix, state_groups
                     ),
-                )
-                if record is not None
-            }
+                ):
+                    if record is not None:
+                        already_embedded.add(state_group)
 
         def backfill_txn(txn: LoggingTransaction) -> None:
             for state_group, room_id in rows:
@@ -1682,17 +1693,39 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             state_groups_to_sequence_numbers,
         )
         if self._embedded_hamt_engine == "mtxdb" and state_groups:
+            # Roots live in their room's own collection (see
+            # put_state_hamt_roots), not the old global one this used to
+            # target via _state_hamt_root_key/batch_delete -- that made
+            # this a silent no-op post-migration: purge would report
+            # success while every purged group's root stayed permanently
+            # readable. All state_groups here are already known to be in
+            # `room_id` (see the docstring's precondition), so a single
+            # room_prefix covers the whole batch.
+            from synapse.api.errors import NotFoundError, UnsupportedRoomVersionError
+            from synapse.synapse_rust import state_hamt
+
             engine = get_embedded_engine(self._embedded_hamt_engine)
-            await defer_to_thread(
-                self.hs.get_reactor(),
-                engine.batch_delete,
-                [
-                    _state_hamt_root_key(
-                        self._embedded_hamt_namespace, int(state_group)
-                    )
-                    for state_group in state_groups
-                ],
-            )
+            main_store = self.hs.get_datastores().main
+            try:
+                room_version = await main_store.get_room_version(room_id)
+            except (NotFoundError, UnsupportedRoomVersionError):
+                # No `rooms` row, or an unsupported version -- can't derive
+                # the room prefix these roots were stored under. Leave them;
+                # this mirrors the backfill's same fallback and only means
+                # some now-unreferenced roots survive a little longer, not
+                # a fresh correctness issue for a room already in this state.
+                room_version = None
+            if room_version is not None:
+                room_prefix = state_hamt.room_hamt_prefix(
+                    room_id, room_version.msc4291_room_ids_as_hashes
+                )
+                await defer_to_thread(
+                    self.hs.get_reactor(),
+                    engine.delete_state_hamt_roots_for_room,
+                    self._embedded_hamt_namespace,
+                    room_prefix,
+                    [int(state_group) for state_group in state_groups],
+                )
         return deleted
 
     def _purge_unreferenced_state_groups(
@@ -1912,14 +1945,33 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 return
 
             try:
-                await defer_to_thread(
+                # Same fix as purge_unreferenced_state_groups: roots live
+                # in their room's own collection now, not the old global
+                # one _state_hamt_root_key/batch_delete targeted (a silent
+                # no-op post-migration). This queue only has bare
+                # state_group ints, so resolve each to a room via the
+                # room_index before deleting -- a miss there means either
+                # a pre-migration (SQL-only) group with nothing in mtxdb to
+                # delete, or a group that was never given a root, so it's
+                # safe to just drop from the queue in that case too.
+                room_prefixes = await defer_to_thread(
                     self.hs.get_reactor(),
-                    engine.batch_delete,
-                    [
-                        _state_hamt_root_key(self._embedded_hamt_namespace, state_group)
-                        for state_group in state_groups
-                    ],
+                    engine.get_room_index,
+                    self._embedded_hamt_namespace,
+                    state_groups,
                 )
+                by_room: dict[bytes, list[int]] = {}
+                for state_group, room_prefix in zip(state_groups, room_prefixes):
+                    if room_prefix is not None:
+                        by_room.setdefault(bytes(room_prefix), []).append(state_group)
+                for room_prefix, room_state_groups in by_room.items():
+                    await defer_to_thread(
+                        self.hs.get_reactor(),
+                        engine.delete_state_hamt_roots_for_room,
+                        self._embedded_hamt_namespace,
+                        room_prefix,
+                        room_state_groups,
+                    )
                 await self.db_pool.simple_delete_many(
                     table="state_hamt_root_deletion_queue",
                     column="state_group",
