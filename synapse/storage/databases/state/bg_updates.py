@@ -148,18 +148,6 @@ def _print_state_timings() -> None:
 if os.environ.get("SYNAPSE_PG_TIMINGS"):
     atexit.register(_print_state_timings)
 
-    def _print_diag_room_read_timing() -> None:
-        # TEMPORARY diagnostic -- not for commit. See
-        # diag_dump_room_read_timing in rust/src/database/mtxdb.rs.
-        try:
-            from synapse.synapse_rust import mtxdb_engine
-
-            _timings_print(mtxdb_engine.diag_dump_room_read_timing())
-        except Exception:
-            pass
-
-    atexit.register(_print_diag_room_read_timing)
-
     import signal as _signal
     from types import FrameType as _FrameType
 
@@ -1020,7 +1008,6 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         found: dict[int, tuple[bytes, bytes, str]] = {}
         still_missing: list[int] = []
 
-        _diag_t0 = time.monotonic()
         roots = engine.get_state_hamt_roots_bulk(namespace, groups)
         for group, root in zip(groups, roots):
             if root is None:
@@ -1028,8 +1015,6 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
                 continue
             room_prefix, root_hash, room_id = root
             found[group] = (bytes(room_prefix), bytes(root_hash), room_id)
-        _state_timing("diag_roots_fetch_bulk", time.monotonic() - _diag_t0)
-
         if not still_missing:
             return found
 
@@ -1086,19 +1071,15 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         results: dict[int, list[tuple[str, str, str]] | None] = dict.fromkeys(
             groups, None
         )
-        _diag_fetch_t0 = time.monotonic()
         roots = self._fetch_hamt_roots_for_embedded_txn(txn, groups)
-        _state_timing("diag_fetch_hamt_roots_total", time.monotonic() - _diag_fetch_t0)
         if not roots:
             return results
         engine = get_embedded_engine(getattr(self, "_embedded_hamt_engine", None))
         ordered_groups = list(roots.keys())
-        _diag_t0 = time.monotonic()
         materialized = engine.materialize_state_hamts(
             getattr(self, "_embedded_hamt_namespace", None),
             [roots[group] for group in ordered_groups],
         )
-        _state_timing("diag_materialize_state_hamts", time.monotonic() - _diag_t0)
         for group, entries in zip(ordered_groups, materialized):
             results[group] = entries
         return results
@@ -1112,9 +1093,7 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         results: dict[int, list[tuple[str, str, str]] | None] = dict.fromkeys(
             groups, None
         )
-        _diag_fetch_t0 = time.monotonic()
         roots = self._fetch_hamt_roots_for_embedded_txn(txn, groups)
-        _state_timing("diag_fetch_hamt_roots_total", time.monotonic() - _diag_fetch_t0)
         if not roots:
             return results
         engine = get_embedded_engine(getattr(self, "_embedded_hamt_engine", None))
@@ -1123,11 +1102,9 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
             (room_prefix, root_hash, self._room_structural_key(room_id), keys)
             for room_prefix, root_hash, room_id in (roots[g] for g in ordered_groups)
         ]
-        _diag_t0 = time.monotonic()
         looked_up = engine.lookup_state_hamts(
             getattr(self, "_embedded_hamt_namespace", None), queries
         )
-        _state_timing("diag_lookup_state_hamts", time.monotonic() - _diag_t0)
         for group, entries in zip(ordered_groups, looked_up):
             results[group] = entries
         return results

@@ -34,13 +34,13 @@ test: ##H Run tests, e.g., on tests/storage/
 	uv run python scripts-dev/trial_ctrlc.py $(p)
 
 
-# .PHONY: build
-# build: ##H Build the package (requires hatch)
-# 	uv run --with hatch hatch build
+.PHONY: build
+build: ##H Build the package (requires hatch)
+	uv run --with hatch hatch build
 
-# .PHONY: publish
-# publish: build ##H Upload the package to PyPI using twine
-# 	uv run --with twine twine upload dist/*
+.PHONY: publish
+publish: build ##H Upload the package to PyPI using twine
+	uv run --with twine twine upload dist/*
 
 
 .PHONY: clean

@@ -1693,39 +1693,32 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             state_groups_to_sequence_numbers,
         )
         if self._embedded_hamt_engine == "mtxdb" and state_groups:
-            # Roots live in their room's own collection (see
-            # put_state_hamt_roots), not the old global one this used to
-            # target via _state_hamt_root_key/batch_delete -- that made
-            # this a silent no-op post-migration: purge would report
-            # success while every purged group's root stayed permanently
-            # readable. All state_groups here are already known to be in
-            # `room_id` (see the docstring's precondition), so a single
-            # room_prefix covers the whole batch.
-            from synapse.api.errors import NotFoundError, UnsupportedRoomVersionError
-            from synapse.synapse_rust import state_hamt
-
             engine = get_embedded_engine(self._embedded_hamt_engine)
-            main_store = self.hs.get_datastores().main
-            try:
-                room_version = await main_store.get_room_version(room_id)
-            except (NotFoundError, UnsupportedRoomVersionError):
-                # No `rooms` row, or an unsupported version -- can't derive
-                # the room prefix these roots were stored under. Leave them;
-                # this mirrors the backfill's same fallback and only means
-                # some now-unreferenced roots survive a little longer, not
-                # a fresh correctness issue for a room already in this state.
-                room_version = None
-            if room_version is not None:
-                room_prefix = state_hamt.room_hamt_prefix(
-                    room_id, room_version.msc4291_room_ids_as_hashes
-                )
+            room_prefixes = await defer_to_thread(
+                self.hs.get_reactor(),
+                engine.get_room_index,
+                self._embedded_hamt_namespace,
+                [int(state_group) for state_group in state_groups],
+            )
+            by_room: dict[bytes, list[int]] = {}
+            for state_group, room_prefix in zip(state_groups, room_prefixes):
+                if room_prefix is not None:
+                    by_room.setdefault(bytes(room_prefix), []).append(state_group)
+            for room_prefix, room_state_groups in by_room.items():
                 await defer_to_thread(
                     self.hs.get_reactor(),
                     engine.delete_state_hamt_roots_for_room,
                     self._embedded_hamt_namespace,
                     room_prefix,
-                    [int(state_group) for state_group in state_groups],
+                    room_state_groups,
                 )
+            await self.db_pool.simple_delete_many(
+                table="state_hamt_root_deletion_queue",
+                column="state_group",
+                iterable=state_groups,
+                keyvalues={},
+                desc="remove_purged_embedded_state_hamt_roots",
+            )
         return deleted
 
     def _purge_unreferenced_state_groups(
@@ -1810,6 +1803,18 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             "DELETE FROM state_groups_pending_deletion WHERE state_group = ?",
             [(sg,) for sg in state_groups_to_delete],
         )
+
+        if self._embedded_hamt_engine == "mtxdb":
+            # Preserve enough information to retry an embedded deletion if
+            # the room version is no longer available after this transaction.
+            # The room index records the prefix alongside each root.
+            txn.execute_batch(
+                """
+                INSERT INTO state_hamt_root_deletion_queue (state_group)
+                VALUES (?) ON CONFLICT (state_group) DO NOTHING
+                """,
+                [(state_group,) for state_group in state_groups_to_delete],
+            )
 
         # Delete the SQL root pointer -- a no-op when the embedded engine is
         # exclusively configured (state_hamt_roots was never written for
