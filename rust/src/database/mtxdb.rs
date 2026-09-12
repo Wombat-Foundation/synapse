@@ -194,6 +194,27 @@ pub fn delete_state_hamt_roots_for_room(
 /// the raw encoded root value (as written by `_encode_state_hamt_root`)
 /// for each `state_group`, or `None` on a miss; decoding stays in Python
 /// (`_decode_state_hamt_root`) rather than duplicating that format here.
+// TEMPORARY diagnostic counters -- not for commit. See get_state_hamt_roots_for_room
+// and diag_dump_room_read_timing below.
+static DIAG_SEEN_ROOMS: Mutex<Option<HashSet<[u8; 16]>>> = Mutex::new(None);
+static DIAG_FIRST_NS: Mutex<u128> = Mutex::new(0);
+static DIAG_FIRST_COUNT: Mutex<u64> = Mutex::new(0);
+static DIAG_REPEAT_NS: Mutex<u128> = Mutex::new(0);
+static DIAG_REPEAT_COUNT: Mutex<u64> = Mutex::new(0);
+
+#[pyfunction]
+pub fn diag_dump_room_read_timing() -> String {
+    let fc = *DIAG_FIRST_COUNT.lock().unwrap();
+    let fns = *DIAG_FIRST_NS.lock().unwrap();
+    let rc = *DIAG_REPEAT_COUNT.lock().unwrap();
+    let rns = *DIAG_REPEAT_NS.lock().unwrap();
+    format!(
+        "[DIAG-RUST] get_state_hamt_roots_for_room: first_touch calls={fc} avg_ns={} | repeat calls={rc} avg_ns={}",
+        if fc > 0 { fns / fc as u128 } else { 0 },
+        if rc > 0 { rns / rc as u128 } else { 0 },
+    )
+}
+
 #[pyfunction]
 pub fn get_state_hamt_roots_for_room(
     py: Python<'_>,
@@ -207,10 +228,29 @@ pub fn get_state_hamt_roots_for_room(
         .map(|&sg| root_node_id(&namespace, sg))
         .collect();
     py.detach(|| {
+        // TEMPORARY diagnostic: split get_many timing by first-touch vs
+        // repeat access to this room_id in this process, to test whether
+        // per-room PackfileStorage collection setup (RwLock lookup, fresh
+        // ArcSwap/RoomGeneration, cold NodeCache) dominates over flat
+        // per-call FFI/glue overhead. Not for commit.
+        let first_touch = {
+            let mut seen = DIAG_SEEN_ROOMS.lock().unwrap();
+            let seen = seen.get_or_insert_with(HashSet::new);
+            seen.insert(room_id)
+        };
+        let diag_start = std::time::Instant::now();
         let engine = state_db()?;
         let results = engine.get_many(&room_id, &node_ids).map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb get_many error: {}", e))
         })?;
+        let elapsed = diag_start.elapsed().as_nanos();
+        if first_touch {
+            *DIAG_FIRST_NS.lock().unwrap() += elapsed;
+            *DIAG_FIRST_COUNT.lock().unwrap() += 1;
+        } else {
+            *DIAG_REPEAT_NS.lock().unwrap() += elapsed;
+            *DIAG_REPEAT_COUNT.lock().unwrap() += 1;
+        }
         Ok(results
             .into_iter()
             .map(|res| {
@@ -1192,6 +1232,7 @@ pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     m.add_function(wrap_pyfunction!(batch_get_state_hamt_roots, m)?)?;
     m.add_function(wrap_pyfunction!(put_state_hamt_roots, m)?)?;
     m.add_function(wrap_pyfunction!(get_state_hamt_roots_for_room, m)?)?;
+    m.add_function(wrap_pyfunction!(diag_dump_room_read_timing, m)?)?;
     m.add_function(wrap_pyfunction!(delete_state_hamt_roots_for_room, m)?)?;
     m.add_function(wrap_pyfunction!(put_room_index, m)?)?;
     m.add_function(wrap_pyfunction!(get_room_index, m)?)?;
