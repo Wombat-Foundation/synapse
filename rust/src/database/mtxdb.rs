@@ -278,9 +278,16 @@ mod room_index {
     use pyo3::PyResult;
     use sha2::{Digest, Sha256};
 
-    use super::ROOM_INDEX_DIR;
+    use super::{ROOM_INDEX_DIR, ROOM_PREFIX_LEN};
 
-    const RECORD_LEN: u64 = 16;
+    // A real `room_prefix` is always exactly `ROOM_PREFIX_LEN` (8) bytes --
+    // `room_hamt_prefix_raw` truncates to that length unconditionally in
+    // both its branches (MSC4291 hash-derived and legacy). This used to be
+    // hardcoded to 16, silently zero-padding every stored value; `get_many`
+    // returned that padding along with the real prefix, and every reader
+    // (`lookup_state_hamts` et al.) enforces the true 8-byte length, so a
+    // padded value failed downstream with "room_prefix must be 8 bytes".
+    const RECORD_LEN: u64 = ROOM_PREFIX_LEN as u64;
 
     /// Cached file handles, one per namespace, so a batch of N `put`/`get`
     /// calls (e.g. one per state group in a persist loop) pays one `open()`
