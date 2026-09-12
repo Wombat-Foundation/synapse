@@ -51,7 +51,7 @@ class EventsTestCase(HomeserverTestCase):
     ) -> None:
         self._store = self.hs.get_datastores().main
 
-    @skip_unless(EMBEDDED_HAMT_ENGINE is not None, "requires embedded HAMT engine")
+    @skip_unless(bool(EMBEDDED_HAMT_ENGINE), "requires embedded HAMT engine")
     def test_get_event_via_embedded_mtxdb_engine(self) -> None:
         """`_store_event_txn` mirrors event_json into mtxdb when
         embedded_hamt_engine is configured; `_fetch_event_json_for_ids_txn`

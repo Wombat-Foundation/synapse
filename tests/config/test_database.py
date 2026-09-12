@@ -113,7 +113,14 @@ class DatabaseConfigTestCase(unittest.TestCase):
 
 
 class EmbeddedHamtWorkerGuardTestCase(unittest.TestCase):
-    """Test that embedded_hamt.engine is rejected in multi-worker configs."""
+    """Test that embedded_hamt.engine in multi-worker configs is flagged.
+
+    This is a warning, not a hard rejection: the embedded HAMT engine's
+    key index is built once at process startup and only ever updated by
+    that same process's own writes, so a multi-worker deployment can
+    silently fail to see keys written by other workers. See the guard in
+    synapse/config/workers.py for the full explanation.
+    """
 
     def _make_worker_config(
         self,
@@ -137,24 +144,23 @@ class EmbeddedHamtWorkerGuardTestCase(unittest.TestCase):
             config["instance_map"] = instance_map
         worker_config.read_config(config, allow_secrets_in_config=True)
 
-    def test_worker_app_raises(self) -> None:
-        """embedded_hamt + worker_app → ConfigError."""
-        from synapse.config._base import ConfigError
-
-        with self.assertRaises(ConfigError):
+    def test_worker_app_warns(self) -> None:
+        """embedded_hamt + worker_app → warning, not a ConfigError."""
+        with self.assertLogs("synapse.config.workers", level="WARNING") as cm:
             self._make_worker_config(
                 worker_app="synapse.app.generic_worker",
                 instance_map={"main": {"host": "127.0.0.1", "port": 8008}},
             )
+        self.assertIn("embedded_hamt.engine", "\n".join(cm.output))
 
-    def test_instance_map_raises(self) -> None:
-        """embedded_hamt + non-empty instance_map (no worker_app) → ConfigError."""
-        from synapse.config._base import ConfigError
-
-        with self.assertRaises(ConfigError):
+    def test_instance_map_warns(self) -> None:
+        """embedded_hamt + non-empty instance_map (no worker_app) → warning,
+        not a ConfigError."""
+        with self.assertLogs("synapse.config.workers", level="WARNING") as cm:
             self._make_worker_config(
                 instance_map={"main": {"host": "127.0.0.1", "port": 8008}},
             )
+        self.assertIn("embedded_hamt.engine", "\n".join(cm.output))
 
     def test_single_process_ok(self) -> None:
         """embedded_hamt alone (no worker_app, no instance_map) → no error."""

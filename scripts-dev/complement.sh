@@ -675,21 +675,33 @@ run_one_pattern() {
   if [[ -n "${SYNAPSE_PG_TIMINGS:-}" ]]; then
     _pg_timing_dir="$(mktemp -d "${staged_results_file}.pgtimings.XXXXXX")"
     local _container_label="COMPLEMENT_WRAPPER_TOKEN=$COMPLEMENT_WRAPPER_TOKEN"
-    # Follow logs from complement containers as they start.  Also catch any
-    # containers that are already running (race with docker-events connect).
+    # Follow logs from complement containers as they start.  Subscribe to
+    # docker-events *before* scanning already-running containers, then feed
+    # both container-id sources through one loop body; a `seen` set stops a
+    # container appearing in both from being followed twice. This narrows
+    # the start/scan race but does not fully close it: the background
+    # `docker events` process below is not guaranteed to be connected to
+    # the daemon before the scan runs, so a container starting in that
+    # small window could still be missed by both paths.
+    #
+    # Every process here -- the `docker events` reader, the merge/dedupe
+    # pipeline, and each `docker logs -f` follower it forks -- is a
+    # grandchild (or deeper) of this function, so plain `wait` on their
+    # pids cannot reap them. Instead, `set -m` gives this whole subshell
+    # its own process group, so it can be torn down as a unit with
+    # `kill -- -PGID` below (same technique as the go-test launch further
+    # down this function).
     (
-      # Already-running containers
-      for _cid in $(docker ps -q 2>/dev/null); do
+      set -m
+      docker events --filter 'event=start' --format '{{.ID}}' 2>/dev/null >"${_pg_timing_dir}/.events_stream" &
+      declare -A _seen
+      { docker ps -q 2>/dev/null; tail -n +1 -f "${_pg_timing_dir}/.events_stream" 2>/dev/null; } \
+        | while IFS= read -r _cid; do
+        [[ -n "${_seen[$_cid]:-}" ]] && continue
+        _seen[$_cid]=1
         if docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$_cid" 2>/dev/null \
             | grep -Fxq "$_container_label"; then
           docker logs -f "$_cid" >>"${_pg_timing_dir}/${_cid}.log" 2>&1 &
-        fi
-      done
-      # New containers
-      docker events --filter 'event=start' --format '{{.ID}}' 2>/dev/null | while IFS= read -r _cid; do
-        if docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$_cid" 2>/dev/null \
-            | grep -Fxq "$_container_label"; then
-          docker logs -f "$_cid" >>"${_pg_timing_dir}/${_cid}.log" 2>&1 || true
         fi
       done
     ) &
@@ -737,10 +749,14 @@ run_one_pattern() {
   set -e
   rm -rf "$_events_dir"
 
-  # Stop the PG timing log watcher (if running) and stash its directory
-  # for the extraction block in finish().
+  # Stop the PG timing log watcher (if running). Its `docker events`
+  # reader, merge/dedupe pipeline, and every `docker logs -f` follower it
+  # forked all share its process group (see `set -m` above), so a single
+  # negative-PID kill tears down the whole tree at once -- a plain `kill`
+  # of just $_pg_log_watcher_pid would leave the followers, which are its
+  # grandchildren, running past this function.
   if [[ -n "${_pg_log_watcher_pid:-}" ]]; then
-    kill "$_pg_log_watcher_pid" 2>/dev/null || true
+    kill -- "-$_pg_log_watcher_pid" 2>/dev/null || kill "$_pg_log_watcher_pid" 2>/dev/null || true
     wait "$_pg_log_watcher_pid" 2>/dev/null || true
     _pg_log_watcher_pid=""
   fi

@@ -388,7 +388,7 @@ class RedactionTestCase(unittest.HomeserverTestCase):
 
         self.assert_dict({"content": {}}, json.loads(event_json))
 
-    @skip_unless(EMBEDDED_HAMT_ENGINE is not None, "requires embedded HAMT engine")
+    @skip_unless(bool(EMBEDDED_HAMT_ENGINE), "requires embedded HAMT engine")
     def test_expire_event_updates_embedded_mirror(self) -> None:
         """`_censor_event_txn` (shared by censoring and expiry) must update
         the embedded mtxdb mirror, not just SQL -- otherwise `get_event`

@@ -450,7 +450,7 @@ class WorkerConfig(Config):
             self.worker_app is not None or len(self.instance_map) > 0
         ):
             logger.warning(
-                f"embedded_hamt.engine is set to {embedded_hamt_engine!r}, but this "
+                "embedded_hamt.engine is set to %r, but this "
                 "deployment is configured to run multiple worker processes "
                 "(worker_app and/or instance_map is set). The embedded HAMT "
                 "engine's key index is built once at process startup by scanning "
@@ -459,7 +459,8 @@ class WorkerConfig(Config):
                 "miss. A second process opening the same embedded_hamt.path can "
                 "therefore never see keys written by another process after its "
                 "own startup (this is permanent, not a transient race). "
-                "Remove embedded_hamt.engine or run as a single process."
+                "Remove embedded_hamt.engine or run as a single process.",
+                embedded_hamt_engine,
             )
 
         self.events_shard_config = RoutableShardedWorkerHandlingConfig(

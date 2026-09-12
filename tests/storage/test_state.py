@@ -179,11 +179,12 @@ class StateStoreTestCase(HomeserverTestCase):
         mtxdb_engine.open_client(tmpdir)
         self.state_datastore._embedded_hamt_engine = "mtxdb"
         self.state_datastore._embedded_hamt_path = tmpdir
-        # __init__ only derives this inside its hamt-setup block; poking
-        # engine/path directly like this bypasses it, so set it explicitly
-        # too or call sites below that read it unconditionally will
-        # AttributeError.
-        self.state_datastore._embedded_hamt_namespace = self.state_datastore.server_name
+        # Note: __init__ already set self._embedded_hamt_namespace to a
+        # unique per-test value (see tests/utils.py's default_config), which
+        # keeps different tests' state_group ids from colliding on the same
+        # mtxdb keys. Don't override it here -- rewriting it to a shared
+        # value like server_name would make every test in this file collide
+        # on the same namespace against the same process-global mtxdb client.
 
         e1 = self.inject_state_event(self.room, self.u_alice, EventTypes.Create, "", {})
         e2 = self.inject_state_event(
@@ -240,11 +241,12 @@ class StateStoreTestCase(HomeserverTestCase):
         mtxdb_engine.open_client(tmpdir)
         self.state_datastore._embedded_hamt_engine = "mtxdb"
         self.state_datastore._embedded_hamt_path = tmpdir
-        # __init__ only derives this inside its hamt-setup block; poking
-        # engine/path directly like this bypasses it, so set it explicitly
-        # too or call sites below that read it unconditionally will
-        # AttributeError.
-        self.state_datastore._embedded_hamt_namespace = self.state_datastore.server_name
+        # Note: __init__ already set self._embedded_hamt_namespace to a
+        # unique per-test value (see tests/utils.py's default_config), which
+        # keeps different tests' state_group ids from colliding on the same
+        # mtxdb keys. Don't override it here -- rewriting it to a shared
+        # value like server_name would make every test in this file collide
+        # on the same namespace against the same process-global mtxdb client.
 
         event = self.inject_state_event(
             self.room, self.u_alice, EventTypes.Create, "", {}
@@ -329,11 +331,12 @@ class StateStoreTestCase(HomeserverTestCase):
         mtxdb_engine.open_client(tmpdir)
         self.state_datastore._embedded_hamt_engine = "mtxdb"
         self.state_datastore._embedded_hamt_path = tmpdir
-        # __init__ only derives this inside its hamt-setup block; poking
-        # engine/path directly like this bypasses it, so set it explicitly
-        # too or call sites below that read it unconditionally will
-        # AttributeError.
-        self.state_datastore._embedded_hamt_namespace = self.state_datastore.server_name
+        # Note: __init__ already set self._embedded_hamt_namespace to a
+        # unique per-test value (see tests/utils.py's default_config), which
+        # keeps different tests' state_group ids from colliding on the same
+        # mtxdb keys. Don't override it here -- rewriting it to a shared
+        # value like server_name would make every test in this file collide
+        # on the same namespace against the same process-global mtxdb client.
 
         with patch.object(
             self.store.db_pool.updates, "start_doing_background_updates"
@@ -400,11 +403,12 @@ class StateStoreTestCase(HomeserverTestCase):
         mtxdb_engine.open_client(tmpdir)
         self.state_datastore._embedded_hamt_engine = "mtxdb"
         self.state_datastore._embedded_hamt_path = tmpdir
-        # __init__ only derives this inside its hamt-setup block; poking
-        # engine/path directly like this bypasses it, so set it explicitly
-        # too or call sites below that read it unconditionally will
-        # AttributeError.
-        self.state_datastore._embedded_hamt_namespace = self.state_datastore.server_name
+        # Note: __init__ already set self._embedded_hamt_namespace to a
+        # unique per-test value (see tests/utils.py's default_config), which
+        # keeps different tests' state_group ids from colliding on the same
+        # mtxdb keys. Don't override it here -- rewriting it to a shared
+        # value like server_name would make every test in this file collide
+        # on the same namespace against the same process-global mtxdb client.
 
         e1 = self.inject_state_event(self.room, self.u_alice, EventTypes.Create, "", {})
         e2 = self.inject_state_event(
