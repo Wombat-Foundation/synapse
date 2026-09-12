@@ -823,6 +823,41 @@ class StateStoreTestCase(HomeserverTestCase):
         )
         self.assertEqual(remaining, [])
 
+    def test_drain_embedded_root_deletion_queue_retains_index_misses(self) -> None:
+        """An index miss must not discard the retry record for a root."""
+        self._setup_embedded_engine_for_room("test-drain-queue-index-miss-mtxdb-")
+
+        e1 = self.inject_state_event(self.room, self.u_alice, EventTypes.Create, "", {})
+        state_group = self.get_success(
+            self.store._get_state_group_for_event(e1.event_id)
+        )
+        assert state_group is not None
+
+        self.get_success(
+            self.store.db_pool.simple_insert(
+                table="state_hamt_root_deletion_queue",
+                values={"state_group": state_group},
+                desc="test_drain_queue_index_miss.enqueue",
+            )
+        )
+
+        from synapse.synapse_rust import mtxdb_engine
+
+        with patch.object(mtxdb_engine, "get_room_index", return_value=[None]):
+            self.get_success(
+                self.state_datastore._drain_embedded_state_hamt_root_deletion_queue()
+            )
+
+        remaining = self.get_success(
+            self.store.db_pool.simple_select_list(
+                table="state_hamt_root_deletion_queue",
+                keyvalues={},
+                retcols=("state_group",),
+                desc="test_drain_queue_index_miss.check_remaining",
+            )
+        )
+        self.assertEqual(remaining, [(state_group,)])
+
     def test_backfill_state_hamt_roots_skips_already_embedded_groups(self) -> None:
         """Regression test: the backfill's `already_embedded` dedup check
         used to read via `batch_get_state_hamt_roots` against the same

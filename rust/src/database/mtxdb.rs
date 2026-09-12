@@ -1220,7 +1220,8 @@ pub fn get_state_hamt_nodes_batch(
 #[pyfunction]
 pub fn sync(py: Python<'_>) -> PyResult<()> {
     py.detach(|| {
-        room_index::sync()?;
+        // Sync mtxdb pools before publishing the room index. A durable
+        // index entry must never point at a root that was not yet synced.
         for (name, engine) in [
             ("state", state_db()?),
             ("event-dag", event_dag_db()?),
@@ -1232,6 +1233,7 @@ pub fn sync(py: Python<'_>) -> PyResult<()> {
                 ))
             })?;
         }
+        room_index::sync()?;
         Ok(())
     })
 }

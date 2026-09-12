@@ -35,8 +35,8 @@ test: ##H Run tests, e.g., on tests/storage/
 
 
 .PHONY: build
-build: ##H Build the package (requires hatch)
-	uv run --with hatch hatch build
+build: ##H Build the package
+	uv build
 
 .PHONY: publish
 publish: build ##H Upload the package to PyPI using twine

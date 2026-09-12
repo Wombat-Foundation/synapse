@@ -1701,9 +1701,11 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 [int(state_group) for state_group in state_groups],
             )
             by_room: dict[bytes, list[int]] = {}
+            resolved_groups: list[int] = []
             for state_group, room_prefix in zip(state_groups, room_prefixes):
                 if room_prefix is not None:
                     by_room.setdefault(bytes(room_prefix), []).append(state_group)
+                    resolved_groups.append(state_group)
             for room_prefix, room_state_groups in by_room.items():
                 await defer_to_thread(
                     self.hs.get_reactor(),
@@ -1712,13 +1714,17 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     room_prefix,
                     room_state_groups,
                 )
-            await self.db_pool.simple_delete_many(
-                table="state_hamt_root_deletion_queue",
-                column="state_group",
-                iterable=state_groups,
-                keyvalues={},
-                desc="remove_purged_embedded_state_hamt_roots",
-            )
+            # Only remove from the deletion queue the groups we successfully
+            # resolved a room prefix for. Groups without a mapping are left
+            # in the queue for retry on the next run.
+            if resolved_groups:
+                await self.db_pool.simple_delete_many(
+                    table="state_hamt_root_deletion_queue",
+                    column="state_group",
+                    iterable=resolved_groups,
+                    keyvalues={},
+                    desc="remove_purged_embedded_state_hamt_roots",
+                )
         return deleted
 
     def _purge_unreferenced_state_groups(
@@ -1955,10 +1961,10 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 # one _state_hamt_root_key/batch_delete targeted (a silent
                 # no-op post-migration). This queue only has bare
                 # state_group ints, so resolve each to a room via the
-                # room_index before deleting -- a miss there means either
-                # a pre-migration (SQL-only) group with nothing in mtxdb to
-                # delete, or a group that was never given a root, so it's
-                # safe to just drop from the queue in that case too.
+                # room_index before deleting. An index miss does not prove
+                # there is no root: an interrupted write can leave a root
+                # without its index entry. Keep such groups queued rather
+                # than losing the retry record.
                 room_prefixes = await defer_to_thread(
                     self.hs.get_reactor(),
                     engine.get_room_index,
@@ -1966,9 +1972,11 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     state_groups,
                 )
                 by_room: dict[bytes, list[int]] = {}
+                resolved_groups: list[int] = []
                 for state_group, room_prefix in zip(state_groups, room_prefixes):
                     if room_prefix is not None:
                         by_room.setdefault(bytes(room_prefix), []).append(state_group)
+                        resolved_groups.append(state_group)
                 for room_prefix, room_state_groups in by_room.items():
                     await defer_to_thread(
                         self.hs.get_reactor(),
@@ -1977,13 +1985,14 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                         room_prefix,
                         room_state_groups,
                     )
-                await self.db_pool.simple_delete_many(
-                    table="state_hamt_root_deletion_queue",
-                    column="state_group",
-                    iterable=state_groups,
-                    keyvalues={},
-                    desc="remove_embedded_state_hamt_root_deletion_queue_batch",
-                )
+                if resolved_groups:
+                    await self.db_pool.simple_delete_many(
+                        table="state_hamt_root_deletion_queue",
+                        column="state_group",
+                        iterable=resolved_groups,
+                        keyvalues={},
+                        desc="remove_embedded_state_hamt_root_deletion_queue_batch",
+                    )
             except Exception:
                 # The IDs remain durably queued for the periodic retry, so a
                 # transient embedded-engine failure cannot leave
