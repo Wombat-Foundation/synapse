@@ -358,6 +358,8 @@ mod room_index {
     // to `pread`. Bounded retention keeps a long-running monolith from
     // turning the index into an unbounded second copy of all state groups.
     const PREFIX_CACHE_CAPACITY: usize = 100_000;
+
+    #[allow(clippy::type_complexity)]
     static PREFIX_CACHE: Mutex<Option<LruCache<(String, i64), [u8; ROOM_PREFIX_LEN]>>> =
         Mutex::new(None);
 
