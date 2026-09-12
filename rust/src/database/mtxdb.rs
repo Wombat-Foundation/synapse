@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 use mtxdb::{DatabaseLayout, NodeData, NodeId, PackfileStorage, ShardType, StorageEngine};
 use once_cell::sync::OnceCell;
@@ -261,18 +260,11 @@ pub fn put_state_hamt_nodes(
         })
         .collect();
 
-    let pairs_len = pairs.len();
     py.detach(|| {
         let engine = state_db()?;
-        let t0 = Instant::now();
         engine.put_many(&room_id, &pairs).map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb put error: {}", e))
-        })?;
-        let elapsed = t0.elapsed();
-        if elapsed.as_millis() >= 1 {
-            eprintln!("[mtxdb] put_state_hamt_nodes: {pairs_len} nodes in {elapsed:?}");
-        }
-        Ok(())
+        })
     })
 }
 
@@ -359,15 +351,9 @@ pub fn put_auth_chain_links_batch(
         pairs_to_put.push((node_id, NodeData::new(bytes::Bytes::from(bytes))));
     }
 
-    let puts_len = pairs_to_put.len();
-    let t0 = Instant::now();
     engine.put_many(&room_id, &pairs_to_put).map_err(|e| {
         pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb put error: {}", e))
     })?;
-    let elapsed = t0.elapsed();
-    if elapsed.as_millis() >= 1 {
-        eprintln!("[mtxdb] put_auth_chain_links_batch: {puts_len} manifests in {elapsed:?}");
-    }
     Ok(())
 }
 
@@ -473,7 +459,6 @@ pub fn batch_get(py: Python<'_>, keys: Vec<Vec<u8>>) -> PyResult<Vec<(Vec<u8>, V
 /// Store flat-KV records, routing each key to its shard type internally.
 #[pyfunction]
 pub fn batch_put(py: Python<'_>, pairs: Vec<(Vec<u8>, Vec<u8>)>) -> PyResult<()> {
-    let pairs_len = pairs.len();
     py.detach(|| {
         let mut state_puts = Vec::new();
         let mut event_puts = Vec::new();
@@ -485,7 +470,6 @@ pub fn batch_put(py: Python<'_>, pairs: Vec<(Vec<u8>, Vec<u8>)>) -> PyResult<()>
                 ShardType::AuthChain => unreachable!("flat KV never routes to auth-chain"),
             }
         }
-        let t0 = Instant::now();
         for (shard_type, puts) in [
             (ShardType::State, state_puts),
             (ShardType::EventDag, event_puts),
@@ -497,10 +481,6 @@ pub fn batch_put(py: Python<'_>, pairs: Vec<(Vec<u8>, Vec<u8>)>) -> PyResult<()>
                         pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb put error: {e}"))
                     })?;
             }
-        }
-        let elapsed = t0.elapsed();
-        if elapsed.as_millis() >= 1 {
-            eprintln!("[mtxdb] batch_put: {pairs_len} pairs in {elapsed:?}");
         }
         Ok(())
     })
@@ -715,16 +695,10 @@ pub fn increment_counters_batch(pairs: Vec<(Vec<u8>, i64)>) -> PyResult<Vec<i64>
         ));
     }
 
-    let puts_len = puts.len();
     if !puts.is_empty() {
-        let t0 = Instant::now();
         engine.put_many(&room_id, &puts).map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb put error: {}", e))
         })?;
-        let elapsed = t0.elapsed();
-        if elapsed.as_millis() >= 1 {
-            eprintln!("[mtxdb] increment_counters_batch: {puts_len} counters in {elapsed:?}");
-        }
     }
 
     Ok(results)
