@@ -16,7 +16,8 @@ use rezzy::hamt::{HamtNode, StructuralHash};
 use sha2::{Digest, Sha256};
 
 use crate::state_hamt::{
-    decode_persisted_node_verified, lookup_from_node_map, materialize_from_node_map,
+    decode_persisted_node_verified, lookup_from_node_map, lookup_from_node_map_preencoded,
+    materialize_from_node_map,
 };
 
 /// Minimal point-lookup/write surface every embedded HAMT KV backend must
@@ -510,6 +511,21 @@ pub fn lookup_state_hamts(
     let mut node_map: HashMap<NodeLocation, Arc<HamtNode<String, String>>> = HashMap::new();
     let mut seen: HashSet<NodeLocation> = queries.iter().map(|(p, h, k, _)| (*p, *k, *h)).collect();
     let mut to_fetch: HashSet<NodeLocation> = seen.clone();
+    let encoded_query_keys = queries
+        .iter()
+        .map(|(_, _, _, keys)| {
+            keys.iter()
+                .map(|(event_type, state_key)| {
+                    serde_json::to_string(&(event_type, state_key))
+                        .map_err(|e| format!("Failed to encode HAMT state key: {e}"))
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    // Each loop's lookup results are valid iff it enqueued no further nodes.
+    // Keep the latest result so that successful final round is returned
+    // directly instead of traversing every query a second time below.
+    let mut latest_entries = vec![None; queries.len()];
 
     while !to_fetch.is_empty() {
         timing.bfs_rounds += 1;
@@ -571,11 +587,17 @@ pub fn lookup_state_hamts(
                 .insert(*hash, Arc::clone(node));
         }
 
-        for (room_prefix, root_hash, structural_key, keys) in &queries {
+        for (index, (room_prefix, root_hash, structural_key, keys)) in queries.iter().enumerate() {
             if let Some(prefix_nodes) = nodes_by_prefix.get(room_prefix) {
                 if prefix_nodes.contains_key(root_hash) {
-                    let (_entries, missing) =
-                        lookup_from_node_map(root_hash, structural_key, keys, prefix_nodes)?;
+                    let (entries, missing) = lookup_from_node_map_preencoded(
+                        root_hash,
+                        structural_key,
+                        keys,
+                        &encoded_query_keys[index],
+                        prefix_nodes,
+                    )?;
+                    latest_entries[index] = Some(entries);
                     for missing_hash in missing {
                         let child_loc = (*room_prefix, *structural_key, missing_hash);
                         if seen.insert(child_loc) {
@@ -588,37 +610,19 @@ pub fn lookup_state_hamts(
         timing.traversal_ns += traversal_start.elapsed().as_nanos();
     }
 
-    type PrefixNodeMap = HashMap<StructuralHash, Arc<HamtNode<String, String>>>;
-    let mut nodes_by_prefix: HashMap<[u8; ROOM_PREFIX_LEN], PrefixNodeMap> = HashMap::new();
-    for ((room_prefix, _, hash), node) in node_map {
-        nodes_by_prefix
-            .entry(room_prefix)
-            .or_default()
-            .insert(hash, node);
-    }
-
-    let traversal_start = std::time::Instant::now();
-    let result = queries
+    let result = latest_entries
         .into_iter()
-        .map(|(room_prefix, root_hash, structural_key, keys)| {
-            let prefix_nodes = nodes_by_prefix.get(&room_prefix).ok_or_else(|| {
+        .enumerate()
+        .map(|(index, entries)| {
+            entries.ok_or_else(|| {
+                let (room_prefix, _, _, _) = &queries[index];
                 format!(
                     "Missing nodes for room prefix: {}",
                     hex::encode(room_prefix)
                 )
-            })?;
-            let (entries, missing) =
-                lookup_from_node_map(&root_hash, &structural_key, &keys, prefix_nodes)?;
-            if !missing.is_empty() {
-                return Err(format!(
-                    "Unresolved missing nodes after fetch loop for root {:02x?}",
-                    root_hash
-                ));
-            }
-            Ok(entries)
+            })
         })
         .collect();
-    timing.traversal_ns += traversal_start.elapsed().as_nanos();
     timing.total_ns = overall_start.elapsed().as_nanos();
     DIAG_LOOKUP_WALK.lock().unwrap().add(&timing);
     result
