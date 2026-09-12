@@ -227,7 +227,7 @@ pub fn get_state_hamt_roots_for_room(
 }
 
 /// A flat, direct-offset `state_group -> room_prefix` index: entry N lives
-/// at byte offset `N * 16` in a per-namespace file under
+/// at byte offset `N * ROOM_PREFIX_LEN` in a per-namespace file under
 /// `<embedded_hamt_path>/room_index/<namespace_hash>.bin`. Exists so
 /// `_fetch_hamt_roots_for_embedded_txn` (bg_updates.py) -- which only ever
 /// has a bare `state_group` int, by design, and needs to resolve which
@@ -251,14 +251,15 @@ pub fn get_state_hamt_roots_for_room(
 /// 2. **All-zero is a valid "not (yet) written" sentinel, not ambiguous
 ///    with a real value.** A real `room_prefix` is derived from a hashed
 ///    `room_id` (`state_hamt.room_hamt_prefix`), so the chance of a
-///    genuine value being 16 zero bytes is negligible (~2^-128) -- the
-///    same margin already relied on elsewhere in this file (`kv_node_id`,
-///    `chain_node_id`) for hash-derived ids. A reader that sees all-zero
-///    (sparse-file default, or a `pwrite` mid-flight and not yet
-///    reflected) treats it as a miss. `pwrite`/`pread` of one 16-byte
-///    value, well within a single page, is applied atomically at the
-///    page-cache level on Linux -- a concurrent reader observes either the
-///    complete old or complete new value, never a torn mix.
+///    genuine value being `ROOM_PREFIX_LEN` zero bytes is negligible
+///    (~2^-64) -- the same margin already relied on elsewhere in this file
+///    (`kv_node_id`, `chain_node_id`) for hash-derived ids. A reader that
+///    sees all-zero (sparse-file default, or a `pwrite` mid-flight and not
+///    yet reflected) treats it as a miss. `pwrite`/`pread` of one
+///    `ROOM_PREFIX_LEN`-byte value, well within a single page, is applied
+///    atomically at the page-cache level on Linux -- a concurrent reader
+///    observes either the complete old or complete new value, never a torn
+///    mix.
 /// 3. **This index has the same bounded durability window as the rest of
 ///    the embedded engine, not a weaker one.** There is no per-write
 ///    fsync here (matching the engine-wide move away from per-write
