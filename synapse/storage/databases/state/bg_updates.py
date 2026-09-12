@@ -984,21 +984,42 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
         this group's pre-existing SQL row over yet -- see
         `_background_migrate_state_hamt_to_embedded`. Only in that bounded,
         explicit window does this fall back to SQL.
+
+        `groups` is a bare list of `state_group` ints spanning arbitrary,
+        unknown rooms by design (this is the generic materialize/lookup-by
+        -groups path) -- roots themselves now live in per-room mtxdb
+        collections (`get_state_hamt_roots_for_room`), not one shared
+        collection, so this first resolves each group's room via
+        `get_room_index` (the flat-file `state_group -> room_prefix` index
+        written alongside every root -- see `put_room_index`'s doc comment
+        in `rust/src/database/mtxdb.rs`), groups by the resolved room, and
+        reads each room's roots in one call.
         """
         engine = get_embedded_engine(getattr(self, "_embedded_hamt_engine", None))
         namespace = getattr(self, "_embedded_hamt_namespace", None)
         found: dict[int, tuple[bytes, bytes, str]] = {}
         still_missing: list[int] = []
-        # One batched Rust call instead of an N-iteration Python for loop
-        # each paying its own FFI round trip.
-        for group, record in zip(
-            groups, engine.batch_get_state_hamt_roots(namespace, groups)
-        ):
-            if record is None:
+
+        room_prefixes = engine.get_room_index(namespace, groups)
+        by_room: dict[bytes, list[int]] = {}
+        for group, room_prefix in zip(groups, room_prefixes):
+            if room_prefix is None:
                 still_missing.append(group)
                 continue
-            _group, room_prefix, root_hash, room_id, _lattice = record
-            found[group] = (bytes(room_prefix), bytes(root_hash), room_id)
+            by_room.setdefault(bytes(room_prefix), []).append(group)
+
+        for room_prefix, room_groups in by_room.items():
+            raw_roots = engine.get_state_hamt_roots_for_room(
+                namespace, room_prefix, room_groups
+            )
+            for group, raw in zip(room_groups, raw_roots):
+                if raw is None:
+                    still_missing.append(group)
+                    continue
+                _room_prefix, root_hash, _lattice, room_id = _decode_state_hamt_root(
+                    bytes(raw)
+                )
+                found[group] = (room_prefix, root_hash, room_id)
 
         if not still_missing:
             return found

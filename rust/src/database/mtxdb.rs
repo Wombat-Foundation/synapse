@@ -275,14 +275,10 @@ mod room_index {
             record[..n].copy_from_slice(&room_prefix[..n]);
             let offset = (*state_group as u64).saturating_mul(RECORD_LEN);
             file.seek(SeekFrom::Start(offset)).map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "room_index seek failed: {e}"
-                ))
+                pyo3::exceptions::PyRuntimeError::new_err(format!("room_index seek failed: {e}"))
             })?;
             file.write_all(&record).map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "room_index write failed: {e}"
-                ))
+                pyo3::exceptions::PyRuntimeError::new_err(format!("room_index write failed: {e}"))
             })?;
         }
         Ok(())
