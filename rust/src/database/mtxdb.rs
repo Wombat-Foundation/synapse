@@ -334,6 +334,31 @@ mod room_index {
         }
         Ok(out)
     }
+
+    /// Flush all cached room-index handles to disk. Mirrors the bounded,
+    /// periodic (not per-write) durability window the rest of the embedded
+    /// engine uses -- see `_periodic_embedded_sync` on the Python side,
+    /// which calls this via the top-level `sync()` pyfunction. Without
+    /// this, room-index writes had no fsync point at all (unbounded loss
+    /// window on crash, not just the same ~1s one as everything else); a
+    /// miss still falls through to the SQL fallback in
+    /// `_fetch_hamt_roots_for_embedded_txn`, so this narrows an existing
+    /// gap rather than being the only thing standing between a crash and
+    /// data loss.
+    pub fn sync() -> PyResult<()> {
+        let guard = HANDLES
+            .lock()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("lock poison: {e}")))?;
+        let Some(map) = guard.as_ref() else {
+            return Ok(());
+        };
+        for file in map.values() {
+            file.sync_data().map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("room_index sync failed: {e}"))
+            })?;
+        }
+        Ok(())
+    }
 }
 
 #[pyfunction]
@@ -1016,6 +1041,7 @@ pub fn sync(py: Python<'_>) -> PyResult<()> {
                 ))
             })?;
         }
+        room_index::sync()?;
         Ok(())
     })
 }
