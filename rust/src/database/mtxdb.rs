@@ -276,11 +276,16 @@ mod room_index {
             return Ok(Some(Arc::clone(file)));
         }
         let path = index_path(namespace)?;
+        // `write(true)` unconditionally: the cached handle is shared for
+        // the namespace's lifetime, so a `get_many`-first ordering must
+        // not poison it read-only for every later `put` -- only whether a
+        // *missing* file gets created (`create`) should depend on which
+        // call warmed the cache.
         let opened = OpenOptions::new()
             .create(create)
             .truncate(false)
             .read(true)
-            .write(create)
+            .write(true)
             .open(&path);
         let file = match opened {
             Ok(f) => f,
