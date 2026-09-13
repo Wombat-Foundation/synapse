@@ -143,6 +143,15 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
 
         self._embedded_hamt_engine = hs.config.database.embedded_hamt_engine
         self._embedded_hamt_path = hs.config.database.embedded_hamt_path
+
+        # Defaults to the server name when unset (see the comment on
+        # DatabaseConfig.embedded_hamt_namespace) -- must always be
+        # assigned here, since every call site below reads
+        # self._embedded_hamt_namespace unconditionally.
+        self._embedded_hamt_namespace = (
+            hs.config.database.embedded_hamt_namespace or self.server_name
+        )
+
         if self._embedded_hamt_engine and self._embedded_hamt_path:
             # mtxdb is the embedded engine for HAMT state offload.
             # benchmark (point reads, batch reads) and needs no worker-
@@ -165,14 +174,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 raise RuntimeError(
                     f"Failed to open embedded {self._embedded_hamt_engine} engine at {self._embedded_hamt_path}"
                 ) from e
-
-            # Defaults to the server name when unset (see the comment on
-            # DatabaseConfig.embedded_hamt_namespace) -- must always be
-            # assigned here, since every call site below reads
-            # self._embedded_hamt_namespace unconditionally.
-            self._embedded_hamt_namespace = (
-                hs.config.database.embedded_hamt_namespace or self.server_name
-            )
 
             if hs.config.worker.run_background_tasks:
                 hs.get_clock().looping_call(
