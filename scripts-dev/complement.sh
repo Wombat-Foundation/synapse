@@ -455,9 +455,7 @@ main() {
     export PASS_SYNAPSE_EMBEDDED_HAMT_PATH="$SYNAPSE_EMBEDDED_HAMT_PATH"
   fi
 
-  if [[ -n "$PASS_SYNAPSE_EMBEDDED_HAMT_ENGINE" ]]; then
-    echo "Embedded HAMT engine: ${PASS_SYNAPSE_EMBEDDED_HAMT_ENGINE} at ${PASS_SYNAPSE_EMBEDDED_HAMT_PATH:-<not set>}" >&2
-  fi
+  echo "Database: ${PASS_SYNAPSE_COMPLEMENT_DATABASE} (workers: ${PASS_SYNAPSE_COMPLEMENT_USE_WORKERS:-false}) | Embedded HAMT engine: ${PASS_SYNAPSE_EMBEDDED_HAMT_ENGINE:-<none>}${PASS_SYNAPSE_EMBEDDED_HAMT_ENGINE:+ at ${PASS_SYNAPSE_EMBEDDED_HAMT_PATH:-<not set>}}" >&2
 
   if [[ -n "${SYNAPSE_PG_TIMINGS:-}" ]]; then
     export PASS_SYNAPSE_PG_TIMINGS=1
@@ -474,11 +472,11 @@ main() {
   local _i=1
   while [ $_i -le $# ]; do
     local _arg="${!_i}"
-    if [[ "$_arg" == "-run" ]]; then
+    if [[ "$_arg" == "-run" || "$_arg" == "--run" ]]; then
       local _next=$((_i+1))
       RUN_TESTS="${!_next}"
       _i=$((_i+2))
-    elif [[ "$_arg" =~ ^-run=(.+) ]]; then
+    elif [[ "$_arg" =~ ^--?run=(.+) ]]; then
       RUN_TESTS="${BASH_REMATCH[1]}"
       _i=$((_i+1))
     elif [[ "$_arg" == "-tags" ]]; then
