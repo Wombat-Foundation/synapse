@@ -181,6 +181,7 @@ class CensorEventsStore(EventsWorkerStore, CacheInvalidationWorkerStore, SQLBase
                 self._embedded_hamt_engine,
                 self._embedded_hamt_namespace,
                 [(event_id, internal_metadata, pruned_json, format_version)],
+                sync=True,
             )
 
     async def expire_event(self, event_id: str) -> None:

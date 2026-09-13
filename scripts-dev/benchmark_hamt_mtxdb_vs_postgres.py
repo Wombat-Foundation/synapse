@@ -10,7 +10,7 @@ Bridge" number specifically never existed anywhere -- no bridge/RPC/socket
 code for fjall was ever written, in any commit, reachable or dangling (see
 session history) -- so it is dropped rather than re-estimated.
 
-Same methodology/shape as the now-deleted benchmark_hamt_storage_engines.py
+Same methodology/shape as the deleted benchmark_hamt_storage_engines.py
 and benchmark_hamt_mtxdb.py: 32-byte content-addressed keys, 512-byte node
 payloads, uniformly random, 2,000,000-row corpus, batch sizes 1/5/10 for
 reads, batch=5 for commit latency.

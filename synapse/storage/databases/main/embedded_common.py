@@ -21,14 +21,18 @@ class SyncTier(Enum):
 
 
 def maybe_sync(tier: SyncTier) -> None:
-    """No-op: kept for call-site compatibility and to preserve the DURABLE
-    vs. CACHE classification in each call site's docstring/comments (still
-    meaningful documentation of which writes have no SQL fallback), but an
-    actual fsync is a whole-device write-cache flush, not scoped to the
-    bytes just written -- too expensive to pay per write/per batch (~59ms
-    measured per call). A single periodic background task
-    (`StateGroupDataStore._periodic_embedded_sync`, every ~1s) flushes the
-    one shared shard file for every embedded write from every store
-    instead, bounding the durability window to about a second rather than
-    paying an fsync on the hot path.
+    """Sync mtxdb for DURABLE writes; no-op for CACHE writes.
+
+    A DURABLE write has no SQL fallback, or uses accumulating/delta
+    semantics (counters, auth-chain links, HAMT roots). A lost unflushed
+    write here means silent data loss or incorrect state, so sync() is
+    called after every batch.
+
+    A CACHE write has a SQL fallback on the read path. A lost unflushed
+    write just means a slower read via that fallback, not data loss.
     """
+    if tier is SyncTier.DURABLE:
+        from synapse.storage.databases.embedded_engine import get_embedded_engine
+
+        engine = get_embedded_engine("mtxdb")
+        engine.sync()

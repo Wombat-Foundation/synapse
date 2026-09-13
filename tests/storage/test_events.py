@@ -80,7 +80,9 @@ class EventsTestCase(HomeserverTestCase):
         persist_store = self.hs.get_datastores().persist_events
         assert persist_store is not None
         persist_store._embedded_event_json_enabled = True
+        persist_store._embedded_hamt_engine = "mtxdb"
         self._store._embedded_event_json_enabled = True
+        self._store._embedded_hamt_engine = "mtxdb"
 
         user = self.register_user("embedded_event_json_user", "pass")
         token = self.login("embedded_event_json_user", "pass")

@@ -438,7 +438,11 @@ class EventFederationWorkerStore(
                         if target_chain_id not in seen_chains:
                             seen_chains.add(target_chain_id)
                             to_walk.add(target_chain_id)
-            yield accumulated
+                # Yield the accumulated links for this batch, matching the
+                # SQL path's outer 1,000-chain batching to avoid holding the
+                # entire transitive closure in memory for large auth chains.
+                yield accumulated
+                accumulated = {}
             return
 
         # This query is structured to first get all chain IDs reachable, and

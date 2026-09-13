@@ -1463,9 +1463,19 @@ def setup_test_homeserver(
     # Patch `make_pool` before initialising the database, to make database transactions
     # synchronous for testing.
     _t0 = time.monotonic()
+
+    # Set up PG timing callback for database timing profiling.
+    from synapse.storage.databases import set_pg_timing_callback
+
+    if os.environ.get("SYNAPSE_PG_TIMINGS"):
+        set_pg_timing_callback(_pg_timing)
+
     with patch("synapse.storage.database.make_pool", side_effect=make_fake_db_pool):
         hs.setup()
     _pg_timing("hs_setup_total", time.monotonic() - _t0)
+
+    if os.environ.get("SYNAPSE_PG_TIMINGS"):
+        set_pg_timing_callback(None)
 
     # Ideally, setup/start would be separated but since this is historically used
     # throughout tests, we keep the existing behavior for now. We probably just need to

@@ -411,7 +411,7 @@ class PurgeTests(HomeserverTestCase):
         # backend directly -- a raw SQL-only insert would silently stop
         # making this group look referenced the moment the embedded engine
         # is on, since real writes wouldn't touch SQL at all in that case.
-        if getattr(self.store, "_embedded_event_json_enabled", False):
+        if getattr(self.store, "_embedded_hamt_engine", None):
             from synapse.storage.databases.main.embedded_event_to_state_group import (
                 increment_state_group_refcounts_batch,
                 put_event_to_state_group_batch,

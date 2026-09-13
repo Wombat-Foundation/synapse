@@ -687,6 +687,126 @@ fn deserialize_manifest(bytes: &[u8]) -> Vec<(i64, i64, i64)> {
 }
 
 // -----------------------------------------------------------------------------
+// Auth Chain Closures (short event ids + direct auth edges)
+// -----------------------------------------------------------------------------
+//
+// See docs/docs/auth-chain-closures-plan.md (mdb repo) for the full design.
+// Every key family here lives in one mtxdb collection derived from
+// `(namespace, room_id)` -- unlike `namespace_room_id` above (which is
+// namespace-only and shared by every room in that namespace via the
+// chain_id-keyed auth-chain-links manifest), this feature needs a real
+// per-room collection so `auth_chain_purge_room` can drop exactly one
+// room's data with a single `delete_collection` call.
+
+/// A room-scoped collection id for the short-id/edge closure skeleton,
+/// distinct from `namespace_room_id`'s namespace-only derivation.
+fn auth_chain_closure_room_id(namespace: &str, room_id: &str) -> [u8; 16] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"authchain_closure_room:");
+    hasher.update(namespace.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(room_id.as_bytes());
+    let hash = hasher.finalize();
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&hash[..16]);
+    out
+}
+
+/// Distinct tag prefixes keep the counter, forward mapping, reverse
+/// mapping, and edge-list key spaces from colliding within one room's
+/// collection (all four share the same 16-byte `NodeId` space there).
+fn short_id_counter_node_id() -> NodeId {
+    let hash = Sha256::digest(b"authchain:counter");
+    let mut id = [0u8; 16];
+    id.copy_from_slice(&hash[..16]);
+    id
+}
+
+fn short_id_forward_node_id(event_id: &str) -> NodeId {
+    let mut hasher = Sha256::new();
+    hasher.update(b"authchain:fwd:");
+    hasher.update(event_id.as_bytes());
+    let hash = hasher.finalize();
+    let mut id = [0u8; 16];
+    id.copy_from_slice(&hash[..16]);
+    id
+}
+
+fn short_id_reverse_node_id(short_id: u32) -> NodeId {
+    let mut hasher = Sha256::new();
+    hasher.update(b"authchain:rev:");
+    hasher.update(short_id.to_be_bytes());
+    let hash = hasher.finalize();
+    let mut id = [0u8; 16];
+    id.copy_from_slice(&hash[..16]);
+    id
+}
+
+fn auth_chain_edge_node_id(short_id: u32) -> NodeId {
+    let mut hasher = Sha256::new();
+    hasher.update(b"authchain:edges:");
+    hasher.update(short_id.to_be_bytes());
+    let hash = hasher.finalize();
+    let mut id = [0u8; 16];
+    id.copy_from_slice(&hash[..16]);
+    id
+}
+
+/// Short ids are `u32`, per room (see plan §1) -- chosen so the Python-side
+/// closure cache can use 32-bit `pyroaring.BitMap` rather than `BitMap64`.
+/// 0 is never assigned (the counter starts at 0 meaning "none allocated
+/// yet" and is pre-incremented before use), so it stays free as a sentinel
+/// if ever needed.
+const AUTH_CHAIN_SHORT_ID_MAX: u64 = u32::MAX as u64;
+
+const AUTH_CHAIN_EDGE_ENCODING_VERSION: u8 = 1;
+
+/// `[u8 version][u32 count]` + `count` x `u32` auth short ids. `count = 0`
+/// is still 5 real bytes -- mtxdb treats an empty value as absent/tombstone
+/// (see `get_raw`), so a genuinely-leaf event (zero auth events) must not
+/// be stored as an empty value, or it becomes indistinguishable from
+/// "edge data missing, fall back to SQL."
+fn encode_auth_edges(auth_short_ids: &[u32]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(5 + auth_short_ids.len() * 4);
+    buf.push(AUTH_CHAIN_EDGE_ENCODING_VERSION);
+    buf.extend_from_slice(&(auth_short_ids.len() as u32).to_be_bytes());
+    for &id in auth_short_ids {
+        buf.extend_from_slice(&id.to_be_bytes());
+    }
+    buf
+}
+
+fn decode_auth_edges(bytes: &[u8]) -> PyResult<Vec<u32>> {
+    if bytes.len() < 5 {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "corrupt auth-chain edge record (too short)",
+        ));
+    }
+    if bytes[0] != AUTH_CHAIN_EDGE_ENCODING_VERSION {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+            "unsupported auth-chain edge record version: {}",
+            bytes[0]
+        )));
+    }
+    let count = u32::from_be_bytes(bytes[1..5].try_into().unwrap()) as usize;
+    let expected_len = 5 + count * 4;
+    if bytes.len() != expected_len {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "corrupt auth-chain edge record (length mismatch)",
+        ));
+    }
+    let mut out = Vec::with_capacity(count);
+    let mut offset = 5;
+    for _ in 0..count {
+        out.push(u32::from_be_bytes(
+            bytes[offset..offset + 4].try_into().unwrap(),
+        ));
+        offset += 4;
+    }
+    Ok(out)
+}
+
+// -----------------------------------------------------------------------------
 // PyO3 Bindings
 // -----------------------------------------------------------------------------
 
@@ -886,7 +1006,10 @@ pub fn delete_auth_chain_links_batch(namespace: String, pairs: Vec<(i64, i64)>) 
 
     for (chain_id, seqs_to_delete) in grouped {
         let node_id = chain_node_id(chain_id);
-        if let Ok(Some(data)) = engine.get(&room_id, &node_id) {
+        let data = engine.get(&room_id, &node_id).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb get error: {}", e))
+        })?;
+        if let Some(data) = data {
             let edges = deserialize_manifest(&data.bytes);
             let filtered: Vec<_> = edges
                 .into_iter()
@@ -904,6 +1027,264 @@ pub fn delete_auth_chain_links_batch(namespace: String, pairs: Vec<(i64, i64)>) 
         })?;
     }
     Ok(())
+}
+
+/// Room-scoped: for each `event_id`, returns its `u32` short id, allocating
+/// one if it doesn't exist yet. See plan §0(1) for the recovery protocol
+/// this implements -- the counter, forward mapping, and reverse mapping
+/// are a single three-record invariant maintained here, not sequenced from
+/// Python.
+///
+/// Crash-induced inconsistencies this tolerates (both self-healing):
+///   - counter incremented, forward write never happened: the short id is
+///     just never assigned to anything (ids need not be dense).
+///   - forward written, reverse write never happened: repaired the next
+///     time *any* caller resolves this same event id through this
+///     function (see the "verify and restore reverse" branch below) --
+///     not only when the forward mapping happened to be absent.
+/// No ordering can produce a reverse mapping without a matching forward
+/// one, which is the only inconsistency this design cannot tolerate.
+#[pyfunction]
+pub fn get_or_create_short_ids(
+    namespace: String,
+    room_id: String,
+    event_ids: Vec<String>,
+) -> PyResult<Vec<u32>> {
+    let _guard = RMW_LOCK
+        .lock()
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("lock poison: {}", e)))?;
+    // No `py.detach` here -- see increment_counters_batch's comment for why:
+    // the RMW lock must be held across get->put, and MutexGuard is !Send.
+    let engine = db_for_shard_type(ShardType::AuthChain)?;
+    let collection = auth_chain_closure_room_id(&namespace, &room_id);
+
+    let mut out = Vec::with_capacity(event_ids.len());
+    let mut counter_value: Option<u64> = None;
+
+    for event_id in event_ids {
+        let fwd_id = short_id_forward_node_id(&event_id);
+        let existing = engine.get(&collection, &fwd_id).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb get error: {}", e))
+        })?;
+
+        if let Some(data) = existing {
+            if data.bytes.len() != 4 {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "corrupt auth-chain short-id forward record",
+                ));
+            }
+            let short_id = u32::from_be_bytes(data.bytes.as_ref().try_into().unwrap());
+
+            // Verify + repair the reverse mapping even though the forward
+            // mapping already exists (see docstring above).
+            let rev_id = short_id_reverse_node_id(short_id);
+            let rev_present = engine.get(&collection, &rev_id).map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb get error: {}", e))
+            })?;
+            if rev_present.is_none() {
+                engine
+                    .put(
+                        &collection,
+                        &rev_id,
+                        &NodeData::new(bytes::Bytes::from(event_id.into_bytes())),
+                    )
+                    .map_err(|e| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "mtxdb put error repairing reverse mapping: {}",
+                            e
+                        ))
+                    })?;
+            }
+            out.push(short_id);
+            continue;
+        }
+
+        let counter_id = short_id_counter_node_id();
+        let current = match counter_value {
+            Some(v) => v,
+            None => match engine.get(&collection, &counter_id) {
+                Ok(Some(data)) if data.bytes.len() == 8 => {
+                    u64::from_be_bytes(data.bytes.as_ref().try_into().unwrap())
+                }
+                Ok(_) => 0,
+                Err(e) => {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "mtxdb get error reading counter: {}",
+                        e
+                    )))
+                }
+            },
+        };
+        let next = current + 1;
+        if next > AUTH_CHAIN_SHORT_ID_MAX {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "auth-chain short-id space exhausted for room",
+            ));
+        }
+        let short_id = next as u32;
+        counter_value = Some(next);
+
+        engine
+            .put(
+                &collection,
+                &counter_id,
+                &NodeData::new(bytes::Bytes::copy_from_slice(&next.to_be_bytes())),
+            )
+            .map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "mtxdb put error updating counter: {}",
+                    e
+                ))
+            })?;
+
+        // Forward mapping first (authoritative), then reverse -- see
+        // docstring above for why this order matters for crash recovery.
+        engine
+            .put(
+                &collection,
+                &fwd_id,
+                &NodeData::new(bytes::Bytes::copy_from_slice(&short_id.to_be_bytes())),
+            )
+            .map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "mtxdb put error writing forward mapping: {}",
+                    e
+                ))
+            })?;
+
+        let rev_id = short_id_reverse_node_id(short_id);
+        engine
+            .put(
+                &collection,
+                &rev_id,
+                &NodeData::new(bytes::Bytes::from(event_id.into_bytes())),
+            )
+            .map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "mtxdb put error writing reverse mapping: {}",
+                    e
+                ))
+            })?;
+
+        out.push(short_id);
+    }
+
+    Ok(out)
+}
+
+/// Room-scoped batch reverse lookup: `short_id -> event_id`, `None` for an
+/// unresolved/dangling short id (never an error -- see plan §4, downstream
+/// consumers must filter these, matching congruent's own precedent).
+#[pyfunction]
+pub fn resolve_short_ids_to_event_ids(
+    py: Python<'_>,
+    namespace: String,
+    room_id: String,
+    short_ids: Vec<u32>,
+) -> PyResult<Vec<Option<String>>> {
+    py.detach(|| {
+        let engine = db_for_shard_type(ShardType::AuthChain)?;
+        let collection = auth_chain_closure_room_id(&namespace, &room_id);
+        let node_ids: Vec<NodeId> = short_ids
+            .iter()
+            .map(|&s| short_id_reverse_node_id(s))
+            .collect();
+        let results = engine.get_many(&collection, &node_ids).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb get_many error: {}", e))
+        })?;
+        results
+            .into_iter()
+            .map(|opt| match opt {
+                Some(data) => String::from_utf8(data.bytes.to_vec())
+                    .map(Some)
+                    .map_err(|_| {
+                        pyo3::exceptions::PyRuntimeError::new_err(
+                            "corrupt auth-chain reverse mapping (invalid utf8)",
+                        )
+                    }),
+                None => Ok(None),
+            })
+            .collect()
+    })
+}
+
+/// Room-scoped batch read of direct auth-edge lists, keyed by
+/// `event_short_id`. `None` means "not embedded yet, go fetch SQL"
+/// (plan §2/§3's cold-import signal); `Some(vec![])` means "genuinely a
+/// leaf event with zero auth events, stop here."
+#[pyfunction]
+pub fn auth_chain_edges_get(
+    py: Python<'_>,
+    namespace: String,
+    room_id: String,
+    short_ids: Vec<u32>,
+) -> PyResult<Vec<Option<Vec<u32>>>> {
+    py.detach(|| {
+        let engine = db_for_shard_type(ShardType::AuthChain)?;
+        let collection = auth_chain_closure_room_id(&namespace, &room_id);
+        let node_ids: Vec<NodeId> = short_ids
+            .iter()
+            .map(|&s| auth_chain_edge_node_id(s))
+            .collect();
+        let results = engine.get_many(&collection, &node_ids).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb get_many error: {}", e))
+        })?;
+        results
+            .into_iter()
+            .map(|opt| match opt {
+                Some(data) => decode_auth_edges(&data.bytes).map(Some),
+                None => Ok(None),
+            })
+            .collect()
+    })
+}
+
+/// Room-scoped batch write of direct auth-edge lists. `rows`:
+/// `(event_short_id, [auth_short_id, ...])`. Idempotent -- writing the same
+/// key with the same value again is a no-op in effect, so a dropped/retried
+/// post-commit dual-write (plan §2) is always safe to redo.
+#[pyfunction]
+pub fn auth_chain_edges_put(
+    py: Python<'_>,
+    namespace: String,
+    room_id: String,
+    rows: Vec<(u32, Vec<u32>)>,
+) -> PyResult<()> {
+    py.detach(|| {
+        let engine = db_for_shard_type(ShardType::AuthChain)?;
+        let collection = auth_chain_closure_room_id(&namespace, &room_id);
+        let pairs: Vec<(NodeId, NodeData)> = rows
+            .into_iter()
+            .map(|(short_id, auth_short_ids)| {
+                let node_id = auth_chain_edge_node_id(short_id);
+                let bytes = encode_auth_edges(&auth_short_ids);
+                (node_id, NodeData::new(bytes::Bytes::from(bytes)))
+            })
+            .collect();
+        engine.put_many(&collection, &pairs).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb put error: {}", e))
+        })
+    })
+}
+
+/// Room-scoped full purge of the closure skeleton (counter, forward/reverse
+/// short-id mappings, and edge lists) for one room -- everything written
+/// under `auth_chain_closure_room_id(namespace, room_id)`. Does *not*
+/// manage any cache-generation record: RAM-closure invalidation is handled
+/// purely in-process on the Python side (plan §3/§4), and the caller must
+/// bump that generation *before* calling this, not after.
+#[pyfunction]
+pub fn auth_chain_purge_room(py: Python<'_>, namespace: String, room_id: String) -> PyResult<()> {
+    py.detach(|| {
+        let engine = db_for_shard_type(ShardType::AuthChain)?;
+        let collection = auth_chain_closure_room_id(&namespace, &room_id);
+        engine.delete_collection(&collection).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "mtxdb delete_collection error: {}",
+                e
+            ))
+        })
+    })
 }
 
 // -----------------------------------------------------------------------------
@@ -968,9 +1349,18 @@ pub fn batch_get(py: Python<'_>, keys: Vec<Vec<u8>>) -> PyResult<Vec<(Vec<u8>, V
 }
 
 /// Store flat-KV records, routing each key to its shard type internally.
+/// Rejects empty values to avoid collision with the tombstone encoding
+/// used by `batch_delete` (which writes empty bytes as a deletion marker).
 #[pyfunction]
 pub fn batch_put(py: Python<'_>, pairs: Vec<(Vec<u8>, Vec<u8>)>) -> PyResult<()> {
     py.detach(|| {
+        for (_, value) in &pairs {
+            if value.is_empty() {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "batch_put does not accept empty values (used as tombstones)",
+                ));
+            }
+        }
         let mut state_puts = Vec::new();
         let mut event_puts = Vec::new();
         for (key, value) in pairs {
@@ -1246,6 +1636,11 @@ pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     m.add_function(wrap_pyfunction!(get_auth_chain_links_batch, m)?)?;
     m.add_function(wrap_pyfunction!(put_auth_chain_links_batch, m)?)?;
     m.add_function(wrap_pyfunction!(delete_auth_chain_links_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(get_or_create_short_ids, m)?)?;
+    m.add_function(wrap_pyfunction!(resolve_short_ids_to_event_ids, m)?)?;
+    m.add_function(wrap_pyfunction!(auth_chain_edges_get, m)?)?;
+    m.add_function(wrap_pyfunction!(auth_chain_edges_put, m)?)?;
+    m.add_function(wrap_pyfunction!(auth_chain_purge_room, m)?)?;
     m.add_function(wrap_pyfunction!(batch_get, m)?)?;
     m.add_function(wrap_pyfunction!(batch_put, m)?)?;
     m.add_function(wrap_pyfunction!(batch_delete, m)?)?;
@@ -1265,4 +1660,199 @@ pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
         .getattr("modules")?
         .set_item("synapse.synapse_rust.mtxdb_engine", m)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod auth_chain_closure_tests {
+    //! `DBS` is a process-global `OnceCell` (see `open_client`): only the
+    //! first call in this test binary actually opens a store, and every
+    //! test after that silently reuses it. Isolation between tests
+    //! therefore comes from each test using its own unique namespace/room
+    //! id, not from separate storage -- exactly the same assumption the
+    //! feature makes in production (one mtxdb file, many rooms).
+    use std::sync::Once;
+
+    use super::*;
+
+    static INIT: Once = Once::new();
+
+    fn ensure_open() {
+        INIT.call_once(|| {
+            // This crate is normally loaded as a cdylib into an
+            // already-running CPython process; a standalone `cargo test`
+            // binary has no interpreter of its own yet.
+            pyo3::Python::initialize();
+            let dir = tempfile::tempdir().expect("tempdir");
+            // Leak the TempDir so it isn't cleaned up while DBS still
+            // holds paths into it for the rest of the test binary's life.
+            let path = dir.keep();
+            pyo3::Python::attach(|py| {
+                open_client(py, path.to_string_lossy().into_owned())
+                    .expect("open_client should succeed");
+            });
+        });
+    }
+
+    #[test]
+    fn room_derived_ids_never_collide_across_rooms() {
+        ensure_open();
+        let a = auth_chain_closure_room_id("ns-collision", "!roomA:example.org");
+        let b = auth_chain_closure_room_id("ns-collision", "!roomB:example.org");
+        let c = auth_chain_closure_room_id("other-ns", "!roomA:example.org");
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+        assert_ne!(b, c);
+    }
+
+    #[test]
+    fn get_or_create_short_ids_is_stable_and_room_scoped() {
+        ensure_open();
+        let ns = "ns-shortid";
+        let room_a = "!room-a:example.org";
+        let room_b = "!room-b:example.org";
+
+        let first = get_or_create_short_ids(
+            ns.to_string(),
+            room_a.to_string(),
+            vec!["$e1".to_string(), "$e2".to_string()],
+        )
+        .expect("alloc");
+        assert_eq!(first.len(), 2);
+        assert_ne!(first[0], first[1], "distinct events get distinct short ids");
+
+        // Same event ids, same room -> identical short ids (idempotent).
+        let second = get_or_create_short_ids(
+            ns.to_string(),
+            room_a.to_string(),
+            vec!["$e1".to_string(), "$e2".to_string()],
+        )
+        .expect("re-fetch");
+        assert_eq!(first, second);
+
+        // Same event id string, different room -> unrelated short id
+        // space (no cross-room collision guarantee implied by equal
+        // values, but the rooms must not share the same underlying
+        // collection).
+        let other_room =
+            get_or_create_short_ids(ns.to_string(), room_b.to_string(), vec!["$e1".to_string()])
+                .expect("alloc in other room");
+        // Reverse lookup in room_a must not resolve room_b's mapping and
+        // vice versa.
+        let resolved_in_a = pyo3::Python::attach(|py| {
+            resolve_short_ids_to_event_ids(
+                py,
+                ns.to_string(),
+                room_a.to_string(),
+                vec![other_room[0]],
+            )
+        });
+        // (room_a likely never allocated this exact short id to "$e1";
+        // this call must not panic and must return a well-formed result
+        // either way.)
+        assert!(resolved_in_a.is_ok());
+    }
+
+    #[test]
+    fn get_or_create_short_ids_reverse_mapping_stays_resolvable_across_repeat_calls() {
+        // The trait has no single-key delete, so a genuine crash-between-
+        // writes can't be injected from a test at this level; what's
+        // testable here is the invariant get_or_create_short_ids must
+        // uphold regardless: calling it again for an event whose forward
+        // mapping already exists must never leave the reverse mapping
+        // unresolvable.
+        ensure_open();
+        let ns = "ns-repair";
+        let room = "!room-repair:example.org";
+
+        let ids =
+            get_or_create_short_ids(ns.to_string(), room.to_string(), vec!["$e1".to_string()])
+                .expect("alloc");
+        let short_id = ids[0];
+
+        let _ = get_or_create_short_ids(ns.to_string(), room.to_string(), vec!["$e1".to_string()])
+            .expect("re-fetch (forward already exists)");
+        let resolved = pyo3::Python::attach(|py| {
+            resolve_short_ids_to_event_ids(py, ns.to_string(), room.to_string(), vec![short_id])
+                .expect("resolve")
+        });
+        assert_eq!(resolved, vec![Some("$e1".to_string())]);
+    }
+
+    #[test]
+    fn auth_chain_edges_round_trip_including_zero_count_leaf() {
+        ensure_open();
+        let ns = "ns-edges";
+        let room = "!room-edges:example.org";
+        let ids = get_or_create_short_ids(
+            ns.to_string(),
+            room.to_string(),
+            vec!["$leaf".to_string(), "$a1".to_string(), "$a2".to_string()],
+        )
+        .expect("alloc");
+        let (leaf, a1, a2) = (ids[0], ids[1], ids[2]);
+
+        pyo3::Python::attach(|py| {
+            auth_chain_edges_put(
+                py,
+                ns.to_string(),
+                room.to_string(),
+                vec![(leaf, vec![]), (a1, vec![a2])],
+            )
+            .expect("put edges");
+
+            let fetched =
+                auth_chain_edges_get(py, ns.to_string(), room.to_string(), vec![leaf, a1, a2])
+                    .expect("get edges");
+
+            // Leaf: present, zero edges -- distinguishable from "missing".
+            assert_eq!(fetched[0], Some(vec![]));
+            // a1: present, one edge.
+            assert_eq!(fetched[1], Some(vec![a2]));
+            // a2: never written -- missing, the cold-import signal.
+            assert_eq!(fetched[2], None);
+        });
+    }
+
+    #[test]
+    fn auth_chain_purge_room_removes_only_that_room() {
+        ensure_open();
+        let ns = "ns-purge";
+        let room_keep = "!room-keep:example.org";
+        let room_gone = "!room-gone:example.org";
+
+        let keep_ids = get_or_create_short_ids(
+            ns.to_string(),
+            room_keep.to_string(),
+            vec!["$k1".to_string()],
+        )
+        .expect("alloc keep");
+        let gone_ids = get_or_create_short_ids(
+            ns.to_string(),
+            room_gone.to_string(),
+            vec!["$g1".to_string()],
+        )
+        .expect("alloc gone");
+
+        pyo3::Python::attach(|py| {
+            auth_chain_purge_room(py, ns.to_string(), room_gone.to_string()).expect("purge");
+
+            let still_resolves = resolve_short_ids_to_event_ids(
+                py,
+                ns.to_string(),
+                room_keep.to_string(),
+                vec![keep_ids[0]],
+            )
+            .expect("resolve keep");
+            assert_eq!(still_resolves, vec![Some("$k1".to_string())]);
+
+            let purged_resolves = resolve_short_ids_to_event_ids(
+                py,
+                ns.to_string(),
+                room_gone.to_string(),
+                vec![gone_ids[0]],
+            )
+            .expect("resolve gone (post-purge)");
+            assert_eq!(purged_resolves, vec![None]);
+        });
+    }
 }

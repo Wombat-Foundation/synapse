@@ -109,7 +109,23 @@ def _encode_event_json_record(
 
 
 def _decode_event_json_record(value: bytes) -> tuple[str, str, int | None]:
-    """Decode an event_json payload returned by `batch_get`."""
+    """Decode an event_json payload returned by `batch_get`.
+
+    Handles both the current format and the legacy format (with a leading
+    0x01 marker byte).
+    """
+    # Try decoding directly first (current format)
+    try:
+        return _decode_event_json_record_inner(value)
+    except RuntimeError as e:
+        if "truncated" in str(e) and len(value) > 1:
+            # Try stripping a potential legacy 0x01 marker byte
+            return _decode_event_json_record_inner(value[1:])
+        raise
+
+
+def _decode_event_json_record_inner(value: bytes) -> tuple[str, str, int | None]:
+    """Inner decode logic without legacy handling."""
     if len(value) < 8:
         raise RuntimeError("truncated event_json record")
     (format_version_raw,) = struct.unpack(">i", value[0:4])
@@ -128,6 +144,8 @@ def put_event_json_batch(
     engine_name: str | None,
     namespace: str,
     rows: list[tuple[str, str, str, int | None]],
+    *,
+    sync: bool = False,
 ) -> None:
     """`rows`: `(event_id, internal_metadata, json, format_version)`.
     Called from the event persister only (the sole writer of `event_json`),
@@ -135,12 +153,16 @@ def put_event_json_batch(
     `_store_state_hamt_root_embedded_txn`: an mtxdb call is local, no
     network round-trip to justify deferring past commit.
 
-    Deliberately does not call sync() after the write: unlike every other
+    By default, does not call sync() after the write: unlike every other
     embedded sidecar, get_event_json_batch's caller falls back to SQL on a
     miss (see its docstring), so an unflushed write lost to a crash before
     the next fsync just means a slower read via that fallback, not silent
     data loss -- not worth paying a synchronous fsync on this hot a path
     for every persisted event.
+
+    For censorship/expiry operations, pass `sync=True` to ensure the
+    replacement is durable before returning, preventing a crash from
+    leaving stale pre-censor content in the mirror.
     """
     from synapse.synapse_rust.mtxdb_engine import batch_put
 
@@ -152,6 +174,9 @@ def put_event_json_batch(
         for event_id, internal_metadata, json, format_version in rows
     ]
     batch_put(pairs)
+
+    if sync:
+        maybe_sync(SyncTier.DURABLE)
 
 
 def get_event_json_batch(

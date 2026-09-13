@@ -92,20 +92,48 @@ trial_no_extra_tests = [
     }
 ]
 
-# trial_mtxdb_tests removed: the dedicated trial-mtxdb job in tests.yml
-# already runs the full suite against mtxdb. This matrix entry duplicated it.
+# trial_mtxdb_tests: test mtxdb on oldest and newest Python versions
+# in PRs, and all versions on non-PR runs. The dedicated trial-mtxdb job
+# in tests.yml runs on Python 3.12; this matrix ensures coverage on the
+# oldest (3.10) and newest (3.13) supported versions too.
+trial_mtxdb_tests = [
+    {
+        "python-version": "3.10",
+        "database": "mtxdb",
+        "extras": "all",
+    },
+    {
+        "python-version": "3.13",
+        "database": "mtxdb",
+        "extras": "all",
+    },
+]
+
+if not IS_PR:
+    # Check all supported Python versions.
+    trial_mtxdb_tests.extend(
+        {
+            "python-version": version,
+            "database": "mtxdb",
+            "extras": "all",
+        }
+        for version in ("3.11", "3.12", "3.13")
+    )
 
 print("::group::Calculated trial jobs")
 print(
     json.dumps(
-        trial_sqlite_tests + trial_postgres_tests + trial_no_extra_tests,
+        trial_sqlite_tests
+        + trial_postgres_tests
+        + trial_no_extra_tests
+        + trial_mtxdb_tests,
         indent=4,
     )
 )
 print("::endgroup::")
 
 test_matrix = json.dumps(
-    trial_sqlite_tests + trial_postgres_tests + trial_no_extra_tests
+    trial_sqlite_tests + trial_postgres_tests + trial_no_extra_tests + trial_mtxdb_tests
 )
 set_output("trial_test_matrix", test_matrix)
 

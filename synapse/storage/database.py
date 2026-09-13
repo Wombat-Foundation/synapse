@@ -642,11 +642,12 @@ class LoggingTransaction:
             sql_query_timer.labels(
                 verb=sql.split()[0], **{SERVER_NAME_LABEL: self.server_name}
             ).observe(secs)
-            try:
-                rowcount = self.txn.rowcount
-            except Exception:
-                rowcount = 0
-            _track_table_op(sql, secs, rowcount)
+            if os.environ.get("SYNAPSE_PG_TIMINGS"):
+                try:
+                    rowcount = self.txn.rowcount
+                except Exception:
+                    rowcount = 0
+                _track_table_op(sql, secs, rowcount)
 
     def close(self) -> None:
         self.txn.close()

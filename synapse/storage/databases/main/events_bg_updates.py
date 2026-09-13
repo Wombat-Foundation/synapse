@@ -3154,6 +3154,7 @@ class EventsBackgroundUpdatesStore(
                             )
                             for event_id, event_dict, event in events_to_write
                         ],
+                        sync=True,
                     )
             # Always update the progress even if we re-sign nothing.
             self.db_pool.updates._background_update_progress_txn(

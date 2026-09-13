@@ -146,6 +146,23 @@ class EventForwardExtremitiesStore(
             state_groups = get_state_group_for_events_batch(
                 self._embedded_hamt_engine, self._embedded_hamt_namespace, event_ids
             )
+            # During the event-to-state-group migration, some events may not
+            # have been copied to mtxdb yet. Fall back to SQL for any missing
+            # entries to avoid silently dropping extremities.
+            missing = [eid for eid in event_ids if eid not in state_groups]
+            if missing:
+                sql_rows = cast(
+                    list[tuple[str, int]],
+                    await self.db_pool.simple_select_many_batch(
+                        table="event_to_state_groups",
+                        column="event_id",
+                        iterable=missing,
+                        keyvalues={},
+                        retcols=("event_id", "state_group"),
+                        desc="get_forward_extremities_for_room_state_groups_fallback",
+                    ),
+                )
+                state_groups.update(sql_rows)
         else:
             sql_rows = cast(
                 list[tuple[str, int]],

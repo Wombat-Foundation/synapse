@@ -411,9 +411,11 @@ class RedactionTestCase(unittest.HomeserverTestCase):
         self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
         mtxdb_engine.open_client(tmpdir)
         self.store._embedded_event_json_enabled = True
+        self.store._embedded_hamt_engine = "mtxdb"
         persist_store = self.hs.get_datastores().persist_events
         assert persist_store is not None
         persist_store._embedded_event_json_enabled = True
+        persist_store._embedded_hamt_engine = "mtxdb"
 
         self.inject_room_member(self.room1, self.u_alice, Membership.JOIN)
         msg_event = self.inject_message(self.room1, self.u_alice, "t")

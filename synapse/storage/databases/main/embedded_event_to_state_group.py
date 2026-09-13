@@ -109,7 +109,8 @@ def put_event_to_state_group_batch(
     `maybe_sync(SyncTier.DURABLE)` once after all of their embedded writes,
     not once per helper call.
     """
-    from synapse.synapse_rust.mtxdb_engine import batch_put
+    engine = get_embedded_engine(engine_name)
+    batch_put = engine.batch_put
 
     pairs = [
         (
@@ -127,7 +128,8 @@ def get_state_group_for_events_batch(
     """Returns `event_id -> state_group` for every id found in the embedded
     engine; a missing id is simply absent from the result.
     """
-    from synapse.synapse_rust.mtxdb_engine import batch_get
+    engine = get_embedded_engine(engine_name)
+    batch_get = engine.batch_get
 
     keys = [_event_to_state_group_key(namespace, event_id) for event_id in event_ids]
     key_to_event_id = dict(zip(keys, event_ids))
@@ -156,9 +158,10 @@ def delete_event_to_state_group_batch(
     """
     if not event_ids:
         return
-    keys = [_event_to_state_group_key(namespace, event_id) for event_id in event_ids]
-    from synapse.synapse_rust.mtxdb_engine import batch_delete
+    engine = get_embedded_engine(engine_name)
+    batch_delete = engine.batch_delete
 
+    keys = [_event_to_state_group_key(namespace, event_id) for event_id in event_ids]
     batch_delete(keys)
 
 
@@ -219,7 +222,8 @@ def get_referenced_state_groups_batch(
     the embedded-engine equivalent of the SQL `get_referenced_state_groups`
     reverse lookup, backed by the counter instead of a scan/index.
     """
-    from synapse.synapse_rust.mtxdb_engine import batch_get
+    engine = get_embedded_engine(engine_name)
+    batch_get = engine.batch_get
 
     if not state_groups:
         return set()

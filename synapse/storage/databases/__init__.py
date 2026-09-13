@@ -20,6 +20,7 @@
 #
 
 import logging
+import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Generic, TypeVar
 
@@ -37,6 +38,21 @@ if TYPE_CHECKING:
     from synapse.storage.databases.main import DataStore
 
 logger = logging.getLogger(__name__)
+
+# Callback for test-only database timing profiling. Set by the test harness
+# when SYNAPSE_PG_TIMINGS is enabled, to avoid coupling production code to
+# the test suite.
+_pg_timing_callback: Callable[[str, float], None] | None = None
+
+
+def set_pg_timing_callback(callback: Callable[[str, float], None] | None) -> None:
+    """Set the callback for database timing profiling.
+
+    This is intended for test harnesses only. Production code should never
+    call this.
+    """
+    global _pg_timing_callback
+    _pg_timing_callback = callback
 
 
 DataStoreT = TypeVar("DataStoreT", bound=SQLBaseStore, covariant=True)
@@ -80,21 +96,13 @@ class Databases(Generic[DataStoreT]):
 
         server_name = hs.hostname
 
+        _pgt = _pg_timing_callback
+
         for database_config in hs.config.database.databases:
             db_name = database_config.name
             engine = create_engine(database_config.config)
 
-            import os as _os
-            import time as _time
-
-            _pgt: Callable[[str, float], None] | None = None
-            if _os.environ.get("SYNAPSE_PG_TIMINGS"):
-                try:
-                    from tests.server import _pg_timing as _pgt
-                except ImportError:
-                    pass
-
-            _conn_t = _time.monotonic()
+            _conn_t = time.monotonic()
             with make_conn(
                 db_config=database_config,
                 engine=engine,
@@ -102,15 +110,15 @@ class Databases(Generic[DataStoreT]):
                 server_name=server_name,
             ) as db_conn:
                 if _pgt is not None:
-                    _pgt("make_conn", _time.monotonic() - _conn_t)
+                    _pgt("make_conn", time.monotonic() - _conn_t)
 
-                _t = _time.monotonic()
+                _t = time.monotonic()
                 logger.info("[database config %r]: Checking database server", db_name)
                 engine.check_database(db_conn)
                 if _pgt is not None:
-                    _pgt("check_database", _time.monotonic() - _t)
+                    _pgt("check_database", time.monotonic() - _t)
 
-                _t = _time.monotonic()
+                _t = time.monotonic()
                 logger.info(
                     "[database config %r]: Preparing for databases %r",
                     db_name,
@@ -123,7 +131,7 @@ class Databases(Generic[DataStoreT]):
                     databases=database_config.databases,
                 )
                 if _pgt is not None:
-                    _pgt("prepare_database", _time.monotonic() - _t)
+                    _pgt("prepare_database", time.monotonic() - _t)
 
                 database = DatabasePool(hs, database_config, engine)
 
