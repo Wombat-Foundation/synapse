@@ -133,6 +133,7 @@ class EmbeddedHamtWorkerGuardTestCase(unittest.TestCase):
         worker_app: str | None = None,
         instance_map: dict | None = None,
         stream_writers: dict | None = None,
+        run_background_tasks_on: str | None = None,
         embedded_hamt_engine: str | None = "mtxdb",
     ) -> None:
         """Build a WorkerConfig and call read_config, triggering the guard."""
@@ -151,6 +152,8 @@ class EmbeddedHamtWorkerGuardTestCase(unittest.TestCase):
             config["instance_map"] = instance_map
         if stream_writers is not None:
             config["stream_writers"] = stream_writers
+        if run_background_tasks_on is not None:
+            config["run_background_tasks_on"] = run_background_tasks_on
         worker_config.read_config(config, allow_secrets_in_config=True)
 
     def test_worker_app_with_single_events_writer_ok(self) -> None:
@@ -184,16 +187,54 @@ class EmbeddedHamtWorkerGuardTestCase(unittest.TestCase):
                 stream_writers={"events": ["event_persister1", "event_persister2"]},
             )
 
-    def test_single_explicit_events_writer_ok(self) -> None:
-        """embedded_hamt + exactly one explicitly-configured events writer
-        → no error."""
+    def test_single_explicit_events_writer_not_master_raises(self) -> None:
+        """embedded_hamt + exactly one events writer, but it isn't the main
+        process → ConfigError: the embedded-HAMT background migration's
+        poll loop only ever runs on main (see synapse/app/homeserver.py),
+        so main must also be the mtxdb writer or that migration crashes
+        writing through main's read-only-opened store."""
+        with self.assertRaises(ConfigError):
+            self._make_worker_config(
+                worker_app="synapse.app.generic_worker",
+                instance_map={
+                    "main": {"host": "127.0.0.1", "port": 8008},
+                    "event_persister1": {"host": "127.0.0.1", "port": 8009},
+                },
+                stream_writers={"events": "event_persister1"},
+            )
+
+    def test_single_explicit_events_writer_is_master_ok(self) -> None:
+        """embedded_hamt + exactly one events writer, and it's explicitly
+        the main process → no error."""
         self._make_worker_config(
             worker_app="synapse.app.generic_worker",
-            instance_map={
-                "main": {"host": "127.0.0.1", "port": 8008},
-                "event_persister1": {"host": "127.0.0.1", "port": 8009},
-            },
-            stream_writers={"events": "event_persister1"},
+            instance_map={"main": {"host": "127.0.0.1", "port": 8008}},
+            stream_writers={"events": "master"},
+        )
+
+    def test_run_background_tasks_on_other_worker_raises(self) -> None:
+        """embedded_hamt + a single events writer that is main, but
+        run_background_tasks_on names a different instance → ConfigError:
+        that instance would run its own independent background-updates
+        poll loop, concurrently with main's own unconditional one, with no
+        cross-instance coordination on the embedded-HAMT-writing rows."""
+        with self.assertRaises(ConfigError):
+            self._make_worker_config(
+                worker_app="synapse.app.generic_worker",
+                instance_map={
+                    "main": {"host": "127.0.0.1", "port": 8008},
+                    "background_worker1": {"host": "127.0.0.1", "port": 8009},
+                },
+                run_background_tasks_on="background_worker1",
+            )
+
+    def test_run_background_tasks_on_master_explicit_ok(self) -> None:
+        """embedded_hamt + single events writer (main) + run_background_tasks_on
+        explicitly set to main → no error."""
+        self._make_worker_config(
+            worker_app="synapse.app.generic_worker",
+            instance_map={"main": {"host": "127.0.0.1", "port": 8008}},
+            run_background_tasks_on="master",
         )
 
     def test_single_process_ok(self) -> None:

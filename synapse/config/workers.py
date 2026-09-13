@@ -472,6 +472,70 @@ class WorkerConfig(Config):
                 "embedded_hamt.engine."
             )
 
+        # A second, independent constraint on the same feature: the
+        # embedded-HAMT-to-SQL backfill migration (state/store.py's
+        # EMBEDDED_HAMT_MIGRATION_UPDATE_NAME) runs through Synapse's
+        # generic background-updates framework, whose poll loop is only
+        # ever started by the *main* process
+        # (synapse/app/homeserver.py's start() -- generic_worker.py never
+        # calls it, and `run_background_tasks_on` does not change this).
+        # So the migration always executes on "master", regardless of
+        # which instance StateGroupDataStore.__init__ decided is the mtxdb
+        # writer. If master itself is not the sole events writer (the
+        # common case when event persistence is delegated to a dedicated
+        # worker), master opens mtxdb read-only and the migration crashes
+        # the first time it tries to write. Require master to be that sole
+        # writer whenever mtxdb is in play in a worker deployment, closing
+        # that gap loudly instead of leaving it to crash a background
+        # update on a deployment that already passes the check above.
+        #
+        # That's not the whole story, though: `run_background_tasks_on` can
+        # independently name a *different* instance to also run its own
+        # background-updates poll loop (see events_bg_updates.py's
+        # `run_background_tasks`-gated enqueue calls) -- and main's own
+        # loop above runs unconditionally regardless of that setting, so
+        # the two can run concurrently. Stock Synapse gets away with that
+        # because its background-update handlers are plain SQL, safe under
+        # concurrent execution by the database's own transaction
+        # isolation; mtxdb writes have no such safety net (no
+        # cross-instance coordination exists in this fork at all -- see
+        # BackgroundUpdater/do_next_background_update). So this deployment
+        # shape needs *no* background-updates-capable instance other than
+        # main to exist: require `run_background_tasks_on` to be unset or
+        # explicitly "main" too, whenever embedded_hamt is in play in a
+        # worker deployment.
+        background_tasks_instance = (
+            config.get("run_background_tasks_on") or MAIN_PROCESS_INSTANCE_NAME
+        )
+        if embedded_hamt_engine and (
+            self.worker_app is not None or len(self.instance_map) > 0
+        ):
+            if self.writers.events != [MAIN_PROCESS_INSTANCE_NAME]:
+                raise ConfigError(
+                    f"embedded_hamt.engine is set to {embedded_hamt_engine!r} in a "
+                    "worker deployment, but writers.events is "
+                    f"{self.writers.events!r}, not just the main process. The "
+                    "embedded-HAMT background migration always runs on the main "
+                    "process (Synapse's background-updates poll loop is only "
+                    "ever started there), so main must also be the sole mtxdb "
+                    "writer or that migration crashes trying to write through a "
+                    "read-only-opened store. Make the main process the sole "
+                    "events writer, or remove embedded_hamt.engine."
+                )
+            if background_tasks_instance != MAIN_PROCESS_INSTANCE_NAME:
+                raise ConfigError(
+                    f"embedded_hamt.engine is set to {embedded_hamt_engine!r} in a "
+                    f"worker deployment, but run_background_tasks_on is "
+                    f"{background_tasks_instance!r}, not the main process. That "
+                    "instance would run its own independent background-updates "
+                    "poll loop (see events_bg_updates.py's run_background_tasks-"
+                    "gated enqueue calls), concurrently with main's own "
+                    "unconditional one, racing on the same embedded-HAMT-writing "
+                    "rows with no cross-instance coordination. Leave "
+                    "run_background_tasks_on unset (or set it to the main "
+                    "process), or remove embedded_hamt.engine."
+                )
+
         self.events_shard_config = RoutableShardedWorkerHandlingConfig(
             self.writers.events
         )
