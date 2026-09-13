@@ -1,6 +1,7 @@
 from collections.abc import Iterable
 
 def open_client(path: str) -> None: ...
+def open_client_read_only(path: str) -> None: ...
 def put_state_hamt_nodes(
     namespace: str,
     room_prefix: bytes,

@@ -978,6 +978,65 @@ pub fn open_client(py: Python<'_>, path: String) -> PyResult<()> {
     })
 }
 
+/// Opens the mtxdb store read-only: no exclusive write lock is taken, so
+/// this can coexist with a concurrent writer process on the same
+/// directory (see `PackfileStorage::open_read_only`'s doc comment and
+/// `ShardPool::open_read_only`'s locking contract). Intended for
+/// read-only worker processes in a multi-worker deployment, paired with
+/// exactly one process opening the store writable via `open_client`.
+///
+/// A read-only-opened store's in-memory index is a snapshot from open
+/// time (or the last `refresh_state_hamt_collections_for_groups` call) --
+/// it does not see the writer's subsequent writes automatically. Callers
+/// on this path must rely on the existing corruption-detected
+/// retry-via-`refresh_collection` wiring (see that function's call site)
+/// to catch up, not assume live visibility.
+///
+/// Any write attempted through a read-only-opened `PackfileStorage`
+/// fails at the OS level (the underlying files are opened without write
+/// access) rather than corrupting anything -- this binding doesn't need
+/// to add its own guard against that.
+#[pyfunction]
+pub fn open_client_read_only(py: Python<'_>, path: String) -> PyResult<()> {
+    py.detach(|| {
+        if DBS.get().is_some() {
+            return Ok(());
+        }
+        let layout = DatabaseLayout::open(std::path::PathBuf::from(&path)).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("failed to open mtxdb layout: {}", e))
+        })?;
+        let open_pool = |pool| {
+            let path = layout.pool_dir(pool)?;
+            PackfileStorage::open_read_only(path)
+        };
+        let state = Arc::new(open_pool(ShardType::State).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "failed to open mtxdb state pool read-only: {}",
+                e
+            ))
+        })?);
+        let event_dag = Arc::new(open_pool(ShardType::EventDag).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "failed to open mtxdb event-dag pool read-only: {}",
+                e
+            ))
+        })?);
+        let auth_chain = Arc::new(open_pool(ShardType::AuthChain).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "failed to open mtxdb auth-chain pool read-only: {}",
+                e
+            ))
+        })?);
+        let _ = DBS.set(MtxdbPools {
+            state,
+            event_dag,
+            auth_chain,
+        });
+        let _ = ROOM_INDEX_DIR.set(std::path::PathBuf::from(&path).join("room_index"));
+        Ok(())
+    })
+}
+
 #[pyfunction]
 pub fn put_state_hamt_nodes(
     py: Python<'_>,
@@ -1865,6 +1924,7 @@ pub fn sync(py: Python<'_>) -> PyResult<()> {
 #[pyfunction]
 pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(open_client, m)?)?;
+    m.add_function(wrap_pyfunction!(open_client_read_only, m)?)?;
     m.add_function(wrap_pyfunction!(put_state_hamt_nodes, m)?)?;
     m.add_function(wrap_pyfunction!(get_state_hamt_nodes_batch, m)?)?;
     m.add_function(wrap_pyfunction!(get_auth_chain_links_batch, m)?)?;
