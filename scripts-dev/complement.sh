@@ -401,6 +401,9 @@ main() {
     export COMPLEMENT_SPAWN_HS_TIMEOUT_SECS=120
   else
     export PASS_SYNAPSE_COMPLEMENT_USE_WORKERS=
+    # Prefer the SYNAPSE_TEST_POSTGRES name used by tests/utils.py's
+    # in-process trial runner, falling back to the bare POSTGRES on-switch.
+    POSTGRES="${SYNAPSE_TEST_POSTGRES:-${SYNAPSE_POSTGRES:-${POSTGRES:-}}}"
     if [[ -n "$POSTGRES" ]]; then
       export PASS_SYNAPSE_COMPLEMENT_DATABASE=postgres
     else
@@ -437,6 +440,15 @@ main() {
   # config/database.py) but was never actually forwarded into the
   # container here -- treat it the same as SYNAPSE_EMBEDDED_HAMT_ENGINE=mtxdb
   # so it does something locally too.
+  #
+  # Also accept the SYNAPSE_TEST_* names used by tests/utils.py's in-process
+  # trial runner, so a single .env can drive both test runners instead of
+  # silently no-opping here while working there. The TEST var wins when both
+  # are set; the non-TEST (production on-switch) name is only a fallback.
+  SYNAPSE_MTXDB="${SYNAPSE_TEST_MTXDB:-${SYNAPSE_MTXDB:-}}"
+  SYNAPSE_EMBEDDED_HAMT_ENGINE="${SYNAPSE_TEST_EMBEDDED_HAMT_ENGINE:-${SYNAPSE_EMBEDDED_HAMT_ENGINE:-}}"
+  SYNAPSE_EMBEDDED_HAMT_PATH="${SYNAPSE_TEST_EMBEDDED_HAMT_PATH:-${SYNAPSE_EMBEDDED_HAMT_PATH:-}}"
+
   if [[ -n "${SYNAPSE_MTXDB:-}" && -z "$SYNAPSE_EMBEDDED_HAMT_ENGINE" ]]; then
     SYNAPSE_EMBEDDED_HAMT_ENGINE="mtxdb"
     SYNAPSE_EMBEDDED_HAMT_PATH="${SYNAPSE_EMBEDDED_HAMT_PATH:-${SYNAPSE_MTXDB_PATH:-}}"
