@@ -283,17 +283,38 @@ class ClosureCache:
         # registry, which this module (plain functions, no store/HS
         # handle) doesn't carry. A follow-up can size this via the
         # existing `*_cache_capacity` config convention (plan §6).
-        self._cache: OrderedDict[tuple[int, int], BitMap] = OrderedDict()
+        #
+        # Keyed by (namespace, room_id, generation, short_id) -- NOT just
+        # (generation, short_id). short_id is only unique within one room's
+        # own mtxdb collection (every room's counter independently starts
+        # at 1), and generation defaults to 0 for every room that's never
+        # been purged, so two different rooms' short_id=1, 2, 3... land on
+        # the exact same (generation, short_id) pair. A single process-wide
+        # ClosureCache instance keyed without namespace/room_id will serve
+        # one room's cached ancestor closure for another room's identical
+        # short_id -- silently, since a cache hit never re-walks or
+        # re-verifies anything. Namespace and room_id must be part of the
+        # key for this cache to be safe with more than one room per process.
+        self._cache: OrderedDict[tuple[str, str, int, int], BitMap] = OrderedDict()
 
-    def _get(self, generation: int, short_id: int) -> BitMap | None:
-        key = (generation, short_id)
+    def _get(
+        self, namespace: str, room_id: str, generation: int, short_id: int
+    ) -> BitMap | None:
+        key = (namespace, room_id, generation, short_id)
         value = self._cache.get(key)
         if value is not None:
             self._cache.move_to_end(key)
         return value
 
-    def _put(self, generation: int, short_id: int, closure: BitMap) -> None:
-        key = (generation, short_id)
+    def _put(
+        self,
+        namespace: str,
+        room_id: str,
+        generation: int,
+        short_id: int,
+        closure: BitMap,
+    ) -> None:
+        key = (namespace, room_id, generation, short_id)
         self._cache[key] = closure
         self._cache.move_to_end(key)
         while len(self._cache) > self._max_size:
@@ -324,7 +345,7 @@ class ClosureCache:
         swallow it here.
         """
         generation = _room_generation(namespace, room_id)
-        cached = self._get(generation, event_short_id)
+        cached = self._get(namespace, room_id, generation, event_short_id)
         if cached is not None:
             return cached
 
@@ -333,7 +354,7 @@ class ClosureCache:
         )
         if not is_complete:
             raise IncompleteAuthGraph(event_short_id)
-        self._put(generation, event_short_id, closure)
+        self._put(namespace, room_id, generation, event_short_id, closure)
         return closure
 
     def get_closures_batch(
@@ -352,7 +373,7 @@ class ClosureCache:
         memo: dict[int, tuple[BitMap, bool]] = {}
         out: dict[int, BitMap] = {}
         for short_id in event_short_ids:
-            cached = self._get(generation, short_id)
+            cached = self._get(namespace, room_id, generation, short_id)
             if cached is not None:
                 out[short_id] = cached
                 continue
@@ -361,7 +382,7 @@ class ClosureCache:
             )
             if not is_complete:
                 raise IncompleteAuthGraph(short_id)
-            self._put(generation, short_id, closure)
+            self._put(namespace, room_id, generation, short_id, closure)
             out[short_id] = closure
         return out
 
@@ -384,7 +405,7 @@ class ClosureCache:
         if event_short_id in memo:
             return memo[event_short_id]
 
-        cached = self._get(generation, event_short_id)
+        cached = self._get(namespace, room_id, generation, event_short_id)
         if cached is not None:
             memo[event_short_id] = (cached, True)
             return cached, True
@@ -397,9 +418,24 @@ class ClosureCache:
             # either (see _fetch_direct_edges). Distinct from "not
             # embedded yet", which _fetch_direct_edges resolves via
             # cold-import before ever returning None.
+            logger.warning(
+                "auth-chain closure walk: genuine gap at short_id=%s "
+                "(room=%s namespace=%s) -- no SQL event_auth rows and no "
+                "embedded edges; treating as incomplete",
+                event_short_id,
+                room_id,
+                namespace,
+            )
             result = (BitMap(), False)
             memo[event_short_id] = result
             return result
+
+        logger.warning(
+            "auth-chain closure walk: short_id=%s has %d direct auth edge(s): %s",
+            event_short_id,
+            len(auth_short_ids),
+            auth_short_ids,
+        )
 
         closure = BitMap()
         complete = True

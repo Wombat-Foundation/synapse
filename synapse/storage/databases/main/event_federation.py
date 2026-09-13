@@ -314,6 +314,15 @@ class EventFederationWorkerStore(
         if not initial_events:
             return set()
 
+        logger.warning(
+            "get_auth_chain_ids: using EMBEDDED CLOSURES path for room=%s "
+            "namespace=%s initial_events=%s include_given=%s",
+            room_id,
+            embedded_hamt_namespace,
+            initial_events,
+            include_given,
+        )
+
         engine_name = self._embedded_hamt_engine
         short_ids = get_or_create_short_ids(
             engine_name, embedded_hamt_namespace, room_id, initial_events
@@ -349,6 +358,14 @@ class EventFederationWorkerStore(
         include_given: bool,
     ) -> set[str]:
         """Calculates the auth chain IDs using the chain index."""
+
+        logger.warning(
+            "get_auth_chain_ids: using LEGACY COVER-INDEX (chain_id/SQL) path "
+            "for room=%s event_ids=%s include_given=%s",
+            room_id,
+            list(event_ids),
+            include_given,
+        )
 
         # First we look up the chain ID/sequence numbers for the given events.
 
@@ -590,6 +607,12 @@ class EventFederationWorkerStore(
 
         This is used when we don't have a cover index for the room.
         """
+        logger.warning(
+            "get_auth_chain_ids: using OLDEST no-cover-index SQL fallback "
+            "for event_ids=%s include_given=%s",
+            list(event_ids),
+            include_given,
+        )
         if include_given:
             results = set(event_ids)
         else:

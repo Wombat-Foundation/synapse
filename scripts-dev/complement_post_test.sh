@@ -44,6 +44,12 @@ stats_dir="${repo_root}/.tmp/complement"
 stats_log="${stats_dir}/pg_stats.log"
 mkdir -p "$stats_dir"
 
+# Synapse's own application log (not the Go test's output) -- the only
+# place the closure-cache's diagnostic logger.warning() calls end up.
+# Not captured anywhere else: Complement's own logs.jsonl is the *test*
+# framework's output, and COMPLEMENT_ALWAYS_PRINT_SERVER_LOGS isn't set.
+"$runtime" logs "$container_id" >"${stats_dir}/container.${test_name//[^A-Za-z0-9_.-]/_}.log" 2>&1 || true
+
 {
 	echo "=== $(date -u +%FT%TZ) test=${test_name} failed=${failed} container=${container_id} ==="
 	if "$runtime" exec -u postgres "$container_id" pg_isready -q 2>/dev/null; then
@@ -67,15 +73,42 @@ mkdir -p "$stats_dir"
 	fi
 } >>"$stats_log" 2>&1
 
-if [[ "$failed" == "true" ]]; then
-	safe_name="$(printf '%s' "$test_name" | tr -c 'A-Za-z0-9_.-' '_')"
-	tag="complement-failed-debug:${safe_name}-$(date +%s)"
-	if "$runtime" commit "$container_id" "$tag" >/dev/null 2>&1; then
-		echo "saved failing container ${container_id} (test ${test_name}) as image ${tag}" >&2
-		echo "${tag}" >>"${stats_dir}/failed_images.txt"
-	else
-		echo "WARN: failed to ${runtime} commit ${container_id} for ${test_name}" >&2
-	fi
+safe_name="$(printf '%s' "$test_name" | tr -c 'A-Za-z0-9_.-' '_')"
+
+# NOTE: under COMPLEMENT_ENABLE_DIRTY_RUNS=1 (which complement.sh forces on
+# unconditionally), Complement calls this hook exactly ONCE per package, at
+# the very end, always with test_name="COMPLEMENT_ENABLE_DIRTY_RUNS" and
+# failed=false -- never per-test, never with the real pass/fail status (see
+# complement's config.go doc comment on COMPLEMENT_ENABLE_DIRTY_RUNS). So
+# `failed` is not a usable signal here and nothing below may depend on it
+# being accurate; both the commit and the event_auth dump below run
+# unconditionally, once, at the one point this hook actually fires -- the
+# container is still alive at that point (this runs before Destroy), so
+# it's the only chance to see the whole run's accumulated state before it's
+# torn down. Only `OldDeploy`/blueprint-based tests still get their own
+# dedicated deployment and their own real per-test call to this hook; for
+# those `failed` is accurate.
+tag="complement-failed-debug:${safe_name}-$(date +%s)"
+if "$runtime" commit "$container_id" "$tag" >/dev/null 2>&1; then
+	echo "saved container ${container_id} (test ${test_name}, failed=${failed}) as image ${tag}" >&2
+	echo "${tag}" >>"${stats_dir}/failed_images.txt"
+else
+	echo "WARN: failed to ${runtime} commit ${container_id} for ${test_name}" >&2
+fi
+
+# The one thing that actually discriminates between "the closure walk
+# under-reports a chain that's really there", "the chain was never built
+# at persist time", and "event_auth rows are missing outright": every
+# m.room.member event's own direct one-hop auth edges, across every room
+# in this run, in order. Postgres-only; harmless no-op on SQLite.
+if "$runtime" exec -u postgres "$container_id" pg_isready -q 2>/dev/null; then
+	"$runtime" exec -u postgres "$container_id" psql -X -q -At -d synapse -c "
+      SELECT e.room_id, e.type, e.state_key, e.stream_ordering, ea.event_id, ea.auth_id
+      FROM event_auth ea JOIN events e ON e.event_id = ea.event_id
+      WHERE e.type = 'm.room.member'
+      ORDER BY e.room_id, e.stream_ordering;" \
+		>"${stats_dir}/event_auth.${safe_name}.tsv" 2>&1
+	echo "saved event_auth dump for ${test_name} to ${stats_dir}/event_auth.${safe_name}.tsv" >&2
 fi
 
 exit 0
