@@ -679,6 +679,22 @@ class EventFederationWorkerStore(
         # If the room has an auth chain index.
         if room[1]:
             try:
+                from synapse.storage.databases.main.embedded_event_auth_chains import (
+                    IncompleteAuthGraph,
+                    resolve_namespace,
+                )
+
+                embedded_hamt_namespace = resolve_namespace(self)
+                if embedded_hamt_namespace is not None:
+                    return await self.db_pool.runInteraction(
+                        "get_auth_chain_difference_embedded",
+                        self._get_auth_chain_difference_using_embedded_closures_txn,
+                        embedded_hamt_namespace,
+                        room_id,
+                        state_sets,
+                        conflicted_set,
+                        additional_backwards_reachable_conflicted_events,
+                    )
                 return await self.db_pool.runInteraction(
                     "get_auth_chain_difference_chains",
                     self._get_auth_chain_difference_using_cover_index_txn,
@@ -687,6 +703,10 @@ class EventFederationWorkerStore(
                     conflicted_set,
                     additional_backwards_reachable_conflicted_events,
                 )
+            except IncompleteAuthGraph:
+                # The ramp is missing genuine data -- as harmless as a chain
+                # cover index that doesn't cover the events in question.
+                raise _NoChainCoverIndex(room_id) from None
             except _NoChainCoverIndex:
                 # For whatever reason we don't actually have a chain cover index
                 # for the events in question, so we fall back to the old method
@@ -705,6 +725,170 @@ class EventFederationWorkerStore(
             state_sets,
         )
         return StateDifference(auth_difference=auth_diff, conflicted_subgraph=None)
+
+    def _get_auth_chain_difference_using_embedded_closures_txn(
+        self,
+        txn: LoggingTransaction,
+        embedded_hamt_namespace: str,
+        room_id: str,
+        state_sets: list[set[str]],
+        conflicted_set: set[str] | None = None,
+        additional_backwards_reachable_conflicted_events: set[str] | None = None,
+    ) -> StateDifference:
+        """Embedded-store equivalent of
+        `_get_auth_chain_difference_using_cover_index_txn`: same `StateDifference`
+        result, computed from the ramp ancestor-closure bitmaps in
+        `embedded_event_auth_chains.py` instead of the chain-id/sequence-number
+        cover-index reduction.
+
+        `auth_difference` follows the spec definition directly -- the union of
+        each state set's combined auth chain, minus the events common to all of
+        them, where a combined auth chain is *inclusive* of the set's own
+        members (matching the cover-index path and the legacy BFS, both of
+        which seed the given events into the result when their ownership
+        differs across sets). Each state set's combined closure is the union of
+        its members' ancestor closures plus the members themselves.
+
+        `conflicted_subgraph` (v2.1 only) is `backwards ∩ forwards`, with both
+        sides *inclusive* of the conflicted events -- the exact contract the
+        chain-cover path's per-chain seq ranges encode (`forwards_seq_num ..
+        backwards_seq_num` inclusive of both, so each conflicted event's own
+        position ends up in the subgraph). Backwards is the union of the
+        conflicted and additional events' inclusive ancestor closures; forwards
+        is the seed-inclusive forward BFS (`get_forward_reachable_short_ids`)
+        *pruned to the backwards set* -- a descendant outside the backwards
+        universe provably can't be in the intersection, which is what bounds
+        the walk (it may not touch data the conflicted-set computation doesn't
+        need). Raises `IncompleteAuthGraph` on a genuine data gap; the caller
+        translates that to `_NoChainCoverIndex`.
+        """
+        from synapse.storage.databases.main.embedded_event_auth_chains import (
+            get_forward_reachable_short_ids,
+            get_or_create_short_ids,
+            resolve_short_ids_to_event_ids,
+        )
+
+        engine_name = self._embedded_hamt_engine
+
+        is_state_res_v21 = conflicted_set is not None
+        initial_events = set(state_sets[0]).union(*state_sets[1:])
+
+        if is_state_res_v21:
+            # Sanity check v2.1 fields -- mirroring the cover-index method.
+            assert conflicted_set is not None
+            assert conflicted_set.issubset(initial_events)
+            if additional_backwards_reachable_conflicted_events:
+                assert additional_backwards_reachable_conflicted_events.issubset(
+                    initial_events
+                )
+
+        if not initial_events:
+            conflicted_subgraph: set[str] = set()
+            if is_state_res_v21:
+                assert conflicted_set is not None
+                conflicted_subgraph = conflicted_set
+            return StateDifference(
+                auth_difference=set(), conflicted_subgraph=conflicted_subgraph
+            )
+
+        event_ids = list(initial_events)
+        short_ids = get_or_create_short_ids(
+            engine_name, embedded_hamt_namespace, room_id, event_ids
+        )
+        short_id_of = dict(zip(event_ids, short_ids))
+
+        # State-set closures: union of each set's members' ancestor closures,
+        # *plus the members themselves* -- auth-chain-difference semantics are
+        # inclusive on the given events, exactly like the cover-index path
+        # (a chain reachable at seq n by one set but un-reachable from another
+        # defaults that set's max to 0, so the gap spans `(0, n]` and pulls the
+        # member's own position into the result) and the legacy BFS (initial
+        # events are seeded into `event_to_missing_sets`).
+        set_closures: list[set[int]] = []
+        for state_set in state_sets:
+            member_short_ids = [short_id_of[event_id] for event_id in state_set]
+            closures = self._auth_chain_closure_cache.get_closures_batch(
+                txn,
+                engine_name,
+                embedded_hamt_namespace,
+                room_id,
+                member_short_ids,
+            )
+            union: set[int] = set(member_short_ids)
+            for closure in closures.values():
+                union.update(closure)
+            set_closures.append(union)
+
+        all_closures = set().union(*set_closures) if set_closures else set()
+        common_closures = set.intersection(*set_closures) if set_closures else set()
+        auth_difference_ids = all_closures - common_closures
+
+        conflicted_subgraph_ids: set[int] = set()
+        if is_state_res_v21:
+            assert conflicted_set is not None
+            conflicted_short_ids = [
+                short_id_of[event_id] for event_id in conflicted_set
+            ]
+
+            # Inclusive backwards-reachable universe: the conflicted events
+            # themselves, their ancestor closures, plus the additional
+            # backwards-reachable events and theirs.
+            backwards_ids: set[int] = set(conflicted_short_ids)
+            for closure in self._auth_chain_closure_cache.get_closures_batch(
+                txn,
+                engine_name,
+                embedded_hamt_namespace,
+                room_id,
+                conflicted_short_ids,
+            ).values():
+                backwards_ids.update(closure)
+            if additional_backwards_reachable_conflicted_events:
+                additional_short_ids = [
+                    short_id_of[event_id]
+                    for event_id in additional_backwards_reachable_conflicted_events
+                ]
+                backwards_ids.update(additional_short_ids)
+                for closure in self._auth_chain_closure_cache.get_closures_batch(
+                    txn,
+                    engine_name,
+                    embedded_hamt_namespace,
+                    room_id,
+                    additional_short_ids,
+                ).values():
+                    backwards_ids.update(closure)
+
+            # Inclusive forwards (seed-inclusive BFS), pruned to the backwards
+            # universe so the walk cost is bounded by |backwards|, not |room|.
+            forwards_ids = get_forward_reachable_short_ids(
+                txn,
+                engine_name,
+                embedded_hamt_namespace,
+                room_id,
+                conflicted_short_ids,
+                candidate_short_ids=backwards_ids,
+            )
+            conflicted_subgraph_ids = backwards_ids & forwards_ids
+
+        def resolve(short_id_iter: "Collection[int]") -> set[str]:
+            if not short_id_iter:
+                return set()
+            resolved = resolve_short_ids_to_event_ids(
+                engine_name,
+                embedded_hamt_namespace,
+                room_id,
+                list(short_id_iter),
+            )
+            return {event_id for event_id in resolved if event_id is not None}
+
+        if is_state_res_v21:
+            return StateDifference(
+                auth_difference=resolve(auth_difference_ids),
+                conflicted_subgraph=resolve(conflicted_subgraph_ids),
+            )
+        return StateDifference(
+            auth_difference=resolve(auth_difference_ids),
+            conflicted_subgraph=None,
+        )
 
     def _get_auth_chain_difference_using_cover_index_txn(
         self,

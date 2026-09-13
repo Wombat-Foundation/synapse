@@ -340,9 +340,11 @@ class ForwardReachabilityTests(TestCase):
         reachable = get_forward_reachable_short_ids(
             txn, None, NAMESPACE, ROOM_ID, [create_id]
         )
-        self.assertEqual(reachable, {a_id, b_id, c_id})
-        # Excludes the starting event itself.
-        self.assertNotIn(create_id, reachable)
+        # Seed-inclusive (see the function docstring): the starting event
+        # itself is part of the forward-reachable set, matching the v2.1
+        # chain-cover/rezzy forward-pass contract the conflicted-subgraph
+        # intersection depends on.
+        self.assertEqual(reachable, {create_id, a_id, b_id, c_id})
 
     def test_diamond_forward_reachable(self) -> None:
         graph = {
@@ -360,7 +362,7 @@ class ForwardReachabilityTests(TestCase):
         reachable = get_forward_reachable_short_ids(
             txn, None, NAMESPACE, ROOM_ID, [create_id]
         )
-        self.assertEqual(reachable, {a_id, b_id, c_id})
+        self.assertEqual(reachable, {create_id, a_id, b_id, c_id})
 
     def test_leaf_has_no_forward_reachable_events(self) -> None:
         graph = {"$create": [], "$a": ["$create"]}
@@ -370,7 +372,60 @@ class ForwardReachabilityTests(TestCase):
         reachable = get_forward_reachable_short_ids(
             txn, None, NAMESPACE, ROOM_ID, [a_id]
         )
-        self.assertEqual(reachable, set())
+        self.assertEqual(reachable, {a_id})
+
+    def test_candidate_prune_bounds_walk_to_intersectable_universe(self) -> None:
+        """Children outside `candidate_short_ids` are dead weight (they
+        cannot intersect a backwards-reachable set the caller computed
+        first) and must be neither returned nor expanded -- bounding the
+        walk by |candidate| rather than the whole room.
+        """
+        # create has children a and x; x has its own subtree (y) that must
+        # not be reached when x is excluded from the candidate set.
+        graph = {
+            "$create": [],
+            "$a": ["$create"],
+            "$x": ["$create"],
+            "$y": ["$x"],
+        }
+        txn = FakeTxn(graph)
+        create_id = self._short_id("$create")
+        a_id = self._short_id("$a")
+        x_id = self._short_id("$x")
+        y_id = self._short_id("$y")
+
+        candidate = {create_id, a_id}
+        reachable = get_forward_reachable_short_ids(
+            txn,
+            None,
+            NAMESPACE,
+            ROOM_ID,
+            [create_id],
+            candidate_short_ids=candidate,
+        )
+        self.assertEqual(reachable, {create_id, a_id})
+        self.assertNotIn(x_id, reachable)
+        self.assertNotIn(y_id, reachable)
+
+    def test_candidate_prune_keeps_seeds_even_outside_candidate(self) -> None:
+        """The starting events are always returned, regardless of candidate
+        membership -- the conflict roots the subgraph intersection circles
+        around must never vanish from the forwards side.
+        """
+        graph = {"$create": [], "$a": ["$create"]}
+        txn = FakeTxn(graph)
+        a_id = self._short_id("$a")
+        create_id = self._short_id("$create")
+
+        reachable = get_forward_reachable_short_ids(
+            txn,
+            None,
+            NAMESPACE,
+            ROOM_ID,
+            [a_id],
+            candidate_short_ids={create_id},
+        )
+        self.assertEqual(reachable, {a_id})
 
     def test_repairs_embedded_children_discovered_late(self) -> None:
         """A child persisted (and short-id allocated) *after* the parent
@@ -387,7 +442,7 @@ class ForwardReachabilityTests(TestCase):
         first = get_forward_reachable_short_ids(
             txn, None, NAMESPACE, ROOM_ID, [create_id]
         )
-        self.assertEqual(first, {a_id})
+        self.assertEqual(first, {create_id, a_id})
 
         # A new event "$b" is persisted, also authed by $create.
         graph2 = {"$create": [], "$a": ["$create"], "$b": ["$create"]}
@@ -397,4 +452,4 @@ class ForwardReachabilityTests(TestCase):
         second = get_forward_reachable_short_ids(
             txn2, None, NAMESPACE, ROOM_ID, [create_id]
         )
-        self.assertEqual(second, {a_id, b_id})
+        self.assertEqual(second, {create_id, a_id, b_id})

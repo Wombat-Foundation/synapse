@@ -561,16 +561,45 @@ def get_forward_reachable_short_ids(
     namespace: str,
     room_id: str,
     start_short_ids: list[int],
+    candidate_short_ids: set[int] | None = None,
 ) -> set[int]:
     """Ephemeral BFS over embedded inbound (child) edges, verified/repaired
-    against SQL as it goes (see `_fetch_and_verify_children`). Returns the
-    set of short ids *strictly forward-reachable* from `start_short_ids`
-    (descendants only -- the starting events themselves are excluded,
-    matching the ancestor-closure convention in `ClosureCache`). Not
-    cached, not persisted; callers should treat the result as good for one
-    request only.
+    against SQL as it goes (see `_fetch_and_verify_children`).
+
+    Returns the set of short ids forward-reachable from `start_short_ids`,
+    **including the starting events themselves**; when `candidate_short_ids`
+    is given, the forward spread beyond the starts is restricted to its
+    members. Not cached, not persisted; callers should treat the result as
+    good for one request only.
+
+    Two contract details, both required by the v2.1 conflicted-subgraph
+    computation this feeds (see the §5 addendum above):
+
+    1. *Seed inclusion*: the starting events are part of the result. The
+       conflicted subgraph is `backwards ∩ forwards`, and both reference
+       formulations -- the chain-cover v2.1 path in `event_federation.py`
+       (whose forward-reachable set covers each conflicted event's own
+       position) and rezzy's `compute_v2_1_conflicted_subgraph` (whose
+       `forward_reachable_ids` is documented "seeds included") -- include
+       the conflicted events in the forwards side. A seed-exclusive result
+       would silently drop the conflicted events from the intersection:
+       the very events state res v2.1 exists to isolate. `ClosureCache`'s
+       ancestor closures are deliberately *not* changed (their call sites
+       add the roots back via `include_given`); this forward walk needs the
+       opposite default for the v2.1 path. Callers computing plain
+       descendants can subtract the starts themselves.
+    2. *Candidate pruning*: when `candidate_short_ids` is provided, children
+       that are not members of it are neither returned nor expanded. For the
+       subgraph's `backwards ∩ forwards`, a descendant that isn't an
+       ancestor of *any* conflicted event provably can't be in the
+       intersection (if it were in some conflicted event's ancestor set, its
+       ancestor would be too, so it is already in the candidate set), so
+       those children are dead weight -- skipping them bounds the walk by
+       |candidate| instead of the whole room. Starts are always expanded and
+       always in the result regardless of candidate membership.
     """
     starting = set(start_short_ids)
+    result: set[int] = set(starting)
     seen: set[int] = set()
     frontier = list(starting)
     while frontier:
@@ -581,6 +610,10 @@ def get_forward_reachable_short_ids(
         for child in _fetch_and_verify_children(
             txn, engine_name, namespace, room_id, current
         ):
-            if child not in seen:
-                frontier.append(child)
-    return seen - starting
+            if child in seen:
+                continue
+            if candidate_short_ids is not None and child not in candidate_short_ids:
+                continue
+            result.add(child)
+            frontier.append(child)
+    return result
