@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use mtxdb::{DatabaseLayout, NodeData, NodeId, PackfileStorage, ShardType, StorageEngine};
@@ -384,7 +384,6 @@ pub fn get_state_hamt_roots_bulk(
 /// against files written under the old layout) hits this same failure
 /// mode for every group it doesn't happen to already cover.
 mod room_index {
-    use std::collections::HashMap;
     use std::fs::{File, OpenOptions};
     use std::num::NonZeroUsize;
     use std::os::unix::fs::FileExt;
@@ -423,9 +422,27 @@ mod room_index {
     /// entirely. `FileExt::write_at`/`read_at` (pread/pwrite) take an
     /// explicit offset per call, so a shared handle needs no seek and no
     /// per-call mutable state -- safe to hand out from behind a `Mutex`
-    /// that's only ever held for the duration of a HashMap lookup/insert,
-    /// never across the actual I/O.
-    static HANDLES: Mutex<Option<HashMap<String, std::sync::Arc<File>>>> = Mutex::new(None);
+    /// that's only ever held for the duration of a lookup/insert, never
+    /// across the actual I/O (callers clone the `Arc<File>` and do the
+    /// pread/pwrite on their own clone, outside the lock).
+    ///
+    /// Retention is bounded: a *per-namespace* cache would leak one fd per
+    /// namespace for the process lifetime, and the test harness alone
+    /// creates a fresh namespace for every homeserver, so a full trial
+    /// suite's thousands of namespaces blew straight through `ulimit -n`
+    /// (`[Errno 24] Too many open files`). An LRU caps open fds at
+    /// `HANDLE_CACHE_CAPACITY` no matter how many namespaces a process has
+    /// ever seen. Evicting a handle only closes the file: dirty pages
+    /// already `pwrite`n survive `close()` in the kernel's writeback, so
+    /// the only thing lost is the same periodic (not per-write) durability
+    /// window the rest of the engine already accepts -- see `sync()` -- and
+    /// the next access for that namespace re-opens it deterministically
+    /// from `index_path` on the cold path the per-call `open()` this cache
+    /// exists to avoid is only re-paid once.
+    const HANDLE_CACHE_CAPACITY: usize = 64;
+
+    #[allow(clippy::type_complexity)]
+    static HANDLES: Mutex<Option<LruCache<String, std::sync::Arc<File>>>> = Mutex::new(None);
 
     fn index_path(namespace: &str) -> PyResult<std::path::PathBuf> {
         let dir = ROOM_INDEX_DIR
@@ -444,7 +461,9 @@ mod room_index {
         let mut guard = HANDLES
             .lock()
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("lock poison: {e}")))?;
-        let map = guard.get_or_insert_with(HashMap::new);
+        let map = guard.get_or_insert_with(|| {
+            LruCache::new(NonZeroUsize::new(HANDLE_CACHE_CAPACITY).expect("nonzero capacity"))
+        });
         if let Some(file) = map.get(namespace) {
             return Ok(Some(Arc::clone(file)));
         }
@@ -470,7 +489,7 @@ mod room_index {
             }
         };
         let file = Arc::new(file);
-        map.insert(namespace.to_string(), Arc::clone(&file));
+        map.put(namespace.to_string(), Arc::clone(&file));
         Ok(Some(file))
     }
 
@@ -576,12 +595,48 @@ mod room_index {
         let Some(map) = guard.as_ref() else {
             return Ok(());
         };
-        for file in map.values() {
+        for (_, file) in map.iter() {
             file.sync_data().map_err(|e| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!("room_index sync failed: {e}"))
             })?;
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn handle_cache_is_bounded_and_evicted_namespaces_reopen() {
+            super::super::auth_chain_closure_tests::ensure_open();
+            let ns_kept = "ns-lru-kept";
+            let prefix: Vec<u8> = b"ROOM1ABC".to_vec();
+            put(ns_kept, &[(1, prefix.clone())]).expect("put kept");
+
+            // Rotate well past the cache capacity so `ns_kept`'s handle (the
+            // least recently used, inserted first) is guaranteed LRU-evicted
+            // and its file closed.
+            for i in 0..(HANDLE_CACHE_CAPACITY + 32) {
+                put(&format!("ns-lru-rot-{}", i), &[(1, b"ROOM2XYZ".to_vec())]).expect("put rot");
+            }
+
+            {
+                let guard = HANDLES.lock().expect("no poison");
+                assert!(
+                    guard.as_ref().map(|m| m.len()).unwrap_or(0) <= HANDLE_CACHE_CAPACITY,
+                    "handle count must never exceed the cache capacity"
+                );
+            }
+
+            // Clear the in-memory prefix cache so the read below cannot be
+            // served from it: `ns_kept`'s handle is closed, so this walks the
+            // `cached_handle(namespace, create=false)` reopen path.
+            *PREFIX_CACHE.lock().expect("no poison") = None;
+
+            let got = get_many(ns_kept, &[1]).expect("get kept");
+            assert_eq!(got, vec![Some(prefix)]);
+        }
     }
 }
 
@@ -1339,11 +1394,23 @@ pub fn auth_chain_children_append(
     let engine = db_for_shard_type(ShardType::AuthChain)?;
     let collection = auth_chain_closure_room_id(&namespace, &room_id);
 
-    let mut pairs_to_put = Vec::with_capacity(rows.len());
+    // Aggregate by parent first: the batched put below only applies at the
+    // end, so two rows for the same parent in one call would otherwise each
+    // read the same *un-put* state and both emit a put for the same key --
+    // last-write-wins silently dropping the first row's children.
+    let mut by_parent: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
     for (parent_short_id, new_children) in rows {
         if new_children.is_empty() {
             continue;
         }
+        by_parent
+            .entry(parent_short_id)
+            .or_default()
+            .extend(new_children);
+    }
+
+    let mut pairs_to_put = Vec::with_capacity(by_parent.len());
+    for (parent_short_id, new_children) in by_parent {
         let node_id = auth_chain_child_node_id(parent_short_id);
         let mut children = match engine.get(&collection, &node_id) {
             Ok(Some(data)) => decode_auth_edges(&data.bytes)?,
@@ -1788,7 +1855,7 @@ mod auth_chain_closure_tests {
 
     static INIT: Once = Once::new();
 
-    fn ensure_open() {
+    pub(crate) fn ensure_open() {
         INIT.call_once(|| {
             // This crate is normally loaded as a cdylib into an
             // already-running CPython process; a standalone `cargo test`
@@ -1955,6 +2022,45 @@ mod auth_chain_closure_tests {
             vec![(parent, vec![c1, c2])],
         )
         .expect("append c1 (dup) + c2");
+
+        let children = pyo3::Python::attach(|py| {
+            auth_chain_children_get(py, ns.to_string(), room.to_string(), vec![parent])
+                .expect("get children")
+        });
+        let mut got = children[0].clone().expect("children present");
+        got.sort_unstable();
+        let mut want = vec![c1, c2];
+        want.sort_unstable();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn auth_chain_children_append_same_parent_twice_in_one_call() {
+        // Two rows for the same parent in a single call must both survive:
+        // the append batches its puts, so without per-parent aggregation the
+        // second row would read stale (un-put) children and its later put for
+        // the same key would clobber the first row's.
+        ensure_open();
+        let ns = "ns-children-twice";
+        let room = "!room-children-twice:example.org";
+        let ids = get_or_create_short_ids(
+            ns.to_string(),
+            room.to_string(),
+            vec!["$parent".to_string(), "$c1".to_string(), "$c2".to_string()],
+        )
+        .expect("alloc");
+        let (parent, c1, c2) = (ids[0], ids[1], ids[2]);
+
+        auth_chain_children_append(
+            ns.to_string(),
+            room.to_string(),
+            vec![
+                (parent, vec![c1]),
+                (parent, vec![c2]),
+                (parent, vec![c1]), // dup across rows, must dedupe
+            ],
+        )
+        .expect("append two rows for one parent");
 
         let children = pyo3::Python::attach(|py| {
             auth_chain_children_get(py, ns.to_string(), room.to_string(), vec![parent])
