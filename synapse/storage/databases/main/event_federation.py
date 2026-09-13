@@ -501,31 +501,38 @@ class EventFederationWorkerStore(
             # from one origin chain, so if the edges for a chain two hops
             # away land in a *different* yielded dict than the edges for the
             # chain one hop away, `_materialize` dead-ends after one hop and
-            # silently drops everything beyond it (this used to happen here:
-            # each BFS layer was yielded separately). So the whole transitive
-            # closure for `chains_to_fetch` is accumulated below and yielded
+            # silently drops everything beyond it (this used to happen here
+            # and kept happening: each BFS layer was fetched separately, and
+            # the `yield` stayed inside the BFS loop, so the closure was
+            # still split). So the whole transitive closure for each outer
+            # (<=1000-chain) seed batch is accumulated below and yielded
             # once, matching what the SQL recursive query below returns in a
-            # single row set per outer (<=1000-chain) batch.
-            seen_chains = set(chains_to_fetch)
-            to_walk = set(chains_to_fetch)
-            accumulated: dict[int, list[tuple[int, int, int]]] = {}
-            while to_walk:
-                batch = set(itertools.islice(to_walk, 1000))
-                to_walk.difference_update(batch)
-                embedded_links = get_chain_links_batch(
-                    embedded_hamt_engine, embedded_hamt_namespace, batch
-                )
-                for chain_id, edges in embedded_links.items():
-                    accumulated.setdefault(chain_id, []).extend(edges)
-                    for _origin_seq, target_chain_id, _target_seq in edges:
-                        if target_chain_id not in seen_chains:
-                            seen_chains.add(target_chain_id)
-                            to_walk.add(target_chain_id)
-                # Yield the accumulated links for this batch, matching the
-                # SQL path's outer 1,000-chain batching to avoid holding the
-                # entire transitive closure in memory for large auth chains.
+            # single row set per outer batch.
+            chains_to_fetch = set(chains_to_fetch)
+            while chains_to_fetch:
+                seeds = set(itertools.islice(chains_to_fetch, 1000))
+                chains_to_fetch.difference_update(seeds)
+
+                seen_chains = set(seeds)
+                to_walk = set(seeds)
+                accumulated: dict[int, list[tuple[int, int, int]]] = {}
+                while to_walk:
+                    batch = set(itertools.islice(to_walk, 1000))
+                    to_walk.difference_update(batch)
+                    embedded_links = get_chain_links_batch(
+                        embedded_hamt_engine, embedded_hamt_namespace, batch
+                    )
+                    for chain_id, edges in embedded_links.items():
+                        accumulated.setdefault(chain_id, []).extend(edges)
+                        for _origin_seq, target_chain_id, _target_seq in edges:
+                            if target_chain_id not in seen_chains:
+                                seen_chains.add(target_chain_id)
+                                to_walk.add(target_chain_id)
+                # Chains that turned out to have links were consumed by this
+                # batch's closure (the SQL path removes them from
+                # `chains_to_fetch` the same way), so skip them as seeds.
+                chains_to_fetch.difference_update(accumulated)
                 yield accumulated
-                accumulated = {}
             return
 
         # This query is structured to first get all chain IDs reachable, and
