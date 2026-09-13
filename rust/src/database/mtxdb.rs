@@ -752,6 +752,23 @@ fn auth_chain_edge_node_id(short_id: u32) -> NodeId {
     id
 }
 
+/// Inbound direction of the same graph `auth_chain_edge_node_id` stores
+/// outbound: for parent short id `P`, the set of child short ids that
+/// directly name `P` as one of their auth events. Needed for the V2.1
+/// conflicted-subgraph algorithm's forward-reachability walk (see
+/// `docs/docs/auth-chain-closures-plan.md`'s V2.1 addendum) -- ancestor
+/// bitmaps alone can't answer "what's reachable *from* this event",
+/// only "what's reachable *to* it."
+fn auth_chain_child_node_id(short_id: u32) -> NodeId {
+    let mut hasher = Sha256::new();
+    hasher.update(b"authchain:children:");
+    hasher.update(short_id.to_be_bytes());
+    let hash = hasher.finalize();
+    let mut id = [0u8; 16];
+    id.copy_from_slice(&hash[..16]);
+    id
+}
+
 /// Short ids are `u32`, per room (see plan §1) -- chosen so the Python-side
 /// closure cache can use 32-bit `pyroaring.BitMap` rather than `BitMap64`.
 /// 0 is never assigned (the counter starts at 0 meaning "none allocated
@@ -1267,6 +1284,99 @@ pub fn auth_chain_edges_put(
     })
 }
 
+/// Room-scoped batch read of inbound (child) edge lists, keyed by
+/// `parent_short_id`. `None` means "no known children recorded yet" --
+/// unlike the outbound `auth_chain_edges_get`, this is *not* a cold-import
+/// signal: a parent can validly have zero known children forever (a
+/// forward extremity), and children are appended incrementally as they're
+/// each persisted, so "not found" here just means "none seen so far",
+/// same information as `Some(vec![])` would carry. Both are treated
+/// identically by callers.
+#[pyfunction]
+pub fn auth_chain_children_get(
+    py: Python<'_>,
+    namespace: String,
+    room_id: String,
+    short_ids: Vec<u32>,
+) -> PyResult<Vec<Option<Vec<u32>>>> {
+    py.detach(|| {
+        let engine = db_for_shard_type(ShardType::AuthChain)?;
+        let collection = auth_chain_closure_room_id(&namespace, &room_id);
+        let node_ids: Vec<NodeId> = short_ids
+            .iter()
+            .map(|&s| auth_chain_child_node_id(s))
+            .collect();
+        let results = engine.get_many(&collection, &node_ids).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb get_many error: {}", e))
+        })?;
+        results
+            .into_iter()
+            .map(|opt| match opt {
+                Some(data) => decode_auth_edges(&data.bytes).map(Some),
+                None => Ok(None),
+            })
+            .collect()
+    })
+}
+
+/// Room-scoped, idempotent, deduplicating append of new children to each
+/// listed parent's inbound edge list. `rows`: `(parent_short_id,
+/// [new_child_short_id, ...])`. Unlike `auth_chain_edges_put` (one
+/// full overwrite per event, written once), a parent's child list grows
+/// incrementally as new children are persisted over the room's lifetime,
+/// so this must read-modify-write and dedupe -- the same shape as
+/// `put_auth_chain_links_batch`'s existing dedup-on-append pattern.
+#[pyfunction]
+pub fn auth_chain_children_append(
+    namespace: String,
+    room_id: String,
+    rows: Vec<(u32, Vec<u32>)>,
+) -> PyResult<()> {
+    let _guard = RMW_LOCK
+        .lock()
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("lock poison: {}", e)))?;
+    // No `py.detach` here -- see increment_counters_batch's comment for why.
+    let engine = db_for_shard_type(ShardType::AuthChain)?;
+    let collection = auth_chain_closure_room_id(&namespace, &room_id);
+
+    let mut pairs_to_put = Vec::with_capacity(rows.len());
+    for (parent_short_id, new_children) in rows {
+        if new_children.is_empty() {
+            continue;
+        }
+        let node_id = auth_chain_child_node_id(parent_short_id);
+        let mut children = match engine.get(&collection, &node_id) {
+            Ok(Some(data)) => decode_auth_edges(&data.bytes)?,
+            Ok(None) => Vec::new(),
+            Err(e) => {
+                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "mtxdb get error reading children of {}: {}",
+                    parent_short_id, e
+                )))
+            }
+        };
+        let mut seen: HashSet<u32> = children.iter().copied().collect();
+        let mut changed = false;
+        for child in new_children {
+            if seen.insert(child) {
+                children.push(child);
+                changed = true;
+            }
+        }
+        if changed {
+            let bytes = encode_auth_edges(&children);
+            pairs_to_put.push((node_id, NodeData::new(bytes::Bytes::from(bytes))));
+        }
+    }
+
+    if !pairs_to_put.is_empty() {
+        engine.put_many(&collection, &pairs_to_put).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb put error: {}", e))
+        })?;
+    }
+    Ok(())
+}
+
 /// Room-scoped full purge of the closure skeleton (counter, forward/reverse
 /// short-id mappings, and edge lists) for one room -- everything written
 /// under `auth_chain_closure_room_id(namespace, room_id)`. Does *not*
@@ -1640,6 +1750,8 @@ pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     m.add_function(wrap_pyfunction!(resolve_short_ids_to_event_ids, m)?)?;
     m.add_function(wrap_pyfunction!(auth_chain_edges_get, m)?)?;
     m.add_function(wrap_pyfunction!(auth_chain_edges_put, m)?)?;
+    m.add_function(wrap_pyfunction!(auth_chain_children_get, m)?)?;
+    m.add_function(wrap_pyfunction!(auth_chain_children_append, m)?)?;
     m.add_function(wrap_pyfunction!(auth_chain_purge_room, m)?)?;
     m.add_function(wrap_pyfunction!(batch_get, m)?)?;
     m.add_function(wrap_pyfunction!(batch_put, m)?)?;
@@ -1811,6 +1923,48 @@ mod auth_chain_closure_tests {
             // a2: never written -- missing, the cold-import signal.
             assert_eq!(fetched[2], None);
         });
+    }
+
+    #[test]
+    fn auth_chain_children_append_dedupes_and_is_idempotent() {
+        ensure_open();
+        let ns = "ns-children";
+        let room = "!room-children:example.org";
+        let ids = get_or_create_short_ids(
+            ns.to_string(),
+            room.to_string(),
+            vec!["$parent".to_string(), "$c1".to_string(), "$c2".to_string()],
+        )
+        .expect("alloc");
+        let (parent, c1, c2) = (ids[0], ids[1], ids[2]);
+
+        // No children recorded yet.
+        let none_yet = pyo3::Python::attach(|py| {
+            auth_chain_children_get(py, ns.to_string(), room.to_string(), vec![parent])
+        })
+        .expect("get children (empty)");
+        assert_eq!(none_yet, vec![None]);
+
+        auth_chain_children_append(ns.to_string(), room.to_string(), vec![(parent, vec![c1])])
+            .expect("append c1");
+        // Appending c1 again, plus a new child c2, must dedupe c1 and add c2
+        // exactly once -- both idempotency and accumulation in one append.
+        auth_chain_children_append(
+            ns.to_string(),
+            room.to_string(),
+            vec![(parent, vec![c1, c2])],
+        )
+        .expect("append c1 (dup) + c2");
+
+        let children = pyo3::Python::attach(|py| {
+            auth_chain_children_get(py, ns.to_string(), room.to_string(), vec![parent])
+                .expect("get children")
+        });
+        let mut got = children[0].clone().expect("children present");
+        got.sort_unstable();
+        let mut want = vec![c1, c2];
+        want.sort_unstable();
+        assert_eq!(got, want);
     }
 
     #[test]

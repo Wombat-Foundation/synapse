@@ -140,6 +140,18 @@ def embed_auth_edges_batch(
     call again with the same data (e.g. a retried post-commit dual-write,
     or the cold-import path in §3 re-embedding an already-embedded event).
 
+    Writes *both* directions of the graph: the outbound `event_short_id ->
+    [auth_short_id, ...]` list this row describes, and -- for each
+    `auth_short_id` -- appends `event_short_id` to that auth event's
+    inbound (child) list. The inbound direction has no SQL source of its
+    own; it's derived purely from the outbound edges as they're embedded,
+    which is why it must be written here rather than lazily reconstructed
+    later (there's no `event_auth`-shaped table to reconstruct it from
+    that isn't just this same data transposed). See the V2.1 addendum
+    below for why the inbound direction exists at all: ancestor bitmaps
+    can't answer the forward-reachability question the V2.1
+    conflicted-subgraph algorithm needs.
+
     Callers must only invoke this strictly after the corresponding SQL
     `event_auth` insert has *committed* (plan §2's write-timing
     requirement) -- never from within that same transaction, since a
@@ -151,7 +163,15 @@ def embed_auth_edges_batch(
     """
     if not rows:
         return
-    _engine(engine_name).auth_chain_edges_put(namespace, room_id, rows)
+    engine = _engine(engine_name)
+    engine.auth_chain_edges_put(namespace, room_id, rows)
+
+    child_rows: list[tuple[int, list[int]]] = []
+    for event_short_id, auth_short_ids in rows:
+        for auth_short_id in auth_short_ids:
+            child_rows.append((auth_short_id, [event_short_id]))
+    if child_rows:
+        engine.auth_chain_children_append(namespace, room_id, child_rows)
 
 
 def get_embedded_auth_edges_batch(
@@ -165,6 +185,26 @@ def get_embedded_auth_edges_batch(
         return {}
     results = _engine(engine_name).auth_chain_edges_get(namespace, room_id, short_ids)
     return dict(zip(short_ids, results))
+
+
+def get_embedded_auth_children_batch(
+    engine_name: str | None, namespace: str, room_id: str, short_ids: list[int]
+) -> dict[int, list[int]]:
+    """Inbound (child) edges: for each parent short id, the children known
+    to directly name it as an auth event so far. Missing/`None` and
+    `Some([])` are the same information here (see
+    `auth_chain_children_get`'s docstring in `mtxdb.rs`) -- both normalize
+    to `[]`, never a cold-import signal the way outbound edges' `None` is.
+    """
+    if not short_ids:
+        return {}
+    results = _engine(engine_name).auth_chain_children_get(
+        namespace, room_id, short_ids
+    )
+    return {
+        short_id: (children if children is not None else [])
+        for short_id, children in zip(short_ids, results)
+    }
 
 
 # -----------------------------------------------------------------------------
@@ -419,15 +459,117 @@ def _fetch_auth_event_ids_from_sql(
     leaf (e.g. the room create event), `None` if `event_id` is not known
     to SQL at all (a real gap, distinct from "leaf").
     """
-    rows = txn.execute(
-        "SELECT auth_id FROM event_auth WHERE event_id = ?", (event_id,)
-    ).fetchall()
+    txn.execute("SELECT auth_id FROM event_auth WHERE event_id = ?", (event_id,))
+    rows = txn.fetchall()
     if rows:
         return [auth_id for (auth_id,) in rows]
 
-    exists = txn.execute(
-        "SELECT 1 FROM events WHERE event_id = ?", (event_id,)
-    ).fetchone()
+    txn.execute("SELECT 1 FROM events WHERE event_id = ?", (event_id,))
+    exists = txn.fetchone()
     if exists is None:
         return None
     return []
+
+
+def _fetch_child_event_ids_from_sql(
+    txn: "LoggingTransaction", event_id: str
+) -> list[str]:
+    """The reverse of `_fetch_auth_event_ids_from_sql`: every event that
+    directly names `event_id` as one of its auth events, per SQL
+    `event_auth` (`auth_id = event_id`). Used only to verify/repair the
+    embedded inbound (child) edge list stays complete -- see
+    `_fetch_and_verify_children` -- never to build a persisted index of
+    its own.
+    """
+    txn.execute("SELECT event_id FROM event_auth WHERE auth_id = ?", (event_id,))
+    return [child_id for (child_id,) in txn.fetchall()]
+
+
+# -----------------------------------------------------------------------------
+# §5 addendum: V2.1 conflicted-subgraph forward reachability
+# -----------------------------------------------------------------------------
+#
+# The V2.1 state-res algorithm's conflicted subgraph needs *forward*
+# reachability (descendants of a conflicted event), which an ancestor-only
+# closure bitmap cannot answer. This is deliberately NOT a persisted
+# descendant closure -- see ../rezzy's `reachability.rs`: a persisted
+# forward transitive closure (its `ForwardReachabilityIndex`) is correct
+# only for a sealed DAG snapshot, since appending one event invalidates
+# the descendant closure of every one of its ancestors. For a live room,
+# the right shape is an ephemeral, on-demand exact BFS over the embedded
+# inbound (child) edges (`auth_chain_children_get`/`_append`), built fresh
+# per request and discarded -- never cached, never persisted.
+
+
+def _fetch_and_verify_children(
+    txn: "LoggingTransaction",
+    engine_name: str | None,
+    namespace: str,
+    room_id: str,
+    parent_short_id: int,
+) -> list[int]:
+    """Returns `parent_short_id`'s known children, repairing the embedded
+    inbound list against SQL `event_auth` first if needed. Unlike outbound
+    edges (written once, atomically, alongside the event that owns them),
+    inbound edges accumulate incrementally as *other* events get embedded
+    -- so a child appended to SQL after this parent's own outbound-edge
+    walk last touched it can be missing here even for an otherwise "warm"
+    parent. This check is what keeps the forward BFS complete rather than
+    silently under-approximating the conflicted subgraph.
+    """
+    embedded = get_embedded_auth_children_batch(
+        engine_name, namespace, room_id, [parent_short_id]
+    )[parent_short_id]
+
+    parent_event_id = resolve_short_ids_to_event_ids(
+        engine_name, namespace, room_id, [parent_short_id]
+    )[0]
+    if parent_event_id is None:
+        # Dangling short id -- nothing in SQL to cross-check against either.
+        return embedded
+
+    sql_child_ids = _fetch_child_event_ids_from_sql(txn, parent_event_id)
+    if not sql_child_ids:
+        return embedded
+
+    sql_child_short_ids = get_or_create_short_ids(
+        engine_name, namespace, room_id, sql_child_ids
+    )
+    missing = [c for c in sql_child_short_ids if c not in embedded]
+    if missing:
+        _engine(engine_name).auth_chain_children_append(
+            namespace, room_id, [(parent_short_id, missing)]
+        )
+        embedded = embedded + missing
+    return embedded
+
+
+def get_forward_reachable_short_ids(
+    txn: "LoggingTransaction",
+    engine_name: str | None,
+    namespace: str,
+    room_id: str,
+    start_short_ids: list[int],
+) -> set[int]:
+    """Ephemeral BFS over embedded inbound (child) edges, verified/repaired
+    against SQL as it goes (see `_fetch_and_verify_children`). Returns the
+    set of short ids *strictly forward-reachable* from `start_short_ids`
+    (descendants only -- the starting events themselves are excluded,
+    matching the ancestor-closure convention in `ClosureCache`). Not
+    cached, not persisted; callers should treat the result as good for one
+    request only.
+    """
+    starting = set(start_short_ids)
+    seen: set[int] = set()
+    frontier = list(starting)
+    while frontier:
+        current = frontier.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        for child in _fetch_and_verify_children(
+            txn, engine_name, namespace, room_id, current
+        ):
+            if child not in seen:
+                frontier.append(child)
+    return seen - starting
