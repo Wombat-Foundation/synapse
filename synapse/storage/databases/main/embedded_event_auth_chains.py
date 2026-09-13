@@ -48,12 +48,25 @@ from __future__ import annotations
 
 import logging
 from collections import OrderedDict
-from typing import TYPE_CHECKING
+from typing import Any, Protocol
 
 from pyroaring import BitMap
 
-if TYPE_CHECKING:
-    from synapse.storage.database import LoggingTransaction
+
+class _AuthChainTxn(Protocol):
+    """The minimal SQL-transaction surface the closure walk depends on.
+
+    Structural (PEP 544) on purpose, so tests can drive the walk with a
+    tiny fake txn instead of a full `LoggingTransaction`, and the walk
+    itself stays decoupled from any concrete cursor type. The methods
+    match what `_fetch_auth_event_ids_from_sql` /
+    `_fetch_child_event_ids_from_sql` actually call, nothing more.
+    """
+
+    def execute(self, sql: str, parameters: tuple[Any, ...]) -> None: ...
+    def fetchall(self) -> list[tuple[Any, ...]]: ...
+    def fetchone(self) -> tuple[Any, ...] | None: ...
+
 
 logger = logging.getLogger(__name__)
 
@@ -294,7 +307,7 @@ class ClosureCache:
 
     def get_closure(
         self,
-        txn: "LoggingTransaction",
+        txn: _AuthChainTxn,
         engine_name: str | None,
         namespace: str,
         room_id: str,
@@ -325,7 +338,7 @@ class ClosureCache:
 
     def get_closures_batch(
         self,
-        txn: "LoggingTransaction",
+        txn: _AuthChainTxn,
         engine_name: str | None,
         namespace: str,
         room_id: str,
@@ -354,7 +367,7 @@ class ClosureCache:
 
     def _walk(
         self,
-        txn: "LoggingTransaction",
+        txn: _AuthChainTxn,
         engine_name: str | None,
         namespace: str,
         room_id: str,
@@ -403,7 +416,7 @@ class ClosureCache:
 
     def _fetch_direct_edges(
         self,
-        txn: "LoggingTransaction",
+        txn: _AuthChainTxn,
         engine_name: str | None,
         namespace: str,
         room_id: str,
@@ -451,7 +464,7 @@ class ClosureCache:
 
 
 def _fetch_auth_event_ids_from_sql(
-    txn: "LoggingTransaction", event_id: str
+    txn: _AuthChainTxn, event_id: str
 ) -> list[str] | None:
     """Direct one-hop `auth_events` for `event_id`, from the durable SQL
     `event_auth` table (event_id, auth_id -- one row per direct edge,
@@ -471,9 +484,7 @@ def _fetch_auth_event_ids_from_sql(
     return []
 
 
-def _fetch_child_event_ids_from_sql(
-    txn: "LoggingTransaction", event_id: str
-) -> list[str]:
+def _fetch_child_event_ids_from_sql(txn: _AuthChainTxn, event_id: str) -> list[str]:
     """The reverse of `_fetch_auth_event_ids_from_sql`: every event that
     directly names `event_id` as one of its auth events, per SQL
     `event_auth` (`auth_id = event_id`). Used only to verify/repair the
@@ -502,7 +513,7 @@ def _fetch_child_event_ids_from_sql(
 
 
 def _fetch_and_verify_children(
-    txn: "LoggingTransaction",
+    txn: _AuthChainTxn,
     engine_name: str | None,
     namespace: str,
     room_id: str,
@@ -545,7 +556,7 @@ def _fetch_and_verify_children(
 
 
 def get_forward_reachable_short_ids(
-    txn: "LoggingTransaction",
+    txn: _AuthChainTxn,
     engine_name: str | None,
     namespace: str,
     room_id: str,

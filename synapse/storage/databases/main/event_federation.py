@@ -172,6 +172,15 @@ class EventFederationWorkerStore(
         # index.
         self.tests_allow_no_chain_cover_index = True
 
+        # RAM-only ancestor-closure cache for the embedded (mtxdb) auth-chain
+        # path -- see embedded_event_auth_chains.py. Lives here (not module
+        # level) so each store/worker gets its own bounded LRU.
+        from synapse.storage.databases.main.embedded_event_auth_chains import (
+            ClosureCache,
+        )
+
+        self._auth_chain_closure_cache = ClosureCache()
+
         self.clock.looping_call(
             self._get_stats_for_federation_staging, Duration(seconds=30)
         )
@@ -236,7 +245,26 @@ class EventFederationWorkerStore(
         room = await self.get_room(room_id)  # type: ignore[attr-defined]
         # If the room has an auth chain index.
         if room[1]:
+            from synapse.storage.databases.main.embedded_event_auth_chains import (
+                IncompleteAuthGraph,
+                resolve_namespace,
+            )
+
+            embedded_hamt_namespace = resolve_namespace(self)
             try:
+                if embedded_hamt_namespace is not None:
+                    try:
+                        return await self.db_pool.runInteraction(
+                            "get_auth_chain_ids_embedded",
+                            self._get_auth_chain_ids_using_embedded_closures_txn,
+                            embedded_hamt_namespace,
+                            room_id,
+                            event_ids,
+                            include_given,
+                        )
+                    except IncompleteAuthGraph:
+                        raise _NoChainCoverIndex(room_id) from None
+
                 return await self.db_pool.runInteraction(
                     "get_auth_chain_ids_chains",
                     self._get_auth_chain_ids_using_cover_index_txn,
@@ -257,6 +285,61 @@ class EventFederationWorkerStore(
             event_ids,
             include_given,
         )
+
+    def _get_auth_chain_ids_using_embedded_closures_txn(
+        self,
+        txn: LoggingTransaction,
+        embedded_hamt_namespace: str,
+        room_id: str,
+        event_ids: Collection[str],
+        include_given: bool,
+    ) -> set[str]:
+        """Embedded-store equivalent of
+        `_get_auth_chain_ids_using_cover_index_txn`: union the requested
+        events' ancestor closures (short-id bitmaps), resolve back to event
+        ids, and apply `include_given` the same way the legacy method does
+        (its `chains[chain_id] = max(seq_no - 1, ...)` excludes each given
+        event's own chain position, then unions `initial_events` back in
+        only when `include_given` -- i.e. the closure is ancestors-only, and
+        `include_given` alone controls whether the starting set is added
+        back). Raises `IncompleteAuthGraph` on a genuine data gap; the
+        caller translates that to `_NoChainCoverIndex`.
+        """
+        from synapse.storage.databases.main.embedded_event_auth_chains import (
+            get_or_create_short_ids,
+            resolve_short_ids_to_event_ids,
+        )
+
+        initial_events = list(dict.fromkeys(event_ids))
+        if not initial_events:
+            return set()
+
+        engine_name = self._embedded_hamt_engine
+        short_ids = get_or_create_short_ids(
+            engine_name, embedded_hamt_namespace, room_id, initial_events
+        )
+
+        closures = self._auth_chain_closure_cache.get_closures_batch(
+            txn, engine_name, embedded_hamt_namespace, room_id, short_ids
+        )
+
+        result_short_ids: set[int] = set()
+        for short_id in short_ids:
+            result_short_ids.update(closures[short_id])
+
+        if include_given:
+            result_short_ids.update(short_ids)
+
+        if not result_short_ids:
+            return set()
+
+        resolved = resolve_short_ids_to_event_ids(
+            engine_name,
+            embedded_hamt_namespace,
+            room_id,
+            list(result_short_ids),
+        )
+        return {event_id for event_id in resolved if event_id is not None}
 
     def _get_auth_chain_ids_using_cover_index_txn(
         self,

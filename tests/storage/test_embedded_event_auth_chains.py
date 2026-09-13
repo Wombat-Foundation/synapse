@@ -19,6 +19,7 @@ cold-import, cache-generation invalidation) independent of the real Rust
 engine or a running homeserver, per the plan's Verification section.
 """
 
+from types import ModuleType
 from typing import Any
 from unittest import TestCase
 
@@ -36,12 +37,15 @@ NAMESPACE = "test-ns"
 ROOM_ID = "!room:example.org"
 
 
-class FakeEngine:
+class FakeEngine(ModuleType):
     """A tiny in-memory stand-in for `synapse_rust.mtxdb_engine`, scoped to
-    just the auth-chain-closure primitives this module calls.
+    just the auth-chain-closure primitives this module calls. Subclasses
+    `ModuleType` so it can stand in where `get_embedded_engine` promises a
+    module.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, name: str = "fake_mtxdb_engine") -> None:
+        super().__init__(name)
         self._counters: dict[tuple[str, str], int] = {}
         self._forward: dict[tuple[str, str, str], int] = {}
         self._reverse: dict[tuple[str, str, int], str] = {}
@@ -125,20 +129,20 @@ class FakeTxn:
         for child, parents in auth_edges.items():
             for parent in parents:
                 self._children_of.setdefault(parent, []).append(child)
+        self._last_rows: list[tuple[Any, ...]] = []
 
-    def execute(self, sql: str, params: tuple[Any, ...]) -> "FakeTxn":
+    def execute(self, sql: str, parameters: tuple[Any, ...]) -> None:
         if sql.startswith("SELECT auth_id"):
-            (event_id,) = params
+            (event_id,) = parameters
             self._last_rows = [(a,) for a in self._auth_edges.get(event_id, [])]
         elif sql.startswith("SELECT event_id FROM event_auth WHERE auth_id"):
-            (auth_id,) = params
+            (auth_id,) = parameters
             self._last_rows = [(c,) for c in self._children_of.get(auth_id, [])]
         elif sql.startswith("SELECT 1 FROM events"):
-            (event_id,) = params
+            (event_id,) = parameters
             self._last_rows = [(1,)] if event_id in self._known_events else []
         else:
             raise AssertionError(f"unexpected SQL: {sql}")
-        return self
 
     def fetchall(self) -> list[tuple[Any, ...]]:
         return self._last_rows
@@ -152,7 +156,7 @@ def _install_fake_engine(
 ) -> None:
     import synapse.storage.databases.embedded_engine as embedded_engine_module
 
-    embedded_engine_module.get_embedded_engine = lambda name: engine  # type: ignore[return-value]
+    embedded_engine_module.get_embedded_engine = lambda engine_name: engine
 
 
 class ClosureWalkTests(TestCase):
@@ -161,7 +165,7 @@ class ClosureWalkTests(TestCase):
         import synapse.storage.databases.embedded_engine as embedded_engine_module
 
         self._real_get_embedded_engine = embedded_engine_module.get_embedded_engine
-        embedded_engine_module.get_embedded_engine = lambda name: self.engine  # type: ignore[return-value]
+        embedded_engine_module.get_embedded_engine = lambda engine_name: self.engine
         self.cache = ClosureCache()
 
     def tearDown(self) -> None:
@@ -190,13 +194,13 @@ class ClosureWalkTests(TestCase):
         b_id = self._short_id("$b")
         c_id = self._short_id("$c")
 
-        closure = self.cache.get_closure(txn, None, NAMESPACE, ROOM_ID, c_id)  # type: ignore[arg-type]
+        closure = self.cache.get_closure(txn, None, NAMESPACE, ROOM_ID, c_id)
         self.assertEqual(set(closure), {a_id, b_id, create_id})
         # Ancestors only -- c itself is not included.
         self.assertNotIn(c_id, closure)
 
         # The leaf's own closure is empty (zero auth events), not an error.
-        leaf_closure = self.cache.get_closure(txn, None, NAMESPACE, ROOM_ID, create_id)  # type: ignore[arg-type]
+        leaf_closure = self.cache.get_closure(txn, None, NAMESPACE, ROOM_ID, create_id)
         self.assertEqual(len(leaf_closure), 0)
 
     def test_cold_import_embeds_edges_from_sql_on_first_touch(self) -> None:
@@ -211,7 +215,7 @@ class ClosureWalkTests(TestCase):
             None,
         )
 
-        closure = self.cache.get_closure(txn, None, NAMESPACE, ROOM_ID, a_id)  # type: ignore[arg-type]
+        closure = self.cache.get_closure(txn, None, NAMESPACE, ROOM_ID, a_id)
         self.assertEqual(set(closure), {create_id})
 
         # Now embedded, idempotently re-embeddable.
@@ -232,13 +236,13 @@ class ClosureWalkTests(TestCase):
         a_id = self._short_id("$a")
 
         with self.assertRaises(IncompleteAuthGraph):
-            self.cache.get_closure(txn, None, NAMESPACE, ROOM_ID, a_id)  # type: ignore[arg-type]
+            self.cache.get_closure(txn, None, NAMESPACE, ROOM_ID, a_id)
 
         # An incomplete walk must not be cached: retrying (even with the
         # same broken graph) must raise again, not silently return a
         # wrong/partial cached closure.
         with self.assertRaises(IncompleteAuthGraph):
-            self.cache.get_closure(txn, None, NAMESPACE, ROOM_ID, a_id)  # type: ignore[arg-type]
+            self.cache.get_closure(txn, None, NAMESPACE, ROOM_ID, a_id)
 
     def test_cache_generation_invalidation_on_purge(self) -> None:
         graph = {"$create": [], "$a": ["$create"]}
@@ -246,7 +250,7 @@ class ClosureWalkTests(TestCase):
         create_id = self._short_id("$create")
         a_id = self._short_id("$a")
 
-        first = self.cache.get_closure(txn, None, NAMESPACE, ROOM_ID, a_id)  # type: ignore[arg-type]
+        first = self.cache.get_closure(txn, None, NAMESPACE, ROOM_ID, a_id)
         self.assertEqual(set(first), {create_id})
 
         # Purge the room: bump generation first (as purge_events.py must),
@@ -266,7 +270,7 @@ class ClosureWalkTests(TestCase):
         a2_id = self._short_id("$a")
         self.assertNotEqual(create2_id, create_id)
 
-        second = self.cache.get_closure(txn2, None, NAMESPACE, ROOM_ID, a2_id)  # type: ignore[arg-type]
+        second = self.cache.get_closure(txn2, None, NAMESPACE, ROOM_ID, a2_id)
         # The post-purge lookup must recompute against the new graph, not
         # serve the pre-purge cached bitmap for (old_generation, a_id).
         self.assertEqual(set(second), {create2_id})
@@ -290,7 +294,7 @@ class ClosureWalkTests(TestCase):
             None,
             NAMESPACE,
             ROOM_ID,
-            [b_id, c_id],  # type: ignore[arg-type]
+            [b_id, c_id],
         )
         self.assertEqual(set(results[b_id]), {a_id, create_id})
         self.assertEqual(set(results[c_id]), {a_id, create_id})
@@ -309,7 +313,7 @@ class ForwardReachabilityTests(TestCase):
         import synapse.storage.databases.embedded_engine as embedded_engine_module
 
         self._real_get_embedded_engine = embedded_engine_module.get_embedded_engine
-        embedded_engine_module.get_embedded_engine = lambda name: self.engine  # type: ignore[assignment]
+        embedded_engine_module.get_embedded_engine = lambda engine_name: self.engine
 
     def tearDown(self) -> None:
         import synapse.storage.databases.embedded_engine as embedded_engine_module
