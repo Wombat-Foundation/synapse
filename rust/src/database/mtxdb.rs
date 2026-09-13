@@ -319,6 +319,51 @@ pub fn get_state_hamt_roots_bulk(
     })
 }
 
+/// Force a re-scan of the mtxdb collections backing `state_groups`, picking
+/// up root/node writes another worker made after this process last loaded
+/// (or never loaded) those rooms' collections.
+///
+/// Every collection's `PackfileStorage` index is private, in-process memory
+/// (see `StorageEngine::refresh_collection`'s doc comment) -- a worker never
+/// sees another worker's writes to a room it has already touched, and never
+/// sees a room at all if it's never touched it, until this is called.
+/// `room_index` itself needs no such call (`get_many`'s `pread` is always
+/// current -- see its own module doc), so this only has to resolve
+/// `state_groups` to their rooms via that index, then refresh each distinct
+/// room's collection once. Groups with no room_index entry at all are
+/// skipped: there is nothing to refresh for a group this deployment has
+/// never (yet) migrated, and the caller's existing SQL-fallback/backfill
+/// logic already covers that case.
+///
+/// Intended as a narrow, explicit retry for `_get_state_groups_from_groups_txn`
+/// (bg_updates.py) to run once, on the specific groups a first read reported
+/// missing, before concluding a group is genuinely corrupt -- not a blanket
+/// per-read refresh, which would erase the whole point of the in-process
+/// index by re-paying its scan cost on every access.
+#[pyfunction]
+pub fn refresh_state_hamt_collections_for_groups(
+    py: Python<'_>,
+    namespace: String,
+    state_groups: Vec<i64>,
+) -> PyResult<()> {
+    py.detach(|| {
+        let room_prefixes = room_index::get_many(&namespace, &state_groups)?;
+        let mut seen_rooms: HashSet<Vec<u8>> = HashSet::new();
+        let engine = state_db()?;
+        for room_prefix in room_prefixes.into_iter().flatten() {
+            if seen_rooms.insert(room_prefix.clone()) {
+                let room_id = room_id_from_prefix(&room_prefix);
+                engine.refresh_collection(&room_id).map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "mtxdb refresh_collection error: {e}"
+                    ))
+                })?;
+            }
+        }
+        Ok(())
+    })
+}
+
 /// A flat, direct-offset `state_group -> room_prefix` index: entry N lives
 /// at byte offset `N * ROOM_PREFIX_LEN` in a per-namespace file under
 /// `<embedded_hamt_path>/room_index/<namespace_hash>.bin`. Exists so
@@ -1841,6 +1886,10 @@ pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     m.add_function(wrap_pyfunction!(put_state_hamt_roots, m)?)?;
     m.add_function(wrap_pyfunction!(get_state_hamt_roots_for_room, m)?)?;
     m.add_function(wrap_pyfunction!(get_state_hamt_roots_bulk, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        refresh_state_hamt_collections_for_groups,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(delete_state_hamt_roots_for_room, m)?)?;
     m.add_function(wrap_pyfunction!(put_room_index, m)?)?;
     m.add_function(wrap_pyfunction!(get_room_index, m)?)?;

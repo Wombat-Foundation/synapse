@@ -374,6 +374,45 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
                 retcols=("id",),
             )
             existing_in_sql = {group for (group,) in existing_rows}
+            if (
+                existing_in_sql
+                and getattr(self, "_embedded_hamt_engine", None) == "mtxdb"
+            ):
+                # In a multi-worker deployment, this worker's in-process
+                # mtxdb index may simply be stale rather than the group
+                # being genuinely corrupt: another worker can have written
+                # the root/nodes after this worker last loaded (or never
+                # loaded) that room's collection, and nothing invalidates
+                # this worker's copy automatically -- see
+                # `StorageEngine::refresh_collection`'s doc comment.
+                # `room_index` itself needs no such retry (it's always
+                # current -- a plain `pread`), so this resolves the
+                # affected groups to their rooms via that index and forces
+                # a one-time re-scan of each room's collection before
+                # concluding the data is actually missing.
+                from synapse.synapse_rust.mtxdb_engine import (
+                    refresh_state_hamt_collections_for_groups,
+                )
+
+                namespace = getattr(self, "_embedded_hamt_namespace", None)
+                # __init__ always sets this alongside `_embedded_hamt_engine`
+                # in the same branch (see store.py) -- reaching here with
+                # the engine set but not the namespace would be an init bug,
+                # not a normal runtime state.
+                assert namespace is not None
+                refresh_state_hamt_collections_for_groups(
+                    namespace, list(existing_in_sql)
+                )
+                retry_results, _ = self._get_state_groups_from_hamt_txn(
+                    txn, list(existing_in_sql), state_filter
+                )
+                results.update(retry_results)
+                existing_in_sql -= set(retry_results)
+                # Recovered groups must not also go through the legacy
+                # fallback below -- it would overwrite the correct,
+                # just-refreshed state with an empty/wrong reconstruction.
+                missing_groups = [g for g in missing_groups if g not in retry_results]
+
             if existing_in_sql:
                 raise RuntimeError(
                     f"State group(s) exist in SQL but have no HAMT root: {existing_in_sql}"

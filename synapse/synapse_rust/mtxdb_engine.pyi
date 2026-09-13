@@ -65,6 +65,10 @@ def get_state_hamt_roots_bulk(
     namespace: str,
     state_groups: list[int],
 ) -> list[tuple[bytes, bytes, str] | None]: ...
+def refresh_state_hamt_collections_for_groups(
+    namespace: str,
+    state_groups: list[int],
+) -> None: ...
 def delete_state_hamt_roots_for_room(
     namespace: str,
     room_prefix: bytes,
