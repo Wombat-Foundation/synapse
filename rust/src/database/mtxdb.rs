@@ -686,13 +686,31 @@ mod room_index {
 }
 
 #[pyfunction]
-pub fn put_room_index(namespace: String, entries: Vec<(i64, Vec<u8>)>) -> PyResult<()> {
-    room_index::put(&namespace, &entries)
+pub fn put_room_index(
+    py: Python<'_>,
+    namespace: String,
+    entries: Vec<(i64, Vec<u8>)>,
+) -> PyResult<()> {
+    // Unlike every other pyfunction in this file, this one was written
+    // without a `py.detach` -- PyO3 does not release the GIL automatically
+    // just because the underlying call blocks (pwrite + a Mutex lock on
+    // room_index::HANDLES here), the way CPython's own stdlib I/O does.
+    // Called once per state-group HAMT root write (~20k times in a full
+    // trial run), holding the GIL that whole time serializes every other
+    // Python thread in the process behind it -- including whatever thread
+    // is dispatching "concurrent" Postgres queries in the test harness --
+    // which shows up as a uniform slowdown across every SQL table's
+    // measured time, not as cost attributed to this function itself.
+    py.detach(|| room_index::put(&namespace, &entries))
 }
 
 #[pyfunction]
-pub fn get_room_index(namespace: String, state_groups: Vec<i64>) -> PyResult<Vec<Option<Vec<u8>>>> {
-    room_index::get_many(&namespace, &state_groups)
+pub fn get_room_index(
+    py: Python<'_>,
+    namespace: String,
+    state_groups: Vec<i64>,
+) -> PyResult<Vec<Option<Vec<u8>>>> {
+    py.detach(|| room_index::get_many(&namespace, &state_groups))
 }
 
 pub struct MtxdbStore {
