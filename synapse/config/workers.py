@@ -475,10 +475,12 @@ class WorkerConfig(Config):
         # A second, independent constraint on the same feature: the
         # embedded-HAMT-to-SQL backfill migration (state/store.py's
         # EMBEDDED_HAMT_MIGRATION_UPDATE_NAME) runs through Synapse's
-        # generic background-updates framework, whose poll loop is only
-        # ever started by the *main* process
+        # generic background-updates framework, whose poll loop is always
+        # started unconditionally by the *main* process
         # (synapse/app/homeserver.py's start() -- generic_worker.py never
-        # calls it, and `run_background_tasks_on` does not change this).
+        # calls it); but see the additional run_background_tasks_on
+        # constraint below, which closes the *other* way a second such
+        # loop can exist.
         # So the migration always executes on "master", regardless of
         # which instance StateGroupDataStore.__init__ decided is the mtxdb
         # writer. If master itself is not the sole events writer (the
