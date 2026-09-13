@@ -112,11 +112,10 @@ RUN \
   --mount=type=cache,target=/root/.cache/uv \
   --mount=type=cache,target=/synapse/target,sharing=locked \
   --mount=type=cache,target=${CARGO_HOME}/registry,sharing=locked \
-  RUSTC_BOOTSTRAP=$RUSTC_BOOTSTRAP \
   if [ -z "$TEST_ONLY_IGNORE_LOCKFILE" ]; then \
-    uv pip install --system --prefix="/install" --no-deps /synapse[all]; \
+    RUSTC_BOOTSTRAP=$RUSTC_BOOTSTRAP uv pip install --system --prefix="/install" --no-deps /synapse[all]; \
   else \
-    uv pip install --system --prefix="/install" /synapse[all]; \
+    RUSTC_BOOTSTRAP=$RUSTC_BOOTSTRAP uv pip install --system --prefix="/install" /synapse[all]; \
   fi
 
 ###
