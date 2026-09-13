@@ -1241,9 +1241,11 @@ class PersistEventsStore:
         # One sync for everything this txn wrote to the embedded engine
         # (event_to_state_groups batch + chain-links batch above), not one
         # per helper call -- see put_event_to_state_group_batch's and
-        # put_chain_links_batch's docstrings. `maybe_sync` itself no-ops
-        # unless the embedded engine is actually configured.
-        maybe_sync(SyncTier.DURABLE)
+        # put_chain_links_batch's docstrings. In SQL mode the engine was
+        # never opened, so skip the sync entirely (matching how the other
+        # embedded writes above gate on the engine being configured).
+        if self._embedded_hamt_engine == "mtxdb":
+            maybe_sync(SyncTier.DURABLE)
 
     def _persist_event_auth_chain_txn(
         self,
