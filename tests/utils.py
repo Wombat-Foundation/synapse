@@ -119,6 +119,20 @@ EMBEDDED_HAMT_PATH = os.environ.get("SYNAPSE_TEST_EMBEDDED_HAMT_PATH")
 _embedded_hamt_path_is_tmp = EMBEDDED_HAMT_PATH is None and EMBEDDED_HAMT_ENGINE
 if _embedded_hamt_path_is_tmp:
     EMBEDDED_HAMT_PATH = tempfile.mkdtemp()
+elif EMBEDDED_HAMT_PATH is not None:
+    # `trial --jobs=N` (see .github/workflows/tests.yml's trial-mtxdb job)
+    # forks N worker *processes* that all inherit the same
+    # SYNAPSE_TEST_EMBEDDED_HAMT_PATH env var. mtxdb takes an exclusive
+    # lock on its storage directory, so N workers all opening the literal
+    # configured path meant only the first ever succeeded -- every other
+    # worker's very first homeserver setup failed with "Failed to open
+    # embedded mtxdb engine" and every test in it errored. Namespace the
+    # configured path by pid so each worker process gets its own
+    # subdirectory instead of racing for the same one; a single-process
+    # run (no --jobs) just gets a `pid-<n>` subdir of the configured path,
+    # which is harmless.
+    EMBEDDED_HAMT_PATH = os.path.join(EMBEDDED_HAMT_PATH, f"pid-{os.getpid()}")
+    os.makedirs(EMBEDDED_HAMT_PATH, exist_ok=True)
 
 if EMBEDDED_HAMT_ENGINE:
     print(
