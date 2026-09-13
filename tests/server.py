@@ -1282,6 +1282,7 @@ def setup_test_homeserver(
     Calling this method directly is deprecated: you should instead derive from
     HomeserverTestCase.
     """
+    _t0_wall = time.monotonic()
     if reactor is None:
         reactor = ThreadedMemoryReactorClock()
 
@@ -1523,6 +1524,14 @@ def setup_test_homeserver(
     # pool has already been closed can leave a live PostgreSQL session behind
     # and make DROP DATABASE fail.
     cleanup_func(shutdown_hs_on_cleanup)
+
+    if USE_POSTGRES_FOR_TESTS:
+        # Whole-function wall time: homeserver construction + DB lifecycle +
+        # `hs.setup()` + `start_test_homeserver`. `hs_setup_total` above only
+        # measures the database-initialisation slice of this, so the difference
+        # between the two tags is the pure Python-side construction cost --
+        # that's the slice the per-table/lifecycle timers have never covered.
+        _pg_timing("hs_setup_wall", time.monotonic() - _t0_wall)
 
     return hs
 
