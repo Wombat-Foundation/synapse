@@ -1525,6 +1525,38 @@ pub fn batch_get(py: Python<'_>, keys: Vec<Vec<u8>>) -> PyResult<Vec<(Vec<u8>, V
     })
 }
 
+/// Shared implementation for `batch_put`/`batch_delete`: routes each key to
+/// its shard type and writes the (possibly empty, for tombstones) value.
+/// Does NOT reject empty values itself -- `batch_delete` relies on writing
+/// empty bytes as its deletion marker. Only the public `batch_put` entrypoint
+/// enforces the empty-value ban, to stop external callers from accidentally
+/// colliding with that tombstone encoding.
+fn batch_put_impl(pairs: Vec<(Vec<u8>, Vec<u8>)>) -> PyResult<()> {
+    let mut state_puts = Vec::new();
+    let mut event_puts = Vec::new();
+    for (key, value) in pairs {
+        let entry = (kv_node_id(&key), NodeData::new(bytes::Bytes::from(value)));
+        match shard_type_for_key(&key) {
+            ShardType::State => state_puts.push(entry),
+            ShardType::EventDag => event_puts.push(entry),
+            ShardType::AuthChain => unreachable!("flat KV never routes to auth-chain"),
+        }
+    }
+    for (shard_type, puts) in [
+        (ShardType::State, state_puts),
+        (ShardType::EventDag, event_puts),
+    ] {
+        if !puts.is_empty() {
+            db_for_shard_type(shard_type)?
+                .put_many(&kv_room_id(), &puts)
+                .map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb put error: {e}"))
+                })?;
+        }
+    }
+    Ok(())
+}
+
 /// Store flat-KV records, routing each key to its shard type internally.
 /// Rejects empty values to avoid collision with the tombstone encoding
 /// used by `batch_delete` (which writes empty bytes as a deletion marker).
@@ -1538,37 +1570,17 @@ pub fn batch_put(py: Python<'_>, pairs: Vec<(Vec<u8>, Vec<u8>)>) -> PyResult<()>
                 ));
             }
         }
-        let mut state_puts = Vec::new();
-        let mut event_puts = Vec::new();
-        for (key, value) in pairs {
-            let entry = (kv_node_id(&key), NodeData::new(bytes::Bytes::from(value)));
-            match shard_type_for_key(&key) {
-                ShardType::State => state_puts.push(entry),
-                ShardType::EventDag => event_puts.push(entry),
-                ShardType::AuthChain => unreachable!("flat KV never routes to auth-chain"),
-            }
-        }
-        for (shard_type, puts) in [
-            (ShardType::State, state_puts),
-            (ShardType::EventDag, event_puts),
-        ] {
-            if !puts.is_empty() {
-                db_for_shard_type(shard_type)?
-                    .put_many(&kv_room_id(), &puts)
-                    .map_err(|e| {
-                        pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb put error: {e}"))
-                    })?;
-            }
-        }
-        Ok(())
+        batch_put_impl(pairs)
     })
 }
 
 /// Tombstone flat-KV records in the shard type selected from each key.
 #[pyfunction]
 pub fn batch_delete(py: Python<'_>, keys: Vec<Vec<u8>>) -> PyResult<()> {
-    let pairs = keys.into_iter().map(|key| (key, Vec::new())).collect();
-    batch_put(py, pairs)
+    py.detach(|| {
+        let pairs = keys.into_iter().map(|key| (key, Vec::new())).collect();
+        batch_put_impl(pairs)
+    })
 }
 
 // -----------------------------------------------------------------------------
