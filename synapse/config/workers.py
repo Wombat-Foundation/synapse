@@ -436,30 +436,40 @@ class WorkerConfig(Config):
                 "Must specify at least one instance to handle `quarantined_media_changes` messages."
             )
 
-        # Reject embedded_hamt (mtxdb) + multi-worker deployments. The
-        # embedded engine builds its key index once at process startup by
-        # scanning shard files on disk, and only ever updates it via that
-        # same process's own put() calls — there is no fallback disk scan
-        # on an index miss. A second OS process opening the same
-        # embedded_hamt.path can therefore never see keys written by
-        # another process after its own startup, which can cause
-        # RuntimeError: "State group(s) exist in SQL but have no HAMT root"
-        # when a worker reads state that another worker wrote.
+        # Reject embedded_hamt (mtxdb) + *sharded-events* multi-worker
+        # deployments specifically, not multi-worker deployments in
+        # general. A worker process's mtxdb index is built once at open
+        # time by scanning shard files on disk, and only ever updated by
+        # that same process's own writes -- there is no ambient
+        # cross-process invalidation. A single-writer deployment handles
+        # this safely: exactly one process (the events writer -- see
+        # StateGroupDataStore.__init__) opens the store writable, every
+        # other process opens read-only and self-heals a stale read via
+        # `refresh_state_hamt_collections_for_groups`. That safety
+        # argument depends entirely on there being exactly one events
+        # writer: if `writers.events` names more than one instance (event
+        # persistence sharded across multiple writers), each of those
+        # instances would independently decide it's *the* mtxdb writer and
+        # all try to open writable, immediately hitting mtxdb's own
+        # exclusive-lock rejection (WouldBlock, "already locked by another
+        # writer process") -- a real failure this guard exists to turn
+        # into a clear config-time error instead of a confusing runtime
+        # one. Supporting sharded-events + mtxdb together needs one of:
+        # forwarding each writer's HAMT deltas to a single designated
+        # mtxdb-writer instance over replication, or partitioning mtxdb
+        # itself per writer -- neither exists yet.
         embedded_hamt_engine = self.root.database.embedded_hamt_engine
-        if embedded_hamt_engine and (
-            self.worker_app is not None or len(self.instance_map) > 0
-        ):
+        if embedded_hamt_engine and len(self.writers.events) > 1:
             raise ConfigError(
-                f"embedded_hamt.engine is set to {embedded_hamt_engine!r}, but this "
-                "deployment is configured to run multiple worker processes "
-                "(worker_app and/or instance_map is set). The embedded HAMT "
-                "engine's key index is built once at process startup by scanning "
-                "shard files on disk, and is only ever updated by that same "
-                "process's own writes -- it has no fallback disk scan on an index "
-                "miss. A second process opening the same embedded_hamt.path can "
-                "therefore never see keys written by another process after its "
-                "own startup (this is permanent, not a transient race). "
-                "Remove embedded_hamt.engine or run as a single process."
+                f"embedded_hamt.engine is set to {embedded_hamt_engine!r}, but "
+                f"writers.events names {len(self.writers.events)} instances "
+                f"({self.writers.events!r}). The embedded HAMT engine supports "
+                "exactly one writer process at a time (see "
+                "StateGroupDataStore.__init__'s writer/read-only split): with "
+                "more than one events writer, each would independently open "
+                "the store writable and immediately hit mtxdb's own exclusive-"
+                "lock rejection. Configure a single events writer, or remove "
+                "embedded_hamt.engine."
             )
 
         self.events_shard_config = RoutableShardedWorkerHandlingConfig(

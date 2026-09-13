@@ -114,19 +114,25 @@ class DatabaseConfigTestCase(unittest.TestCase):
 
 
 class EmbeddedHamtWorkerGuardTestCase(unittest.TestCase):
-    """Test that embedded_hamt.engine is rejected in multi-worker configs.
+    """Test that embedded_hamt.engine is rejected only for *sharded-events*
+    multi-worker configs (more than one instance in `writers.events`), not
+    multi-worker configs in general.
 
-    The embedded HAMT engine's
-    key index is built once at process startup and only ever updated by
-    that same process's own writes, so a multi-worker deployment can
-    silently fail to see keys written by other workers. See the guard in
-    synapse/config/workers.py for the full explanation.
+    A single events writer opens the embedded engine writable; every other
+    process (including any number of non-events workers) opens read-only
+    and self-heals a stale read via
+    `refresh_state_hamt_collections_for_groups` -- see
+    `StateGroupDataStore.__init__`. That safety argument breaks down with
+    more than one events writer, since each would independently decide
+    it's the writer and race for mtxdb's exclusive lock -- see the guard
+    in synapse/config/workers.py for the full explanation.
     """
 
     def _make_worker_config(
         self,
         worker_app: str | None = None,
         instance_map: dict | None = None,
+        stream_writers: dict | None = None,
         embedded_hamt_engine: str | None = "mtxdb",
     ) -> None:
         """Build a WorkerConfig and call read_config, triggering the guard."""
@@ -143,31 +149,66 @@ class EmbeddedHamtWorkerGuardTestCase(unittest.TestCase):
             config["worker_app"] = worker_app
         if instance_map is not None:
             config["instance_map"] = instance_map
+        if stream_writers is not None:
+            config["stream_writers"] = stream_writers
         worker_config.read_config(config, allow_secrets_in_config=True)
 
-    def test_worker_app_raises(self) -> None:
-        """embedded_hamt + worker_app → ConfigError."""
+    def test_worker_app_with_single_events_writer_ok(self) -> None:
+        """embedded_hamt + worker_app, default (single) events writer →
+        no error: this is the supported single-writer, N-read-only-worker
+        topology."""
+        self._make_worker_config(
+            worker_app="synapse.app.generic_worker",
+            instance_map={"main": {"host": "127.0.0.1", "port": 8008}},
+        )
+
+    def test_instance_map_with_single_events_writer_ok(self) -> None:
+        """embedded_hamt + non-empty instance_map (no worker_app), default
+        (single) events writer → no error."""
+        self._make_worker_config(
+            instance_map={"main": {"host": "127.0.0.1", "port": 8008}},
+        )
+
+    def test_sharded_events_writers_raises(self) -> None:
+        """embedded_hamt + more than one events writer → ConfigError: each
+        would independently open the store writable and race for mtxdb's
+        exclusive lock."""
         with self.assertRaises(ConfigError):
             self._make_worker_config(
                 worker_app="synapse.app.generic_worker",
-                instance_map={"main": {"host": "127.0.0.1", "port": 8008}},
+                instance_map={
+                    "main": {"host": "127.0.0.1", "port": 8008},
+                    "event_persister1": {"host": "127.0.0.1", "port": 8009},
+                    "event_persister2": {"host": "127.0.0.1", "port": 8010},
+                },
+                stream_writers={"events": ["event_persister1", "event_persister2"]},
             )
 
-    def test_instance_map_raises(self) -> None:
-        """embedded_hamt + non-empty instance_map (no worker_app) → ConfigError."""
-        with self.assertRaises(ConfigError):
-            self._make_worker_config(
-                instance_map={"main": {"host": "127.0.0.1", "port": 8008}},
-            )
+    def test_single_explicit_events_writer_ok(self) -> None:
+        """embedded_hamt + exactly one explicitly-configured events writer
+        → no error."""
+        self._make_worker_config(
+            worker_app="synapse.app.generic_worker",
+            instance_map={
+                "main": {"host": "127.0.0.1", "port": 8008},
+                "event_persister1": {"host": "127.0.0.1", "port": 8009},
+            },
+            stream_writers={"events": "event_persister1"},
+        )
 
     def test_single_process_ok(self) -> None:
         """embedded_hamt alone (no worker_app, no instance_map) → no error."""
         self._make_worker_config()
 
-    def test_no_embedded_hamt_with_workers_ok(self) -> None:
-        """worker_app + instance_map without embedded_hamt → no error."""
+    def test_no_embedded_hamt_with_sharded_writers_ok(self) -> None:
+        """Sharded events writers without embedded_hamt → no error."""
         self._make_worker_config(
             worker_app="synapse.app.generic_worker",
-            instance_map={"main": {"host": "127.0.0.1", "port": 8008}},
+            instance_map={
+                "main": {"host": "127.0.0.1", "port": 8008},
+                "event_persister1": {"host": "127.0.0.1", "port": 8009},
+                "event_persister2": {"host": "127.0.0.1", "port": 8010},
+            },
+            stream_writers={"events": ["event_persister1", "event_persister2"]},
             embedded_hamt_engine=None,
         )
