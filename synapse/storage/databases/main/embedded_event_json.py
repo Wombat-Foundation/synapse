@@ -51,7 +51,11 @@ import logging
 import struct
 from typing import TYPE_CHECKING
 
-from synapse.storage.databases.main.embedded_common import SyncTier, maybe_sync
+from synapse.storage.databases.main.embedded_common import (
+    SyncTier,
+    maybe_sync,
+    namespace_hash,
+)
 
 if TYPE_CHECKING:
     from synapse.server import HomeServer
@@ -75,16 +79,10 @@ def open_embedded_event_json_engine(hs: "HomeServer") -> bool:
     )
 
 
-def _namespace_hash(namespace: str) -> bytes:
-    import hashlib
-
-    return hashlib.sha256(namespace.encode("utf-8")).digest()[:16]
-
-
 def _event_json_key(namespace: str, event_id: str) -> bytes:
     return (
         b"event_json:"
-        + _namespace_hash(namespace).hex().encode("ascii")
+        + namespace_hash(namespace).hex().encode("ascii")
         + b":"
         + event_id.encode("utf-8")
     )

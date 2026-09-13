@@ -116,7 +116,8 @@ if EMBEDDED_HAMT_ENGINE is None and os.environ.get("SYNAPSE_TEST_MTXDB"):
     EMBEDDED_HAMT_ENGINE = "mtxdb"
 
 EMBEDDED_HAMT_PATH = os.environ.get("SYNAPSE_TEST_EMBEDDED_HAMT_PATH")
-if EMBEDDED_HAMT_PATH is None and EMBEDDED_HAMT_ENGINE:
+_embedded_hamt_path_is_tmp = EMBEDDED_HAMT_PATH is None and EMBEDDED_HAMT_ENGINE
+if _embedded_hamt_path_is_tmp:
     EMBEDDED_HAMT_PATH = tempfile.mkdtemp()
 
 if EMBEDDED_HAMT_ENGINE:
@@ -124,6 +125,20 @@ if EMBEDDED_HAMT_ENGINE:
         f"Embedded HAMT engine: {EMBEDDED_HAMT_ENGINE} at {EMBEDDED_HAMT_PATH}",
         file=sys.stderr,
     )
+
+if _embedded_hamt_path_is_tmp and not os.environ.get(
+    "SYNAPSE_TEST_KEEP_EMBEDDED_HAMT_PATH"
+):
+    # Clean up an auto-created store (set e.g. when debugging a failure and
+    # you want to inspect the store afterwards). An explicitly-configured
+    # `SYNAPSE_TEST_EMBEDDED_HAMT_PATH` is never touched.
+    import shutil
+
+    def _cleanup_embedded_hamt(path: str) -> None:
+        shutil.rmtree(path, ignore_errors=True)
+
+    assert EMBEDDED_HAMT_PATH is not None
+    atexit.register(_cleanup_embedded_hamt, EMBEDDED_HAMT_PATH)
 
 # the dbname we will connect to in order to create the base database.
 POSTGRES_DBNAME_FOR_INITIAL_CREATE = "postgres"

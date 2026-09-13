@@ -27,6 +27,7 @@ import os
 import os.path
 import sqlite3
 import sys
+import threading
 import time
 import uuid
 import warnings
@@ -135,6 +136,11 @@ PREPPED_SQLITE_DB_CONN: LoggingDatabaseConnection | None = None
 _PG_TIMINGS: dict[str, float] = defaultdict(float)
 _PG_TIMING_COUNTS: dict[str, int] = defaultdict(int)
 
+# Guards the timing dicts: `_pg_timing` is fed from the database layer
+# (potentially a different thread than the reactor), while the
+# SIGTERM/atexit flushers below sort and iterate it.
+_PG_TIMINGS_LOCK = threading.Lock()
+
 _timings_file: IO[str] | None = None
 if os.environ.get("SYNAPSE_PG_TIMINGS"):
     _timings_path = os.environ.get("SYNAPSE_PG_TIMINGS_FILE")
@@ -152,26 +158,34 @@ def _timings_print(*args: object) -> None:
 
 
 def _pg_timing(tag: str, elapsed: float) -> None:
-    _PG_TIMINGS[tag] += elapsed
-    _PG_TIMING_COUNTS[tag] += 1
+    with _PG_TIMINGS_LOCK:
+        _PG_TIMINGS[tag] += elapsed
+        _PG_TIMING_COUNTS[tag] += 1
 
 
 def _print_pg_timings() -> None:
     if not os.environ.get("SYNAPSE_PG_TIMINGS"):
         return
+    with _PG_TIMINGS_LOCK:
+        if not _PG_TIMINGS:
+            return
+        # Snapshot under the lock so the SIGTERM/atexit flusher never races a
+        # concurrent `_pg_timing` on these dicts.
+        timings = dict(_PG_TIMINGS)
+        counts = dict(_PG_TIMING_COUNTS)
     _timings_print("\n=== Postgres test-DB lifecycle timings ===")
     _timings_print(
         f"  {'':40s}  {'total':>9s}  {'calls':>6s}  {'avg':>11s}",
     )
-    for tag in sorted(_PG_TIMINGS):
-        total_s = _PG_TIMINGS[tag]
-        count = _PG_TIMING_COUNTS[tag]
+    for tag in sorted(timings):
+        total_s = timings[tag]
+        count = counts[tag]
         total_ms = total_s * 1000
         avg_ms = (total_s / count) * 1000 if count else 0.0
         _timings_print(
             f"  {tag:40s}  {total_ms:8.1f}ms  {count:6d}  {avg_ms:10.3f}ms",
         )
-    total_s = sum(_PG_TIMINGS.values())
+    total_s = sum(timings.values())
     total_ms = total_s * 1000
     _timings_print("")
     _timings_print(
@@ -182,6 +196,22 @@ def _print_pg_timings() -> None:
 
 
 atexit.register(_print_pg_timings)
+
+if os.environ.get("SYNAPSE_PG_TIMINGS"):
+    import signal as _signal
+    from types import FrameType as _FrameType
+
+    _original_sigterm_pg_timings = _signal.getsignal(_signal.SIGTERM)
+
+    def _flush_pg_timings_on_sigterm(signum: int, frame: _FrameType | None) -> None:
+        _print_pg_timings()
+        if callable(_original_sigterm_pg_timings):
+            _original_sigterm_pg_timings(signum, frame)
+        elif _original_sigterm_pg_timings == _signal.SIG_DFL:
+            _signal.signal(_signal.SIGTERM, _signal.SIG_DFL)
+            _signal.raise_signal(_signal.SIGTERM)
+
+    _signal.signal(_signal.SIGTERM, _flush_pg_timings_on_sigterm)
 
 
 class TimedOutException(Exception):
@@ -1472,7 +1502,10 @@ def setup_test_homeserver(
 
     with patch("synapse.storage.database.make_pool", side_effect=make_fake_db_pool):
         hs.setup()
-    _pg_timing("hs_setup_total", time.monotonic() - _t0)
+    if USE_POSTGRES_FOR_TESTS:
+        # Only counted for PG: the "Postgres test-DB lifecycle timings"
+        # summary must not silently fold SQLite setup into PG numbers.
+        _pg_timing("hs_setup_total", time.monotonic() - _t0)
 
     if os.environ.get("SYNAPSE_PG_TIMINGS"):
         set_pg_timing_callback(None)

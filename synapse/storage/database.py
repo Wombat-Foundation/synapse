@@ -25,6 +25,7 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
 import types
 from collections import defaultdict
@@ -112,6 +113,14 @@ _TABLE_OPS: dict[str, float] = defaultdict(float)
 _TABLE_OPS_COUNTS: dict[str, int] = defaultdict(int)
 _TABLE_OPS_ROWS: dict[str, int] = defaultdict(int)
 
+# Guards the three dicts above: writes happen from whatever thread executes
+# the query, while the SIGTERM/atexit flushers run on what may be a
+# different thread (and the SIGTERM handler can fire mid-query). Without a
+# lock, `_print_table_ops`' `sorted(_TABLE_OPS.items(), ...)` can hit
+# "dictionary changed size during iteration" and lose the flush it exists
+# to produce.
+_TABLE_OPS_LOCK = threading.Lock()
+
 _TABLE_RE = re.compile(
     r"(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM|FROM|JOIN)\s+(\w+)",
     re.IGNORECASE,
@@ -142,39 +151,46 @@ def _track_table_op(sql: str, elapsed: float, rowcount: int = 0) -> None:
     if not m:
         return
     table = m.group(1).lower()
-    _TABLE_OPS[table] += elapsed
-    _TABLE_OPS_COUNTS[table] += 1
-    # rowcount is instrumentation, not correctness -- a test's mock cursor
-    # (e.g. tests.storage.test_base's Mock() txn, when a test doesn't set
-    # .rowcount explicitly) can hand back a non-int Mock attribute instead
-    # of a real DB-API rowcount. This must never turn on-by-default timing
-    # instrumentation into a hard crash of the actual query it's timing.
-    if isinstance(rowcount, int):
-        _TABLE_OPS_ROWS[table] += max(rowcount, 0)
+    with _TABLE_OPS_LOCK:
+        _TABLE_OPS[table] += elapsed
+        _TABLE_OPS_COUNTS[table] += 1
+        # rowcount is instrumentation, not correctness -- a test's mock cursor
+        # (e.g. tests.storage.test_base's Mock() txn, when a test doesn't set
+        # .rowcount explicitly) can hand back a non-int Mock attribute instead
+        # of a real DB-API rowcount. This must never turn on-by-default timing
+        # instrumentation into a hard crash of the actual query it's timing.
+        if isinstance(rowcount, int):
+            _TABLE_OPS_ROWS[table] += max(rowcount, 0)
 
 
 def _print_table_ops() -> None:
     if not os.environ.get("SYNAPSE_PG_TIMINGS"):
         return
-    if not _TABLE_OPS:
-        return
+    with _TABLE_OPS_LOCK:
+        if not _TABLE_OPS:
+            return
+        # Snapshot under the lock so the SIGTERM/atexit flusher never races a
+        # concurrent `_track_table_op` on `_TABLE_OPS` (see _TABLE_OPS_LOCK).
+        table_ops = dict(_TABLE_OPS)
+        table_counts = dict(_TABLE_OPS_COUNTS)
+        table_rows = dict(_TABLE_OPS_ROWS)
     # Sort by total time descending
-    ranked = sorted(_TABLE_OPS.items(), key=lambda kv: kv[1], reverse=True)
+    ranked = sorted(table_ops.items(), key=lambda kv: kv[1], reverse=True)
     _timings_print("\n=== Per-table SQL timing (top 30) ===")
     _timings_print(
         f"  {'table':40s}  {'total':>10s}  {'calls':>6s}  {'rows':>6s}  {'avg':>13s}",
     )
     for table, total_s in ranked[:30]:
-        count = _TABLE_OPS_COUNTS[table]
-        rows = _TABLE_OPS_ROWS[table]
+        count = table_counts.get(table, 0)
+        rows = table_rows.get(table, 0)
         total_ms = total_s * 1000
         avg_ms = (total_s / count) * 1000 if count else 0.0
         _timings_print(
             f"  {table:40s}  {total_ms:8.1f}ms  {count:6d}  {rows:6d}  {avg_ms:10.3f}ms",
         )
-    total_time_s = sum(_TABLE_OPS.values())
-    total_count = sum(_TABLE_OPS_COUNTS.values())
-    total_rows = sum(_TABLE_OPS_ROWS.values())
+    total_time_s = sum(table_ops.values())
+    total_count = sum(table_counts.values())
+    total_rows = sum(table_rows.values())
     total_ms = total_time_s * 1000
     avg_ms = (total_time_s / total_count) * 1000 if total_count else 0.0
     _timings_print("")

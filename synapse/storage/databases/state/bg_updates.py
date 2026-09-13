@@ -20,7 +20,6 @@
 #
 
 import atexit
-import hashlib
 import logging
 import os
 import struct
@@ -42,6 +41,7 @@ from synapse.storage.database import (
     LoggingTransaction,
 )
 from synapse.storage.databases.embedded_engine import get_embedded_engine
+from synapse.storage.databases.main.embedded_common import namespace_hash
 from synapse.storage.engines import PostgresEngine
 from synapse.types import MutableStateMap, StateMap
 from synapse.types.state import StateFilter
@@ -92,24 +92,31 @@ def _state_timing(tag: str, elapsed: float) -> None:
 def _print_state_timings() -> None:
     if not os.environ.get("SYNAPSE_PG_TIMINGS"):
         return
+    lock = _STATE_TIMING_LOCK
+    assert lock is not None
+    with lock:
+        if not _STATE_TIMINGS:
+            return
+        # Snapshot under the lock so the SIGTERM/atexit flusher never races a
+        # concurrent `_state_timing` on these dicts.
+        timings = dict(_STATE_TIMINGS)
+        counts = dict(_STATE_TIMING_COUNTS)
     _timings_print("\n=== State store mtxdb-vs-SQL timings ===")
     _timings_print(
         f"  {'':40s}  {'total':>10s}  {'calls':>6s}  {'avg':>13s}",
     )
 
-    embedded_tags = sorted(t for t in _STATE_TIMINGS if t.endswith("_embedded"))
-    sql_tags = sorted(t for t in _STATE_TIMINGS if t.endswith("_sql"))
-    other_tags = sorted(
-        t for t in _STATE_TIMINGS if not t.endswith(("_embedded", "_sql"))
-    )
+    embedded_tags = sorted(t for t in timings if t.endswith("_embedded"))
+    sql_tags = sorted(t for t in timings if t.endswith("_sql"))
+    other_tags = sorted(t for t in timings if not t.endswith(("_embedded", "_sql")))
 
     def _print_tag_group(label: str, tags: list[str]) -> None:
         if not tags:
             return
         _timings_print(f"  -- {label} --")
         for tag in tags:
-            total_s = _STATE_TIMINGS[tag]
-            count = _STATE_TIMING_COUNTS[tag]
+            total_s = timings[tag]
+            count = counts[tag]
             total_ms = total_s * 1000
             avg_ms = (total_s / count) * 1000 if count else 0.0
             _timings_print(
@@ -117,8 +124,8 @@ def _print_state_timings() -> None:
             )
 
     def _print_subtotal(label: str, tags: list[str]) -> None:
-        total_s = sum(_STATE_TIMINGS[tag] for tag in tags)
-        count = sum(_STATE_TIMING_COUNTS[tag] for tag in tags)
+        total_s = sum(timings[tag] for tag in tags)
+        count = sum(counts[tag] for tag in tags)
         total_ms = total_s * 1000
         avg_ms = (total_s / count) * 1000 if count else 0.0
         _timings_print(
@@ -133,8 +140,8 @@ def _print_state_timings() -> None:
     _timings_print("")
     _print_tag_group("other", other_tags)
 
-    total_time_s = sum(_STATE_TIMINGS.values())
-    total_count = sum(_STATE_TIMING_COUNTS.values())
+    total_time_s = sum(timings.values())
+    total_count = sum(counts.values())
     total_ms = total_time_s * 1000
     avg_ms = (total_time_s / total_count) * 1000 if total_count else 0.0
     _timings_print("")
@@ -171,10 +178,10 @@ def _state_hamt_node_key(
     namespace: str, room_prefix: bytes, structural_hash: bytes
 ) -> bytes:
     # Must match `node_key` in `rust/src/database/core.rs`.
-    namespace_hash = hashlib.sha256(namespace.encode("utf-8")).digest()[:16]
+    ns_hash = namespace_hash(namespace)
     return (
         b"hamt:node:"
-        + namespace_hash.hex().encode("ascii")
+        + ns_hash.hex().encode("ascii")
         + b":"
         + room_prefix.hex().encode("ascii")
         + b":"
@@ -189,11 +196,9 @@ def _state_hamt_root_key(namespace: str, state_group: int) -> bytes:
     namespace is part of the key. The room prefix is stored in the
     value, allowing readers to locate a root from only its state-group id.
     """
-    namespace_hash = hashlib.sha256(namespace.encode("utf-8")).digest()[:16]
+    ns_hash = namespace_hash(namespace)
     return (
-        b"hamt:root:"
-        + namespace_hash.hex().encode("ascii")
-        + str(state_group).encode("ascii")
+        b"hamt:root:" + ns_hash.hex().encode("ascii") + str(state_group).encode("ascii")
     )
 
 

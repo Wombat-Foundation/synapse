@@ -53,23 +53,19 @@ concurrent increment on the same key and lose an update).
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import struct
 
 from synapse.storage.databases.embedded_engine import get_embedded_engine
+from synapse.storage.databases.main.embedded_common import namespace_hash
 
 logger = logging.getLogger(__name__)
-
-
-def _namespace_hash(namespace: str) -> bytes:
-    return hashlib.sha256(namespace.encode("utf-8")).digest()[:16]
 
 
 def _event_to_state_group_key(namespace: str, event_id: str) -> bytes:
     return (
         b"event_to_state_group:"
-        + _namespace_hash(namespace).hex().encode("ascii")
+        + namespace_hash(namespace).hex().encode("ascii")
         + b":"
         + event_id.encode("utf-8")
     )
@@ -78,7 +74,7 @@ def _event_to_state_group_key(namespace: str, event_id: str) -> bytes:
 def _state_group_refcount_key(namespace: str, state_group: int) -> bytes:
     return (
         b"state_group_refcount:"
-        + _namespace_hash(namespace).hex().encode("ascii")
+        + namespace_hash(namespace).hex().encode("ascii")
         + b":"
         + struct.pack(">q", state_group)
     )

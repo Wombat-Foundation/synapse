@@ -673,19 +673,23 @@ run_one_pattern() {
   _pg_timing_dir=""
   _pg_log_watcher_pid=""
   if [[ -n "${SYNAPSE_PG_TIMINGS:-}" ]]; then
+    # Use whichever runtime the harness was configured with (podman under
+    # `PODMAN=1`); plain `docker` may not even be installed there, and the
+    # podman CLI talks to the podman socket directly.
+    local _rt="${CONTAINER_RUNTIME:-docker}"
     _pg_timing_dir="$(mktemp -d "${staged_results_file}.pgtimings.XXXXXX")"
     local _container_label="COMPLEMENT_WRAPPER_TOKEN=$COMPLEMENT_WRAPPER_TOKEN"
     # Follow logs from complement containers as they start.  Subscribe to
-    # docker-events *before* scanning already-running containers, then feed
+    # container-events *before* scanning already-running containers, then feed
     # both container-id sources through one loop body; a `seen` set stops a
     # container appearing in both from being followed twice. This narrows
     # the start/scan race but does not fully close it: the background
-    # `docker events` process below is not guaranteed to be connected to
+    # `events` process below is not guaranteed to be connected to
     # the daemon before the scan runs, so a container starting in that
     # small window could still be missed by both paths.
     #
-    # Every process here -- the `docker events` reader, the merge/dedupe
-    # pipeline, and each `docker logs -f` follower it forks -- is a
+    # Every process here -- the `events` reader, the merge/dedupe
+    # pipeline, and each `logs -f` follower it forks -- is a
     # grandchild (or deeper) of this function, so plain `wait` on their
     # pids cannot reap them. Instead, `set -m` gives this whole subshell
     # its own process group, so it can be torn down as a unit with
@@ -693,15 +697,15 @@ run_one_pattern() {
     # down this function).
     (
       set -m
-      docker events --filter 'event=start' --format '{{.ID}}' 2>/dev/null >"${_pg_timing_dir}/.events_stream" &
+      "$_rt" events --filter 'event=start' --format '{{.ID}}' 2>/dev/null >"${_pg_timing_dir}/.events_stream" &
       declare -A _seen
-      { docker ps -q 2>/dev/null; tail -n +1 -f "${_pg_timing_dir}/.events_stream" 2>/dev/null; } \
+      { "$_rt" ps -q 2>/dev/null; tail -n +1 -f "${_pg_timing_dir}/.events_stream" 2>/dev/null; } \
         | while IFS= read -r _cid; do
         [[ -n "${_seen[$_cid]:-}" ]] && continue
         _seen[$_cid]=1
-        if docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$_cid" 2>/dev/null \
+        if "$_rt" inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$_cid" 2>/dev/null \
             | grep -Fxq "$_container_label"; then
-          docker logs -f "$_cid" >>"${_pg_timing_dir}/${_cid}.log" 2>&1 &
+          "$_rt" logs -f "$_cid" >>"${_pg_timing_dir}/${_cid}.log" 2>&1 &
         fi
       done
     ) &
@@ -760,7 +764,11 @@ run_one_pattern() {
     wait "$_pg_log_watcher_pid" 2>/dev/null || true
     _pg_log_watcher_pid=""
   fi
-  export _PG_TIMING_DIR="${_pg_timing_dir:-}"
+  # Accumulate every pattern invocation's timing dir instead of overwriting,
+  # so `finish` extracts timings from *all* -run patterns, not just the last.
+  if [[ -n "${_pg_timing_dir:-}" ]]; then
+    _PG_TIMING_DIRS="${_PG_TIMING_DIRS:+$_PG_TIMING_DIRS }$_pg_timing_dir"
+  fi
 
   return "$_go_exit"
 }
@@ -770,6 +778,9 @@ main "$@"
 test_start_seconds=$SECONDS
 TEST_EXIT_CODE=0
 _active_producer=""
+# Accrued PG-timing capture dirs, one per `run_one_pattern` invocation
+# (only populated under `SYNAPSE_PG_TIMINGS=1`); see `finish` below.
+_PG_TIMING_DIRS=""
 
 # Merges staged results into the main ledger and prints a summary. Called
 # from the EXIT trap below so it runs no matter how the script stops --
@@ -861,15 +872,26 @@ for line in open(sys.argv[1]):
 if not results:
     sys.exit(0)
 
+# go test reports both a parent aggregate event and each of its subtests'
+# events (e.g. TestX plus TestX/foo). Summing both would double-count the
+# parent's elapsed time (which already includes its subtests), so keep only
+# leaf results: a result is a leaf unless some other reported test name is
+# <name> + '/'.
+names = {test for test, _, _ in results}
+def is_leaf(name):
+    return not any(other.startswith(name + '/') for other in names)
+
+leaf_results = [r for r in results if is_leaf(r[0])]
+
 # Slowest 10 tests
 print('--- Slowest tests ---')
-for test, action, elapsed in sorted(results, key=lambda x: -x[2])[:10]:
+for test, action, elapsed in sorted(leaf_results, key=lambda x: -x[2])[:10]:
     print(f'  {elapsed:7.2f}s  {action.upper():6s}  {test}')
 
 # Time by suite (first path component after Test)
 suite_times = defaultdict(float)
 suite_counts = defaultdict(int)
-for test, action, elapsed in results:
+for test, action, elapsed in leaf_results:
     suite = test.split('/')[0]
     suite_times[suite] += elapsed
     suite_counts[suite] += 1
@@ -892,10 +914,13 @@ for suite, total in sorted(suite_times.items(), key=lambda x: -x[1]):
   fi
 
   # ── Extract timing from captured docker logs ─────────────────────────────
-  if [[ -n "${SYNAPSE_PG_TIMINGS:-}" ]] && [[ -n "${_PG_TIMING_DIR:-}" ]]; then
+  if [[ -n "${SYNAPSE_PG_TIMINGS:-}" ]] && [[ -n "${_PG_TIMING_DIRS:-}" ]]; then
     local _found_timing=0
-    if [[ -d "$_PG_TIMING_DIR" ]]; then
-      for _f in "${_PG_TIMING_DIR}"/*.log; do
+    for _pg_dir in $_PG_TIMING_DIRS; do
+      if [[ ! -d "$_pg_dir" ]]; then
+        continue
+      fi
+      for _f in "${_pg_dir}"/*.log; do
         [ -f "$_f" ] || continue
         # Extract the timing sections from the captured log.
         local _sections
@@ -917,9 +942,9 @@ for suite, total in sorted(suite_times.items(), key=lambda x: -x[1]):
           echo "$_sections" >&2
         fi
       done
-      if [ "$_found_timing" -eq 1 ]; then
-        echo "=== END SYNAPSE PG TIMINGS ===" >&2
-      fi
+    done
+    if [ "$_found_timing" -eq 1 ]; then
+      echo "=== END SYNAPSE PG TIMINGS ===" >&2
     fi
   fi
 
