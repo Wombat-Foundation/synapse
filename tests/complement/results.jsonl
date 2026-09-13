@@ -146,9 +146,9 @@
 {"Action":"pass","Test":"TestEvent/Parallel"}
 {"Action":"pass","Test":"TestEvent/Parallel/Large_Event"}
 {"Action":"pass","Test":"TestEvent/Parallel/Large_State_Event"}
-{"Action":"fail","Test":"TestEventAuth"}
-{"Action":"fail","Test":"TestEventAuth/returns_auth_events_for_the_requested_event"}
-{"Action":"fail","Test":"TestEventAuth/returns_the_auth_chain_for_the_requested_event"}
+{"Action":"pass","Test":"TestEventAuth"}
+{"Action":"pass","Test":"TestEventAuth/returns_auth_events_for_the_requested_event"}
+{"Action":"pass","Test":"TestEventAuth/returns_the_auth_chain_for_the_requested_event"}
 {"Action":"pass","Test":"TestFederatedClientSpaces"}
 {"Action":"pass","Test":"TestFederationKeyUploadQuery"}
 {"Action":"pass","Test":"TestFederationKeyUploadQuery/Can_claim_remote_one_time_key_using_POST"}

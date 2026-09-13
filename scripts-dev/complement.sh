@@ -469,6 +469,15 @@ main() {
 
   echo "Database: ${PASS_SYNAPSE_COMPLEMENT_DATABASE} (workers: ${PASS_SYNAPSE_COMPLEMENT_USE_WORKERS:-false}) | Embedded HAMT engine: ${PASS_SYNAPSE_EMBEDDED_HAMT_ENGINE:-<none>}${PASS_SYNAPSE_EMBEDDED_HAMT_ENGINE:+ at ${PASS_SYNAPSE_EMBEDDED_HAMT_PATH:-<not set>}}" >&2
 
+  # Complement's Destroy() force-removes every homeserver container
+  # unconditionally, pass or fail -- there is no "keep failed containers"
+  # option, so this hook (which runs while the container is still up,
+  # per executePostScript in complement's deployer.go) is the only place
+  # that can save anything from a failing run for later inspection, and
+  # it also dumps Postgres stats test-to-test along the way. Don't clobber
+  # a caller who has already set their own COMPLEMENT_POST_TEST_SCRIPT.
+  export COMPLEMENT_POST_TEST_SCRIPT="${COMPLEMENT_POST_TEST_SCRIPT:-${repo_root}/scripts-dev/complement_post_test.sh}"
+
   if [[ -n "${SYNAPSE_PG_TIMINGS:-}" ]]; then
     export PASS_SYNAPSE_PG_TIMINGS=1
   fi
