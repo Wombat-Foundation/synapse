@@ -2002,6 +2002,8 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     len(state_groups),
                     exc_info=True,
                 )
+
+            if len(resolved_groups) < len(state_groups):
                 return
 
     def _purge_room_state_txn(
