@@ -162,12 +162,31 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     f"Unknown embedded_hamt_engine: {self._embedded_hamt_engine!r} "
                     "(only 'mtxdb' is supported)"
                 )
+            # mtxdb's writable open takes an exclusive lock (see
+            # PackfileStorage::open vs open_read_only) -- only one process
+            # may hold it. State groups are only ever created on an events
+            # stream writer (PersistEventsStore itself asserts this -- see
+            # events.py), so that's the natural, already-unique-by-config
+            # choice of which single process should be that writer; every
+            # other instance (including a monolith, where it's trivially
+            # the only instance and so always the writer) opens read-only
+            # instead of dying at the lock. A read-only instance's index is
+            # a point-in-time snapshot -- see
+            # `refresh_state_hamt_collections_for_groups`'s call site for
+            # how a stale read there catches up.
+            self._embedded_hamt_is_writer = (
+                hs.get_instance_name() in hs.config.worker.writers.events
+            )
             try:
                 engine = get_embedded_engine(self._embedded_hamt_engine)
-                engine.open_client(self._embedded_hamt_path)
+                if self._embedded_hamt_is_writer:
+                    engine.open_client(self._embedded_hamt_path)
+                else:
+                    engine.open_client_read_only(self._embedded_hamt_path)
                 logger.info(
-                    "Opened embedded %s engine at %s for state HAMT offload",
+                    "Opened embedded %s engine (%s) at %s for state HAMT offload",
                     self._embedded_hamt_engine,
+                    "writer" if self._embedded_hamt_is_writer else "read-only",
                     self._embedded_hamt_path,
                 )
             except Exception as e:
@@ -175,7 +194,16 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     f"Failed to open embedded {self._embedded_hamt_engine} engine at {self._embedded_hamt_path}"
                 ) from e
 
-            if hs.config.worker.run_background_tasks:
+            # Gated on being the mtxdb *writer* (the events-writer
+            # instance), not on the generic `run_background_tasks`
+            # designation: these all write (delete, fsync, migrate), and a
+            # read-only-opened handle fails at the OS level on any write.
+            # `run_background_tasks` and "is the events writer" are two
+            # independent designations that can land on different
+            # instances in some worker topologies -- this must follow the
+            # latter regardless of the former, or it silently fails (sync)
+            # or never runs anywhere (drain/migrate) on such a topology.
+            if self._embedded_hamt_is_writer:
                 hs.get_clock().looping_call(
                     self._drain_embedded_state_hamt_root_deletion_queue,
                     Duration(minutes=5),
@@ -191,10 +219,10 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 # the engine is exclusive, but bounding the durability
                 # window to a few seconds via a timer, instead of an fsync
                 # on every write, is the same tradeoff SQL's own
-                # asynchronous-commit mode makes). One process flushes for
-                # everyone: mtxdb's shard file is a single mmap'd file
-                # shared across workers, so any process holding it open
-                # can fsync all of it regardless of who wrote which bytes.
+                # asynchronous-commit mode makes). Only the writer can
+                # fsync at all now (a read-only handle has nothing dirty of
+                # its own to flush), so this can no longer be "any process
+                # holding it open" -- it must be the one process that is.
                 hs.get_clock().looping_call(
                     self._periodic_embedded_sync,
                     Duration(seconds=1),
@@ -204,7 +232,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 self.EMBEDDED_HAMT_MIGRATION_UPDATE_NAME,
                 self._background_migrate_state_hamt_to_embedded,
             )
-            if hs.config.worker.run_background_tasks:
+            if self._embedded_hamt_is_writer:
                 hs.run_as_background_process(
                     "enqueue_state_hamt_embedded_migration",
                     self._enqueue_embedded_hamt_migration_if_needed,
