@@ -55,6 +55,7 @@ from synapse.storage.databases.main.embedded_common import (
     SyncTier,
     ffi_timing,
     maybe_sync,
+    mirror_timing,
 )
 
 
@@ -94,11 +95,12 @@ def put_chain_links_batch(
     """
     if not links:
         return
-    _et = time.monotonic()
-    get_embedded_engine(engine_name).put_auth_chain_links_batch(namespace, links)
-    ffi_timing("ffi_put_auth_chain_links", time.monotonic() - _et)
-    if sync:
-        maybe_sync(SyncTier.DURABLE, pools=[Pool.AUTH_CHAIN])
+    with mirror_timing("put_auth_chain_links"):
+        _et = time.monotonic()
+        get_embedded_engine(engine_name).put_auth_chain_links_batch(namespace, links)
+        ffi_timing("ffi_put_auth_chain_links", time.monotonic() - _et)
+        if sync:
+            maybe_sync(SyncTier.DURABLE, pools=[Pool.AUTH_CHAIN])
 
 
 def get_chain_links_batch(
@@ -117,13 +119,14 @@ def get_chain_links_batch(
     """
     if not chain_ids:
         return {}
-    _et = time.monotonic()
-    result = dict(
-        get_embedded_engine(engine_name).get_auth_chain_links_batch(
-            namespace, list(chain_ids)
+    with mirror_timing("get_auth_chain_links"):
+        _et = time.monotonic()
+        result = dict(
+            get_embedded_engine(engine_name).get_auth_chain_links_batch(
+                namespace, list(chain_ids)
+            )
         )
-    )
-    ffi_timing("ffi_get_auth_chain_links", time.monotonic() - _et)
+        ffi_timing("ffi_get_auth_chain_links", time.monotonic() - _et)
     return result
 
 
@@ -145,10 +148,11 @@ def delete_chain_links_batch(
     """
     if not origin_chain_seq_pairs:
         return
-    _et = time.monotonic()
-    get_embedded_engine(engine_name).delete_auth_chain_links_batch(
-        namespace, origin_chain_seq_pairs
-    )
-    ffi_timing("ffi_delete_auth_chain_links", time.monotonic() - _et)
-    if sync:
-        maybe_sync(SyncTier.DURABLE, pools=[Pool.AUTH_CHAIN])
+    with mirror_timing("delete_auth_chain_links"):
+        _et = time.monotonic()
+        get_embedded_engine(engine_name).delete_auth_chain_links_batch(
+            namespace, origin_chain_seq_pairs
+        )
+        ffi_timing("ffi_delete_auth_chain_links", time.monotonic() - _et)
+        if sync:
+            maybe_sync(SyncTier.DURABLE, pools=[Pool.AUTH_CHAIN])

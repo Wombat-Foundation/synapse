@@ -91,6 +91,7 @@ from synapse.storage.databases.main.embedded_common import (
     SyncTier,
     ffi_timing,
     maybe_sync,
+    mirror_timing,
 )
 
 if TYPE_CHECKING:
@@ -174,23 +175,24 @@ def put_event_json_batch(
     replacement is durable before returning, preventing a crash from
     leaving stale pre-censor content in the mirror.
     """
-    from synapse.synapse_rust.mtxdb_engine import event_json_put
+    with mirror_timing("event_json_put"):
+        from synapse.synapse_rust.mtxdb_engine import event_json_put
 
-    tuples = [
-        (
-            room_id,
-            event_id,
-            _encode_event_json_metadata(internal_metadata),
-            _encode_event_json_body(json, format_version),
-        )
-        for event_id, room_id, internal_metadata, json, format_version in rows
-    ]
-    _et = time.monotonic()
-    event_json_put(namespace, tuples)
-    ffi_timing("ffi_event_json_put", time.monotonic() - _et)
+        tuples = [
+            (
+                room_id,
+                event_id,
+                _encode_event_json_metadata(internal_metadata),
+                _encode_event_json_body(json, format_version),
+            )
+            for event_id, room_id, internal_metadata, json, format_version in rows
+        ]
+        _et = time.monotonic()
+        event_json_put(namespace, tuples)
+        ffi_timing("ffi_event_json_put", time.monotonic() - _et)
 
-    if sync:
-        maybe_sync(SyncTier.DURABLE, pools=[Pool.EVENT_DAG])
+        if sync:
+            maybe_sync(SyncTier.DURABLE, pools=[Pool.EVENT_DAG])
 
 
 def get_event_json_batch(
@@ -205,18 +207,19 @@ def get_event_json_batch(
     since both are written in the same `put_many` call) would otherwise
     silently serve a mismatched pair.
     """
-    from synapse.synapse_rust.mtxdb_engine import event_json_get
+    with mirror_timing("event_json_get"):
+        from synapse.synapse_rust.mtxdb_engine import event_json_get
 
-    _et = time.monotonic()
-    found = event_json_get(namespace, event_ids)
-    ffi_timing("ffi_event_json_get", time.monotonic() - _et)
-    result: dict[str, tuple[str, str, int | None]] = {}
-    for event_id, metadata_record, body_record in found:
-        if metadata_record is None or body_record is None:
-            continue
-        internal_metadata = _decode_event_json_metadata(metadata_record)
-        json_str, format_version = _decode_event_json_body(body_record)
-        result[event_id] = (internal_metadata, json_str, format_version)
+        _et = time.monotonic()
+        found = event_json_get(namespace, event_ids)
+        ffi_timing("ffi_event_json_get", time.monotonic() - _et)
+        result: dict[str, tuple[str, str, int | None]] = {}
+        for event_id, metadata_record, body_record in found:
+            if metadata_record is None or body_record is None:
+                continue
+            internal_metadata = _decode_event_json_metadata(metadata_record)
+            json_str, format_version = _decode_event_json_body(body_record)
+            result[event_id] = (internal_metadata, json_str, format_version)
     return result
 
 

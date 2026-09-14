@@ -4,9 +4,11 @@ import atexit
 import hashlib
 import os
 import threading
+import time
 from collections import defaultdict
+from contextlib import contextmanager
 from enum import Enum, auto
-from typing import IO, Iterable
+from typing import IO, Iterable, Iterator
 
 # Module-level flag: when True, all DURABLE-tier sync() calls are suppressed.
 # Set once during HomeServer init via configure_sync(); never mutated after.
@@ -86,6 +88,34 @@ def _print_ffi_timings() -> None:
 
 if os.environ.get("SYNAPSE_PG_TIMINGS"):
     atexit.register(_print_ffi_timings)
+
+
+@contextmanager
+def mirror_timing(tag: str) -> Iterator[None]:
+    """Bracket an entire mirror-helper call (Python row/metadata construction
+    *and* the native call it eventually makes) under one `mirror_<tag>`
+    entry in the same aggregate report `ffi_timing` feeds -- distinct from
+    the narrower `ffi_<tag>` entries individual call sites record around
+    just the native call itself. Diffing `mirror_<tag>` against the matching
+    `ffi_<tag>` isolates the Python-side share (encoding, list/dict
+    construction, `get_embedded_engine` lookup) of a given helper's cost.
+
+    Deliberately brackets the whole containing helper rather than timing
+    every sub-step (e.g. every `get_embedded_engine()` lookup) individually
+    -- more, finer-grained timers add their own overhead and risk
+    perturbing the very measurement they're trying to take.
+
+    No-op (near-zero overhead: one dict lookup, no timer read) when
+    `SYNAPSE_PG_TIMINGS` isn't set, same as `ffi_timing`.
+    """
+    if not os.environ.get("SYNAPSE_PG_TIMINGS"):
+        yield
+        return
+    start = time.monotonic()
+    try:
+        yield
+    finally:
+        ffi_timing(f"mirror_{tag}", time.monotonic() - start)
 
 
 def configure_sync(*, no_sync: bool) -> None:
@@ -170,12 +200,20 @@ def maybe_sync(tier: SyncTier, pools: Iterable[Pool] | None = None) -> None:
 
     engine = get_embedded_engine("mtxdb")
     if pools is None:
+        _st = time.monotonic()
         engine.sync()
+        ffi_timing("ffi_sync_all", time.monotonic() - _st)
         return
     pool_set = set(pools)
     if Pool.STATE in pool_set:
+        _st = time.monotonic()
         engine.sync_state()
+        ffi_timing("ffi_sync_state", time.monotonic() - _st)
     if Pool.EVENT_DAG in pool_set:
+        _st = time.monotonic()
         engine.sync_event_dag()
+        ffi_timing("ffi_sync_event_dag", time.monotonic() - _st)
     if Pool.AUTH_CHAIN in pool_set:
+        _st = time.monotonic()
         engine.sync_auth_chain()
+        ffi_timing("ffi_sync_auth_chain", time.monotonic() - _st)

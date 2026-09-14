@@ -58,7 +58,11 @@ import struct
 import time
 
 from synapse.storage.databases.embedded_engine import get_embedded_engine
-from synapse.storage.databases.main.embedded_common import ffi_timing, namespace_hash
+from synapse.storage.databases.main.embedded_common import (
+    ffi_timing,
+    mirror_timing,
+    namespace_hash,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -106,19 +110,20 @@ def put_event_to_state_group_batch(
     `maybe_sync(SyncTier.DURABLE)` once after all of their embedded writes,
     not once per helper call.
     """
-    engine = get_embedded_engine(engine_name)
-    batch_put = engine.batch_put
+    with mirror_timing("put_event_to_state_group"):
+        engine = get_embedded_engine(engine_name)
+        batch_put = engine.batch_put
 
-    pairs = [
-        (
-            _event_to_state_group_key(namespace, event_id),
-            struct.pack(">q", state_group),
-        )
-        for event_id, state_group in rows
-    ]
-    _et = time.monotonic()
-    batch_put(pairs)
-    ffi_timing("ffi_batch_put", time.monotonic() - _et)
+        pairs = [
+            (
+                _event_to_state_group_key(namespace, event_id),
+                struct.pack(">q", state_group),
+            )
+            for event_id, state_group in rows
+        ]
+        _et = time.monotonic()
+        batch_put(pairs)
+        ffi_timing("ffi_batch_put", time.monotonic() - _et)
 
 
 def get_state_group_for_events_batch(
@@ -127,21 +132,24 @@ def get_state_group_for_events_batch(
     """Returns `event_id -> state_group` for every id found in the embedded
     engine; a missing id is simply absent from the result.
     """
-    engine = get_embedded_engine(engine_name)
-    batch_get = engine.batch_get
+    with mirror_timing("get_event_to_state_group"):
+        engine = get_embedded_engine(engine_name)
+        batch_get = engine.batch_get
 
-    keys = [_event_to_state_group_key(namespace, event_id) for event_id in event_ids]
-    key_to_event_id = dict(zip(keys, event_ids))
-    _et = time.monotonic()
-    found = batch_get(keys)
-    ffi_timing("ffi_batch_get", time.monotonic() - _et)
-    out = {}
-    for key, value in found:
-        value = bytes(value)
-        if len(value) != 8:
-            raise RuntimeError("invalid event_to_state_group record")
-        (state_group,) = struct.unpack(">q", value)
-        out[key_to_event_id[bytes(key)]] = state_group
+        keys = [
+            _event_to_state_group_key(namespace, event_id) for event_id in event_ids
+        ]
+        key_to_event_id = dict(zip(keys, event_ids))
+        _et = time.monotonic()
+        found = batch_get(keys)
+        ffi_timing("ffi_batch_get", time.monotonic() - _et)
+        out = {}
+        for key, value in found:
+            value = bytes(value)
+            if len(value) != 8:
+                raise RuntimeError("invalid event_to_state_group record")
+            (state_group,) = struct.unpack(">q", value)
+            out[key_to_event_id[bytes(key)]] = state_group
     return out
 
 
@@ -181,16 +189,17 @@ def increment_state_group_refcounts_batch(
     """
     if not state_groups:
         return
-    counts: dict[int, int] = {}
-    for state_group in state_groups:
-        counts[state_group] = counts.get(state_group, 0) + 1
-    pairs = [
-        (_state_group_refcount_key(namespace, state_group), delta)
-        for state_group, delta in counts.items()
-    ]
-    _et = time.monotonic()
-    get_embedded_engine(engine_name).increment_counters_batch(pairs)
-    ffi_timing("ffi_increment_counters", time.monotonic() - _et)
+    with mirror_timing("increment_state_group_refcounts"):
+        counts: dict[int, int] = {}
+        for state_group in state_groups:
+            counts[state_group] = counts.get(state_group, 0) + 1
+        pairs = [
+            (_state_group_refcount_key(namespace, state_group), delta)
+            for state_group, delta in counts.items()
+        ]
+        _et = time.monotonic()
+        get_embedded_engine(engine_name).increment_counters_batch(pairs)
+        ffi_timing("ffi_increment_counters", time.monotonic() - _et)
 
 
 def decrement_state_group_refcounts_batch(
@@ -208,16 +217,17 @@ def decrement_state_group_refcounts_batch(
     """
     if not state_groups:
         return
-    counts: dict[int, int] = {}
-    for state_group in state_groups:
-        counts[state_group] = counts.get(state_group, 0) + 1
-    pairs = [
-        (_state_group_refcount_key(namespace, state_group), -delta)
-        for state_group, delta in counts.items()
-    ]
-    _et = time.monotonic()
-    get_embedded_engine(engine_name).increment_counters_batch(pairs)
-    ffi_timing("ffi_increment_counters", time.monotonic() - _et)
+    with mirror_timing("decrement_state_group_refcounts"):
+        counts: dict[int, int] = {}
+        for state_group in state_groups:
+            counts[state_group] = counts.get(state_group, 0) + 1
+        pairs = [
+            (_state_group_refcount_key(namespace, state_group), -delta)
+            for state_group, delta in counts.items()
+        ]
+        _et = time.monotonic()
+        get_embedded_engine(engine_name).increment_counters_batch(pairs)
+        ffi_timing("ffi_increment_counters", time.monotonic() - _et)
 
 
 def get_referenced_state_groups_batch(
@@ -227,25 +237,26 @@ def get_referenced_state_groups_batch(
     the embedded-engine equivalent of the SQL `get_referenced_state_groups`
     reverse lookup, backed by the counter instead of a scan/index.
     """
-    engine = get_embedded_engine(engine_name)
-    batch_get = engine.batch_get
-
     if not state_groups:
         return set()
-    keys = [
-        _state_group_refcount_key(namespace, state_group)
-        for state_group in state_groups
-    ]
-    key_to_group = dict(zip(keys, state_groups))
-    _et = time.monotonic()
-    found = batch_get(keys)
-    ffi_timing("ffi_batch_get", time.monotonic() - _et)
-    referenced = set()
-    for key, value in found:
-        value = bytes(value)
-        if len(value) != 8:
-            raise RuntimeError("invalid state_group_refcount record")
-        (count,) = struct.unpack(">q", value)
-        if count > 0:
-            referenced.add(key_to_group[bytes(key)])
+    with mirror_timing("get_referenced_state_groups"):
+        engine = get_embedded_engine(engine_name)
+        batch_get = engine.batch_get
+
+        keys = [
+            _state_group_refcount_key(namespace, state_group)
+            for state_group in state_groups
+        ]
+        key_to_group = dict(zip(keys, state_groups))
+        _et = time.monotonic()
+        found = batch_get(keys)
+        ffi_timing("ffi_batch_get", time.monotonic() - _et)
+        referenced = set()
+        for key, value in found:
+            value = bytes(value)
+            if len(value) != 8:
+                raise RuntimeError("invalid state_group_refcount record")
+            (count,) = struct.unpack(">q", value)
+            if count > 0:
+                referenced.add(key_to_group[bytes(key)])
     return referenced

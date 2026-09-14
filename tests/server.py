@@ -1481,7 +1481,10 @@ def setup_test_homeserver(
         cleanup_hs = cleanup_hs_ref()
         deferred: "Deferred[None]" = defer.succeed(None)
         if cleanup_hs is not None:
+            _sd0 = time.monotonic()
             deferred = defer.ensureDeferred(cleanup_hs.shutdown())
+            if USE_POSTGRES_FOR_TESTS:
+                _pg_timing("hs_shutdown", time.monotonic() - _sd0)
         return deferred
 
     # Install @cache_in_self attributes

@@ -49,6 +49,7 @@ from synapse.storage.databases.main.embedded_common import (
     configure_sync,
     ffi_timing,
     maybe_sync,
+    mirror_timing,
 )
 from synapse.storage.databases.state.bg_updates import (
     StateBackgroundUpdateStore,
@@ -185,10 +186,12 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             )
             try:
                 engine = get_embedded_engine(self._embedded_hamt_engine)
+                _oet = time.monotonic()
                 if self._embedded_hamt_is_writer:
                     engine.open_client(self._embedded_hamt_path)
                 else:
                     engine.open_client_read_only(self._embedded_hamt_path)
+                ffi_timing("embedded_engine_open", time.monotonic() - _oet)
                 logger.info(
                     "Opened embedded %s engine (%s) at %s for state HAMT offload",
                     self._embedded_hamt_engine,
@@ -1180,32 +1183,35 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         """
         if not self._embedded_hamt_engine:
             return
-        root_value = _encode_state_hamt_root(
-            room_prefix, root_hash, lattice, room_id=room_id
-        )
-        if self._embedded_hamt_engine == "mtxdb":
-            engine = get_embedded_engine(self._embedded_hamt_engine)
-            # Written eagerly, ahead of root_value itself when
-            # pending_room_roots defers the latter: if the enclosing SQL
-            # transaction then rolls back before the deferred root flush
-            # runs, this index entry outlives a root that was never
-            # written. Harmless -- state_group ids come from a
-            # non-transactional sequence generator (_state_group_seq_gen),
-            # so a rolled-back transaction's id is never reissued, and
-            # nothing will ever look this state_group up again.
-            _et = time.monotonic()
-            engine.put_room_index(
-                self._embedded_hamt_namespace, [(state_group, room_prefix)]
+        with mirror_timing("state_hamt_root"):
+            root_value = _encode_state_hamt_root(
+                room_prefix, root_hash, lattice, room_id=room_id
             )
-            ffi_timing("ffi_put_room_index", time.monotonic() - _et)
-            if pending_room_roots is not None:
-                pending_room_roots.append((state_group, root_value))
-                return
-            _et = time.monotonic()
-            engine.put_state_hamt_roots(
-                self._embedded_hamt_namespace, room_prefix, [(state_group, root_value)]
-            )
-            ffi_timing("ffi_put_state_hamt_roots", time.monotonic() - _et)
+            if self._embedded_hamt_engine == "mtxdb":
+                engine = get_embedded_engine(self._embedded_hamt_engine)
+                # Written eagerly, ahead of root_value itself when
+                # pending_room_roots defers the latter: if the enclosing SQL
+                # transaction then rolls back before the deferred root flush
+                # runs, this index entry outlives a root that was never
+                # written. Harmless -- state_group ids come from a
+                # non-transactional sequence generator (_state_group_seq_gen),
+                # so a rolled-back transaction's id is never reissued, and
+                # nothing will ever look this state_group up again.
+                _et = time.monotonic()
+                engine.put_room_index(
+                    self._embedded_hamt_namespace, [(state_group, room_prefix)]
+                )
+                ffi_timing("ffi_put_room_index", time.monotonic() - _et)
+                if pending_room_roots is not None:
+                    pending_room_roots.append((state_group, root_value))
+                    return
+                _et = time.monotonic()
+                engine.put_state_hamt_roots(
+                    self._embedded_hamt_namespace,
+                    room_prefix,
+                    [(state_group, root_value)],
+                )
+                ffi_timing("ffi_put_state_hamt_roots", time.monotonic() - _et)
 
     async def _background_backfill_state_hamt_roots(
         self, progress: dict, batch_size: int
