@@ -134,6 +134,31 @@ elif EMBEDDED_HAMT_PATH is not None:
     EMBEDDED_HAMT_PATH = os.path.join(EMBEDDED_HAMT_PATH, f"pid-{os.getpid()}")
     os.makedirs(EMBEDDED_HAMT_PATH, exist_ok=True)
 
+    # Reap stale pid-* subdirs left behind by dead trial workers (crashed
+    # or SIGKILL'd before their own cleanup could run).  Only touches
+    # dirs whose PID is no longer alive; never touches our own dir or
+    # non-pid-* entries.
+    import shutil
+
+    _parent_dir = os.path.dirname(EMBEDDED_HAMT_PATH)
+    _reaped = 0
+    if os.path.isdir(_parent_dir):
+        for _entry in os.listdir(_parent_dir):
+            if _entry.startswith("pid-") and _entry != f"pid-{os.getpid()}":
+                try:
+                    _pid = int(_entry[4:])
+                except ValueError:
+                    continue
+                try:
+                    os.kill(_pid, 0)
+                except ProcessLookupError:
+                    shutil.rmtree(os.path.join(_parent_dir, _entry), ignore_errors=True)
+                    _reaped += 1
+                except PermissionError:
+                    pass  # alive but not ours
+    if _reaped:
+        print(f"Reaped {_reaped} stale pid-* dirs from {_parent_dir}", file=sys.stderr)
+
 if EMBEDDED_HAMT_ENGINE:
     print(
         f"Embedded HAMT engine: {EMBEDDED_HAMT_ENGINE} at {EMBEDDED_HAMT_PATH}",
