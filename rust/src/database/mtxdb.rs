@@ -1741,13 +1741,13 @@ fn event_node_id(namespace: &str, event_id: &str) -> NodeId {
 /// room-prefix scheme, whose fixed-width zero-extension semantics are tuned
 /// for 8-byte prefixes, not arbitrary room_ids.
 fn event_locator_collection_id(namespace: &str, node_id: &NodeId) -> [u8; 16] {
-    let bucket =
-        u32::from_le_bytes([node_id[0], node_id[1], node_id[2], node_id[3]]) % EVENT_LOCATOR_BUCKETS;
+    let bucket = u32::from_le_bytes([node_id[0], node_id[1], node_id[2], node_id[3]])
+        % EVENT_LOCATOR_BUCKETS;
     let mut hasher = Sha256::new();
     hasher.update(b"event_json:locator:");
     hasher.update(namespace.as_bytes());
     hasher.update(b"\0");
-    hasher.update(&bucket.to_be_bytes());
+    hasher.update(bucket.to_be_bytes());
     let hash = hasher.finalize();
     let mut out = [0u8; 16];
     out.copy_from_slice(&hash[..16]);
@@ -1777,9 +1777,7 @@ fn event_dag_room_id(namespace: &str, room_id: &str) -> [u8; 16] {
 fn event_json_legacy_key(namespace: &str, event_id: &str) -> Vec<u8> {
     let mut key = Vec::with_capacity(b"event_json:".len() + 32 + 1 + event_id.len());
     key.extend_from_slice(b"event_json:");
-    key.extend_from_slice(
-        hex::encode(&Sha256::digest(namespace.as_bytes())[..16]).as_bytes(),
-    );
+    key.extend_from_slice(hex::encode(&Sha256::digest(namespace.as_bytes())[..16]).as_bytes());
     key.push(b':');
     key.extend_from_slice(event_id.as_bytes());
     key
@@ -1829,10 +1827,10 @@ pub fn event_json_put(
             let identity = event_node_id(&namespace, &event_id);
             let room_collection = event_dag_room_id(&namespace, &room_id);
             let locator_collection = event_locator_collection_id(&namespace, &identity);
-            dag_puts.entry(room_collection).or_default().push((
-                identity,
-                NodeData::new(bytes::Bytes::from(record)),
-            ));
+            dag_puts
+                .entry(room_collection)
+                .or_default()
+                .push((identity, NodeData::new(bytes::Bytes::from(record))));
             locator_puts.entry(locator_collection).or_default().push((
                 identity,
                 NodeData::new(bytes::Bytes::copy_from_slice(&room_collection)),
@@ -1938,9 +1936,11 @@ pub fn event_json_get(
                     kv_node_id(&event_json_legacy_key(&namespace, &event_ids[position]))
                 })
                 .collect();
-            let found = engine.get_many(&kv_room_id(), &legacy_node_ids).map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb get_many error: {e}"))
-            })?;
+            let found = engine
+                .get_many(&kv_room_id(), &legacy_node_ids)
+                .map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb get_many error: {e}"))
+                })?;
             for (&position, value) in legacy_positions.iter().zip(found) {
                 if let Some(data) = value {
                     if !data.bytes.is_empty() {
@@ -2049,11 +2049,7 @@ pub fn event_json_delete(
 /// behind resolves to a now-empty collection and its read falls back to SQL,
 /// so it is never served stale data.
 #[pyfunction]
-pub fn event_json_purge_room(
-    py: Python<'_>,
-    namespace: String,
-    room_id: String,
-) -> PyResult<()> {
+pub fn event_json_purge_room(py: Python<'_>, namespace: String, room_id: String) -> PyResult<()> {
     py.detach(|| {
         let engine = event_dag_db()?;
         let collection = event_dag_room_id(&namespace, &room_id);
@@ -2673,7 +2669,11 @@ mod event_json_mirror_tests {
             let key = format!("$ev-{i}");
             let node = event_node_id(ns, &key);
             let again = event_locator_collection_id(ns, &event_node_id(ns, &key));
-            assert_eq!(again, event_locator_collection_id(ns, &node), "deterministic");
+            assert_eq!(
+                again,
+                event_locator_collection_id(ns, &node),
+                "deterministic"
+            );
         }
     }
 
@@ -2775,7 +2775,10 @@ mod event_json_mirror_tests {
             let got = event_json_get(py, ns.to_string(), vec!["$e1".to_string()]).expect("get");
             assert_eq!(got[0].1.as_deref(), Some(&b"BODY-2"[..]));
             let dag = event_dag_room_id(ns, room);
-            assert!(node_present(&dag, &event_node_id(ns, "$e1")), "a single body record");
+            assert!(
+                node_present(&dag, &event_node_id(ns, "$e1")),
+                "a single body record"
+            );
         });
     }
 
@@ -2794,20 +2797,29 @@ mod event_json_mirror_tests {
             event_json_put(
                 py,
                 ns.to_string(),
-                vec![(room_gone.to_string(), "$gone".to_string(), b"FRAMED-GONE".to_vec())],
+                vec![(
+                    room_gone.to_string(),
+                    "$gone".to_string(),
+                    b"FRAMED-GONE".to_vec(),
+                )],
             )
             .expect("put gone");
             event_json_put(
                 py,
                 ns.to_string(),
-                vec![(room_keep.to_string(), "$keep".to_string(), b"FRAMED-KEEP".to_vec())],
+                vec![(
+                    room_keep.to_string(),
+                    "$keep".to_string(),
+                    b"FRAMED-KEEP".to_vec(),
+                )],
             )
             .expect("put keep");
 
             event_json_purge_room(py, ns.to_string(), room_gone.to_string()).expect("purge");
 
             // The surviving room is untouched.
-            let keep = event_json_get(py, ns.to_string(), vec!["$keep".to_string()]).expect("get keep");
+            let keep =
+                event_json_get(py, ns.to_string(), vec!["$keep".to_string()]).expect("get keep");
             assert_eq!(keep[0].1.as_deref(), Some(&b"FRAMED-KEEP"[..]));
 
             // The purged room misses even though its locator still points at
@@ -2818,7 +2830,8 @@ mod event_json_mirror_tests {
                 "purge alone leaves the locator (Python removes it with point deletes)"
             );
             assert!(dag_gone != dag_keep);
-            let gone = event_json_get(py, ns.to_string(), vec!["$gone".to_string()]).expect("get gone");
+            let gone =
+                event_json_get(py, ns.to_string(), vec!["$gone".to_string()]).expect("get gone");
             assert_eq!(gone[0].1, None);
         });
     }
@@ -2832,7 +2845,8 @@ mod event_json_mirror_tests {
         let legacy_value: Vec<u8> = b"FRAMED-LEGACY".to_vec();
         pyo3::Python::attach(|py| {
             batch_put(py, vec![(legacy_key.clone(), legacy_value.clone())]).expect("legacy put");
-            let got = event_json_get(py, ns.to_string(), vec!["$old".to_string()]).expect("get legacy");
+            let got =
+                event_json_get(py, ns.to_string(), vec!["$old".to_string()]).expect("get legacy");
             assert_eq!(got[0].1.as_deref(), Some(&legacy_value[..]));
 
             // Deleting tombstones the legacy key too, so a purged event can't

@@ -3148,6 +3148,7 @@ class EventsBackgroundUpdatesStore(
                         [
                             (
                                 event_id,
+                                event.room_id,
                                 json_encoder.encode(event.internal_metadata.get_dict()),
                                 json_encoder.encode(event_dict),
                                 event.format_version,

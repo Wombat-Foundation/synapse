@@ -174,13 +174,13 @@ class CensorEventsStore(EventsWorkerStore, CacheInvalidationWorkerStore, SQLBase
                 txn,
                 table="event_json",
                 keyvalues={"event_id": event_id},
-                retcols=("internal_metadata", "format_version"),
+                retcols=("room_id", "internal_metadata", "format_version"),
             )
-            internal_metadata, format_version = row
+            room_id, internal_metadata, format_version = row
             put_event_json_batch(
                 self._embedded_hamt_engine,
                 self._embedded_hamt_namespace,
-                [(event_id, internal_metadata, pruned_json, format_version)],
+                [(event_id, room_id, internal_metadata, pruned_json, format_version)],
                 sync=True,
             )
 

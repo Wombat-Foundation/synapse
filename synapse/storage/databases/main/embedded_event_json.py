@@ -94,15 +94,6 @@ def open_embedded_event_json_engine(hs: "HomeServer") -> bool:
     )
 
 
-def _event_json_key(namespace: str, event_id: str) -> bytes:
-    return (
-        b"event_json:"
-        + namespace_hash(namespace).hex().encode("ascii")
-        + b":"
-        + event_id.encode("utf-8")
-    )
-
-
 def _encode_event_json_record(
     internal_metadata: str, json: str, format_version: int | None
 ) -> bytes:
@@ -122,23 +113,7 @@ def _encode_event_json_record(
 
 
 def _decode_event_json_record(value: bytes) -> tuple[str, str, int | None]:
-    """Decode an event_json payload returned by `batch_get`.
-
-    Handles both the current format and the legacy format (with a leading
-    0x01 marker byte).
-    """
-    # Try decoding directly first (current format)
-    try:
-        return _decode_event_json_record_inner(value)
-    except RuntimeError as e:
-        if "truncated" in str(e) and len(value) > 1:
-            # Try stripping a potential legacy 0x01 marker byte
-            return _decode_event_json_record_inner(value[1:])
-        raise
-
-
-def _decode_event_json_record_inner(value: bytes) -> tuple[str, str, int | None]:
-    """Inner decode logic without legacy handling."""
+    """Decode an event_json payload returned by `event_json_get`."""
     if len(value) < 8:
         raise RuntimeError("truncated event_json record")
     (format_version_raw,) = struct.unpack(">i", value[0:4])
@@ -156,11 +131,11 @@ def _decode_event_json_record_inner(value: bytes) -> tuple[str, str, int | None]
 def put_event_json_batch(
     engine_name: str | None,
     namespace: str,
-    rows: list[tuple[str, str, str, int | None]],
+    rows: list[tuple[str, str, str, str, int | None]],
     *,
     sync: bool = False,
 ) -> None:
-    """`rows`: `(event_id, internal_metadata, json, format_version)`.
+    """`rows`: `(event_id, room_id, internal_metadata, json, format_version)`.
     Called from the event persister only (the sole writer of `event_json`),
     synchronously in the persisting transaction -- same reasoning as
     `_store_state_hamt_root_embedded_txn`: an mtxdb call is local, no
@@ -177,16 +152,17 @@ def put_event_json_batch(
     replacement is durable before returning, preventing a crash from
     leaving stale pre-censor content in the mirror.
     """
-    from synapse.synapse_rust.mtxdb_engine import batch_put
+    from synapse.synapse_rust.mtxdb_engine import event_json_put
 
-    pairs = [
+    tuples = [
         (
-            _event_json_key(namespace, event_id),
+            room_id,
+            event_id,
             _encode_event_json_record(internal_metadata, json, format_version),
         )
-        for event_id, internal_metadata, json, format_version in rows
+        for event_id, room_id, internal_metadata, json, format_version in rows
     ]
-    batch_put(pairs)
+    event_json_put(namespace, tuples)
 
     if sync:
         maybe_sync(SyncTier.DURABLE)
@@ -199,14 +175,13 @@ def get_event_json_batch(
     every id found in the embedded engine; a missing id is simply absent
     from the result (the caller falls back to SQL for it).
     """
-    from synapse.synapse_rust.mtxdb_engine import batch_get
+    from synapse.synapse_rust.mtxdb_engine import event_json_get
 
-    keys = [_event_json_key(namespace, event_id) for event_id in event_ids]
-    key_to_event_id = dict(zip(keys, event_ids))
-    found = batch_get(keys)
+    found = event_json_get(namespace, event_ids)
     return {
-        key_to_event_id[bytes(key)]: _decode_event_json_record(bytes(value))
-        for key, value in found
+        event_id: _decode_event_json_record(record)
+        for event_id, record in found
+        if record is not None
     }
 
 
@@ -221,8 +196,7 @@ def delete_event_json_batch(
     """
     if not event_ids:
         return
-    keys = [_event_json_key(namespace, event_id) for event_id in event_ids]
-    from synapse.synapse_rust.mtxdb_engine import batch_delete
+    from synapse.synapse_rust.mtxdb_engine import event_json_delete
 
-    batch_delete(keys)
+    event_json_delete(namespace, event_ids)
     maybe_sync(SyncTier.DURABLE)

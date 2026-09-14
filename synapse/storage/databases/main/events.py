@@ -2947,8 +2947,8 @@ class PersistEventsStore:
                 self._embedded_hamt_engine,
                 self._embedded_hamt_namespace,
                 [
-                    (event_id, internal_metadata, json, format_version)
-                    for event_id, _room_id, internal_metadata, json, format_version in event_json_rows
+                    (event_id, room_id, internal_metadata, json, format_version)
+                    for event_id, room_id, internal_metadata, json, format_version in event_json_rows
                 ],
             )
 
