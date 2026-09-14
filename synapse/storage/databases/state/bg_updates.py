@@ -60,6 +60,20 @@ _STATE_TIMING_LOCK: "threading.Lock | None" = (
     threading.Lock() if os.environ.get("SYNAPSE_PG_TIMINGS") else None
 )
 
+# ── Node-write bucketed stats (opt-in via SYNAPSE_PG_TIMINGS=1) ────────
+# Tracks batch size, total bytes, and per-call latency for put_state_hamt_nodes
+# to diagnose the 0.27ms/call fixed-cost amplification.
+_NODE_WRITE_CALLS = 0
+_NODE_WRITE_TOTAL_NODES = 0
+_NODE_WRITE_TOTAL_BYTES = 0
+_NODE_WRITE_TOTAL_TIME = 0.0
+_NODE_WRITE_LATENCY_BUCKETS: dict[str, int] = defaultdict(
+    int
+)  # latency bucket -> count
+_NODE_WRITE_SIZE_BUCKETS: dict[str, int] = defaultdict(
+    int
+)  # batch-size bucket -> count
+
 _timings_file: IO[str] | None = None
 if os.environ.get("SYNAPSE_PG_TIMINGS"):
     _timings_path = os.environ.get("SYNAPSE_PG_TIMINGS_FILE")
@@ -87,6 +101,57 @@ def _state_timing(tag: str, elapsed: float) -> None:
     else:
         _STATE_TIMINGS[tag] += elapsed
         _STATE_TIMING_COUNTS[tag] += 1
+
+
+def _record_node_write_stats(nodes: list[tuple[bytes, bytes]], elapsed: float) -> None:
+    """Record batch-size/byte-count stats for put_state_hamt_nodes diagnostics."""
+    if not os.environ.get("SYNAPSE_PG_TIMINGS"):
+        return
+    global \
+        _NODE_WRITE_CALLS, \
+        _NODE_WRITE_TOTAL_NODES, \
+        _NODE_WRITE_TOTAL_BYTES, \
+        _NODE_WRITE_TOTAL_TIME
+    batch_size = len(nodes)
+    total_bytes = sum(len(h) + len(b) for h, b in nodes)
+    # Latency buckets: <0.1ms, <0.25ms, <0.5ms, <1ms, >=1ms
+    if elapsed < 0.0001:
+        lat_bucket = "<0.1ms"
+    elif elapsed < 0.00025:
+        lat_bucket = "<0.25ms"
+    elif elapsed < 0.0005:
+        lat_bucket = "<0.5ms"
+    elif elapsed < 0.001:
+        lat_bucket = "<1ms"
+    else:
+        lat_bucket = ">=1ms"
+    # Size buckets: 1, 2-5, 6-20, 21-100, >100
+    if batch_size == 1:
+        size_bucket = "1"
+    elif batch_size <= 5:
+        size_bucket = "2-5"
+    elif batch_size <= 20:
+        size_bucket = "6-20"
+    elif batch_size <= 100:
+        size_bucket = "21-100"
+    else:
+        size_bucket = ">100"
+    lock = _STATE_TIMING_LOCK
+    if lock is not None:
+        with lock:
+            _NODE_WRITE_CALLS += 1
+            _NODE_WRITE_TOTAL_NODES += batch_size
+            _NODE_WRITE_TOTAL_BYTES += total_bytes
+            _NODE_WRITE_TOTAL_TIME += elapsed
+            _NODE_WRITE_LATENCY_BUCKETS[lat_bucket] += 1
+            _NODE_WRITE_SIZE_BUCKETS[size_bucket] += 1
+    else:
+        _NODE_WRITE_CALLS += 1
+        _NODE_WRITE_TOTAL_NODES += batch_size
+        _NODE_WRITE_TOTAL_BYTES += total_bytes
+        _NODE_WRITE_TOTAL_TIME += elapsed
+        _NODE_WRITE_LATENCY_BUCKETS[lat_bucket] += 1
+        _NODE_WRITE_SIZE_BUCKETS[size_bucket] += 1
 
 
 def _print_state_timings() -> None:
@@ -152,8 +217,53 @@ def _print_state_timings() -> None:
     _timings_print("")
 
 
+def _print_node_write_stats() -> None:
+    """Print node-write bucketed stats for put_state_hamt_nodes diagnostics."""
+    if not os.environ.get("SYNAPSE_PG_TIMINGS"):
+        return
+    lock = _STATE_TIMING_LOCK
+    assert lock is not None
+    with lock:
+        calls = _NODE_WRITE_CALLS
+        total_nodes = _NODE_WRITE_TOTAL_NODES
+        total_bytes = _NODE_WRITE_TOTAL_BYTES
+        total_time = _NODE_WRITE_TOTAL_TIME
+        lat_buckets = dict(_NODE_WRITE_LATENCY_BUCKETS)
+        size_buckets = dict(_NODE_WRITE_SIZE_BUCKETS)
+    if calls == 0:
+        return
+    _timings_print("\n=== put_state_hamt_nodes batch diagnostics ===")
+    _timings_print(f"  calls:                    {calls}")
+    _timings_print(f"  total nodes:              {total_nodes}")
+    _timings_print(f"  total bytes:              {total_bytes:,}")
+    _timings_print(f"  total time:               {total_time * 1000:.1f}ms")
+    _timings_print(f"  avg nodes/call:           {total_nodes / calls:.1f}")
+    _timings_print(f"  avg bytes/call:           {total_bytes / calls:.0f}")
+    _timings_print(f"  avg time/call:            {(total_time / calls) * 1000:.3f}ms")
+    _timings_print(
+        f"  avg bytes/node:           {total_bytes / total_nodes:.0f}"
+        if total_nodes
+        else ""
+    )
+    _timings_print("")
+    _timings_print("  Latency distribution:")
+    for bucket in ("<0.1ms", "<0.25ms", "<0.5ms", "<1ms", ">=1ms"):
+        count = lat_buckets.get(bucket, 0)
+        pct = (count / calls) * 100 if calls else 0
+        _timings_print(f"    {bucket:12s}  {count:6d}  ({pct:5.1f}%)")
+    _timings_print("")
+    _timings_print("  Batch-size distribution:")
+    for bucket in ("1", "2-5", "6-20", "21-100", ">100"):
+        count = size_buckets.get(bucket, 0)
+        pct = (count / calls) * 100 if calls else 0
+        _timings_print(f"    {bucket:12s}  {count:6d}  ({pct:5.1f}%)")
+    _timings_print("=============================================")
+    _timings_print("")
+
+
 if os.environ.get("SYNAPSE_PG_TIMINGS"):
     atexit.register(_print_state_timings)
+    atexit.register(_print_node_write_stats)
 
     import signal as _signal
     from types import FrameType as _FrameType

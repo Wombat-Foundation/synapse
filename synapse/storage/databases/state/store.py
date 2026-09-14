@@ -1017,13 +1017,14 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             engine.put_state_hamt_nodes(
                 self._embedded_hamt_namespace, room_prefix, nodes
             )
-            # No sync() here: both call sites of this method immediately
-            # follow up with _store_state_hamt_root_embedded_txn, which
-            # syncs. mtxdb uses one global shard file (not per-room), so
-            # that later sync() flushes these node writes too -- an extra
-            # fsync here would just be redundant, doubling fsync count on
-            # every state-group persist for no additional durability.
+            ffi_timing("ffi_put_hamt_nodes", time.monotonic() - _et)
             _state_timing("state_write_nodes_embedded", time.monotonic() - _et)
+            # Record batch-size/byte-count stats for diagnostics.
+            from synapse.storage.databases.state.bg_updates import (
+                _record_node_write_stats,
+            )
+
+            _record_node_write_stats(nodes, time.monotonic() - _et)
             return
 
         _st = time.monotonic()

@@ -1131,6 +1131,7 @@ pub fn put_state_hamt_nodes(
 ) -> PyResult<()> {
     let room_id = room_id_from_prefix(&room_prefix);
 
+    let t0 = std::time::Instant::now();
     let pairs: Vec<(NodeId, NodeData)> = nodes
         .into_iter()
         .filter_map(|(key_or_hash, bytes)| {
@@ -1151,13 +1152,28 @@ pub fn put_state_hamt_nodes(
             Some((node_id, NodeData::new(bytes::Bytes::from(bytes))))
         })
         .collect();
+    let convert_us = t0.elapsed().as_micros();
 
+    let t1 = std::time::Instant::now();
     py.detach(|| {
         let engine = state_db()?;
         engine.put_many(&room_id, &pairs).map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb put error: {}", e))
         })
-    })
+    })?;
+    let put_many_us = t1.elapsed().as_micros();
+
+    // Log the split when >1ms total (avoids overhead on fast calls).
+    if convert_us + put_many_us > 1000 {
+        log::debug!(
+            "put_state_hamt_nodes: {} nodes, convert={}us, put_many={}us",
+            pairs.len(),
+            convert_us,
+            put_many_us,
+        );
+    }
+
+    Ok(())
 }
 
 pub type AuthChainLinksForChain = (i64, Vec<(i64, i64, i64)>);
