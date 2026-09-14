@@ -1,12 +1,91 @@
 from __future__ import annotations
 
+import atexit
 import hashlib
+import os
+import threading
+from collections import defaultdict
 from enum import Enum, auto
-from typing import Iterable
+from typing import IO, Iterable
 
 # Module-level flag: when True, all DURABLE-tier sync() calls are suppressed.
 # Set once during HomeServer init via configure_sync(); never mutated after.
 _sync_disabled: bool = False
+
+# ── FFI boundary timing (opt-in via SYNAPSE_PG_TIMINGS=1) ────────────────
+_FFI_TIMINGS: dict[str, float] = defaultdict(float)
+_FFI_TIMING_COUNTS: dict[str, int] = defaultdict(int)
+_FFI_TIMING_LOCK: "threading.Lock | None" = (
+    threading.Lock() if os.environ.get("SYNAPSE_PG_TIMINGS") else None
+)
+
+_ffi_timings_file: IO[str] | None = None
+if os.environ.get("SYNAPSE_PG_TIMINGS"):
+    _ffi_timings_path = os.environ.get("SYNAPSE_PG_TIMINGS_FILE")
+    if _ffi_timings_path:
+        try:
+            _ffi_timings_file = open(_ffi_timings_path, "a")
+        except OSError:
+            pass
+
+
+def _ffi_timings_print(*args: object) -> None:
+    import sys
+
+    print(*args, file=sys.stderr)
+    if _ffi_timings_file is not None:
+        print(*args, file=_ffi_timings_file)
+
+
+def ffi_timing(tag: str, elapsed: float) -> None:
+    if not os.environ.get("SYNAPSE_PG_TIMINGS"):
+        return
+    lock = _FFI_TIMING_LOCK
+    if lock is not None:
+        with lock:
+            _FFI_TIMINGS[tag] += elapsed
+            _FFI_TIMING_COUNTS[tag] += 1
+    else:
+        _FFI_TIMINGS[tag] += elapsed
+        _FFI_TIMING_COUNTS[tag] += 1
+
+
+def _print_ffi_timings() -> None:
+    if not os.environ.get("SYNAPSE_PG_TIMINGS"):
+        return
+    lock = _FFI_TIMING_LOCK
+    if lock is None:
+        return
+    with lock:
+        if not _FFI_TIMINGS:
+            return
+        timings = dict(_FFI_TIMINGS)
+        counts = dict(_FFI_TIMING_COUNTS)
+    _ffi_timings_print("\n=== FFI boundary timings ===")
+    _ffi_timings_print(
+        f"  {'':50s}  {'total':>9s}  {'calls':>6s}  {'avg':>11s}",
+    )
+    for tag in sorted(timings):
+        total_s = timings[tag]
+        count = counts[tag]
+        total_ms = total_s * 1000
+        avg_ms = (total_s / count) * 1000 if count else 0.0
+        _ffi_timings_print(
+            f"  {tag:50s}  {total_ms:8.1f}ms  {count:6d}  {avg_ms:10.3f}ms",
+        )
+    total_s = sum(timings.values())
+    total_count = sum(counts.values())
+    total_ms = total_s * 1000
+    _ffi_timings_print("")
+    _ffi_timings_print(
+        f"  {'TOTAL':50s}  {total_ms:8.1f}ms  {total_count:6d}",
+    )
+    _ffi_timings_print("==============================")
+    _ffi_timings_print("")
+
+
+if os.environ.get("SYNAPSE_PG_TIMINGS"):
+    atexit.register(_print_ffi_timings)
 
 
 def configure_sync(*, no_sync: bool) -> None:

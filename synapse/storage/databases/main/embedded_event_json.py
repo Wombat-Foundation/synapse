@@ -42,6 +42,22 @@ fetch is the fallback on any miss (including a partial mirror write, which
 `get_event_json_batch` treats as a miss rather than serving a mismatched
 metadata/body pair).
 
+This dual-write is deliberate, not a stopgap to be "fixed" by making mtxdb
+sole source of truth -- that cutover was evaluated and scoped out. Blockers:
+(1) at least a dozen call sites query the SQL `event_json` table directly
+with raw `JOIN`s (events.py, events_bg_updates.py's several background
+updates, event_federation.py, roommember.py, sticky_events.py, purge_events.py)
+and don't go through this module's read path at all -- dropping the SQL
+write would silently break every one of them, not just this mirror; (2)
+`put_event_json_batch` deliberately does NOT sync() by default (see its
+docstring) specifically because SQL is authoritative and a lost unflushed
+mtxdb write only costs a slower fallback read -- making mtxdb authoritative
+would require a synchronous fsync on every persisted event, reintroducing
+the exact per-event fsync cost this branch exists to avoid; (3) there's no
+CAS/versioning scheme in mtxdb here, so there's no migration/recovery story
+for promoting it to authoritative without one. Revisit only as its own
+scoped migration project, not an incremental change to this module.
+
 Unlike the HAMT nodes/roots this mirrors, `event_json` rows are NOT
 write-once/immutable in practice: censoring, expiry, and re-signing all
 replace a row's `json` in place. Both of those paths explicitly re-mirror
@@ -67,11 +83,13 @@ from __future__ import annotations
 
 import logging
 import struct
+import time
 from typing import TYPE_CHECKING
 
 from synapse.storage.databases.main.embedded_common import (
     Pool,
     SyncTier,
+    ffi_timing,
     maybe_sync,
 )
 
@@ -167,7 +185,9 @@ def put_event_json_batch(
         )
         for event_id, room_id, internal_metadata, json, format_version in rows
     ]
+    _et = time.monotonic()
     event_json_put(namespace, tuples)
+    ffi_timing("ffi_event_json_put", time.monotonic() - _et)
 
     if sync:
         maybe_sync(SyncTier.DURABLE, pools=[Pool.EVENT_DAG])
@@ -187,7 +207,9 @@ def get_event_json_batch(
     """
     from synapse.synapse_rust.mtxdb_engine import event_json_get
 
+    _et = time.monotonic()
     found = event_json_get(namespace, event_ids)
+    ffi_timing("ffi_event_json_get", time.monotonic() - _et)
     result: dict[str, tuple[str, str, int | None]] = {}
     for event_id, metadata_record, body_record in found:
         if metadata_record is None or body_record is None:

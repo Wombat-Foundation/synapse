@@ -41,7 +41,7 @@ from synapse.storage.database import (
     LoggingTransaction,
 )
 from synapse.storage.databases.embedded_engine import get_embedded_engine
-from synapse.storage.databases.main.embedded_common import namespace_hash
+from synapse.storage.databases.main.embedded_common import ffi_timing, namespace_hash
 from synapse.storage.engines import PostgresEngine
 from synapse.types import MutableStateMap, StateMap
 from synapse.types.state import StateFilter
@@ -1120,10 +1120,12 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
             return results
         engine = get_embedded_engine(getattr(self, "_embedded_hamt_engine", None))
         ordered_groups = list(roots.keys())
+        _et = time.monotonic()
         materialized = engine.materialize_state_hamts(
             getattr(self, "_embedded_hamt_namespace", None),
             [roots[group] for group in ordered_groups],
         )
+        ffi_timing("ffi_materialize_hamts", time.monotonic() - _et)
         for group, entries in zip(ordered_groups, materialized):
             results[group] = entries
         return results
@@ -1146,9 +1148,11 @@ class StateGroupBackgroundUpdateStore(SQLBaseStore):
             (room_prefix, root_hash, self._room_structural_key(room_id), keys)
             for room_prefix, root_hash, room_id in (roots[g] for g in ordered_groups)
         ]
+        _et = time.monotonic()
         looked_up = engine.lookup_state_hamts(
             getattr(self, "_embedded_hamt_namespace", None), queries
         )
+        ffi_timing("ffi_lookup_hamts", time.monotonic() - _et)
         for group, entries in zip(ordered_groups, looked_up):
             results[group] = entries
         return results

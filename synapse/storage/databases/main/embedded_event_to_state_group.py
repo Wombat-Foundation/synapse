@@ -55,9 +55,10 @@ from __future__ import annotations
 
 import logging
 import struct
+import time
 
 from synapse.storage.databases.embedded_engine import get_embedded_engine
-from synapse.storage.databases.main.embedded_common import namespace_hash
+from synapse.storage.databases.main.embedded_common import ffi_timing, namespace_hash
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +116,9 @@ def put_event_to_state_group_batch(
         )
         for event_id, state_group in rows
     ]
+    _et = time.monotonic()
     batch_put(pairs)
+    ffi_timing("ffi_batch_put", time.monotonic() - _et)
 
 
 def get_state_group_for_events_batch(
@@ -129,7 +132,9 @@ def get_state_group_for_events_batch(
 
     keys = [_event_to_state_group_key(namespace, event_id) for event_id in event_ids]
     key_to_event_id = dict(zip(keys, event_ids))
+    _et = time.monotonic()
     found = batch_get(keys)
+    ffi_timing("ffi_batch_get", time.monotonic() - _et)
     out = {}
     for key, value in found:
         value = bytes(value)
@@ -183,7 +188,9 @@ def increment_state_group_refcounts_batch(
         (_state_group_refcount_key(namespace, state_group), delta)
         for state_group, delta in counts.items()
     ]
+    _et = time.monotonic()
     get_embedded_engine(engine_name).increment_counters_batch(pairs)
+    ffi_timing("ffi_increment_counters", time.monotonic() - _et)
 
 
 def decrement_state_group_refcounts_batch(
@@ -208,7 +215,9 @@ def decrement_state_group_refcounts_batch(
         (_state_group_refcount_key(namespace, state_group), -delta)
         for state_group, delta in counts.items()
     ]
+    _et = time.monotonic()
     get_embedded_engine(engine_name).increment_counters_batch(pairs)
+    ffi_timing("ffi_increment_counters", time.monotonic() - _et)
 
 
 def get_referenced_state_groups_batch(
@@ -228,7 +237,9 @@ def get_referenced_state_groups_batch(
         for state_group in state_groups
     ]
     key_to_group = dict(zip(keys, state_groups))
+    _et = time.monotonic()
     found = batch_get(keys)
+    ffi_timing("ffi_batch_get", time.monotonic() - _et)
     referenced = set()
     for key, value in found:
         value = bytes(value)

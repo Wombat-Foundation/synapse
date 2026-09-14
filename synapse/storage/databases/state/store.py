@@ -47,6 +47,7 @@ from synapse.storage.databases.embedded_engine import get_embedded_engine
 from synapse.storage.databases.main.embedded_common import (
     SyncTier,
     configure_sync,
+    ffi_timing,
     maybe_sync,
 )
 from synapse.storage.databases.state.bg_updates import (
@@ -1064,9 +1065,11 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             return None
         engine = get_embedded_engine(self._embedded_hamt_engine)
 
+        _et = time.monotonic()
         (raw,) = engine.get_state_hamt_roots_for_room(
             self._embedded_hamt_namespace, room_prefix, [state_group]
         )
+        ffi_timing("ffi_get_hamt_root", time.monotonic() - _et)
         if raw is None:
             return None
         _room_prefix, root_hash, lattice, _room_id = _decode_state_hamt_root(bytes(raw))
@@ -1088,9 +1091,11 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             return None
         engine = get_embedded_engine(self._embedded_hamt_engine)
 
+        _et = time.monotonic()
         results = engine.get_state_hamt_nodes_batch(
             self._embedded_hamt_namespace, room_prefix, [node_hash]
         )
+        ffi_timing("ffi_get_hamt_node", time.monotonic() - _et)
         return bytes(results[0]) if results and results[0] is not None else None
 
     def _get_embedded_hamt_nodes_batch(
@@ -1105,9 +1110,11 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             return {}
         engine = get_embedded_engine(self._embedded_hamt_engine)
 
+        _et = time.monotonic()
         results = engine.get_state_hamt_nodes_batch(
             self._embedded_hamt_namespace, room_prefix, node_hashes
         )
+        ffi_timing("ffi_get_hamt_nodes_batch", time.monotonic() - _et)
         return {
             node_hash: bytes(data)
             for node_hash, data in zip(node_hashes, results)
@@ -1186,15 +1193,19 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             # non-transactional sequence generator (_state_group_seq_gen),
             # so a rolled-back transaction's id is never reissued, and
             # nothing will ever look this state_group up again.
+            _et = time.monotonic()
             engine.put_room_index(
                 self._embedded_hamt_namespace, [(state_group, room_prefix)]
             )
+            ffi_timing("ffi_put_room_index", time.monotonic() - _et)
             if pending_room_roots is not None:
                 pending_room_roots.append((state_group, root_value))
                 return
+            _et = time.monotonic()
             engine.put_state_hamt_roots(
                 self._embedded_hamt_namespace, room_prefix, [(state_group, root_value)]
             )
+            ffi_timing("ffi_put_state_hamt_roots", time.monotonic() - _et)
 
     async def _background_backfill_state_hamt_roots(
         self, progress: dict, batch_size: int
