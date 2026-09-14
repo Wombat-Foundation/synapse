@@ -44,7 +44,11 @@ from synapse.storage.database import (
     LoggingTransaction,
 )
 from synapse.storage.databases.embedded_engine import get_embedded_engine
-from synapse.storage.databases.main.embedded_common import SyncTier, maybe_sync
+from synapse.storage.databases.main.embedded_common import (
+    SyncTier,
+    configure_sync,
+    maybe_sync,
+)
 from synapse.storage.databases.state.bg_updates import (
     StateBackgroundUpdateStore,
     _decode_state_hamt_root,
@@ -143,6 +147,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
 
         self._embedded_hamt_engine = hs.config.database.embedded_hamt_engine
         self._embedded_hamt_path = hs.config.database.embedded_hamt_path
+        configure_sync(no_sync=hs.config.database.embedded_hamt_no_sync)
 
         # Defaults to the server name when unset (see the comment on
         # DatabaseConfig.embedded_hamt_namespace) -- must always be

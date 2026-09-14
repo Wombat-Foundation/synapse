@@ -92,6 +92,12 @@ class DatabaseConfig(Config):
         # that share one embedded-engine file (e.g. many trial test
         # processes reusing one mtxdb path), not a normal deployment concern.
         self.embedded_hamt_namespace: str | None = None
+        # Diagnostic escape hatch: when True, all DURABLE-tier sync() calls
+        # are suppressed (maybe_sync returns immediately).  Reintroduces the
+        # silent-data-loss window that SyncTier.DURABLE exists to close --
+        # NOT for production use.  Set via embedded_hamt.no_sync or
+        # SYNAPSE_MTXDB_NO_SYNC env var.
+        self.embedded_hamt_no_sync: bool = False
 
     def read_config(self, config: JsonDict, **kwargs: Any) -> None:
         # We *experimentally* support specifying multiple databases via the
@@ -118,6 +124,7 @@ class DatabaseConfig(Config):
             self.embedded_hamt_engine = embedded_config.get("engine")
             self.embedded_hamt_path = embedded_config.get("path")
             self.embedded_hamt_namespace = embedded_config.get("namespace")
+            self.embedded_hamt_no_sync = bool(embedded_config.get("no_sync", False))
 
         env_engine = os.environ.get("SYNAPSE_EMBEDDED_HAMT_ENGINE")
         if env_engine:
@@ -125,6 +132,8 @@ class DatabaseConfig(Config):
         env_path = os.environ.get("SYNAPSE_EMBEDDED_HAMT_PATH")
         if env_path:
             self.embedded_hamt_path = env_path
+        if os.environ.get("SYNAPSE_MTXDB_NO_SYNC"):
+            self.embedded_hamt_no_sync = True
 
         # A concise production switch. The path is deliberately still
         # required: unlike tests, a production server must never silently put

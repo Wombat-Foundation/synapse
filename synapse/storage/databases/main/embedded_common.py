@@ -4,6 +4,16 @@ import hashlib
 from enum import Enum, auto
 from typing import Iterable
 
+# Module-level flag: when True, all DURABLE-tier sync() calls are suppressed.
+# Set once during HomeServer init via configure_sync(); never mutated after.
+_sync_disabled: bool = False
+
+
+def configure_sync(*, no_sync: bool) -> None:
+    """Set the module-level sync-disable flag.  Call once during init."""
+    global _sync_disabled
+    _sync_disabled = no_sync
+
 
 def namespace_hash(namespace: str) -> bytes:
     """16-byte digest of a namespace, used to key every embedded mirror.
@@ -72,6 +82,9 @@ def maybe_sync(tier: SyncTier, pools: Iterable[Pool] | None = None) -> None:
     dirty shards.
     """
     if tier is not SyncTier.DURABLE:
+        return
+
+    if _sync_disabled:
         return
 
     from synapse.storage.databases.embedded_engine import get_embedded_engine
