@@ -2285,14 +2285,44 @@ pub fn sync(py: Python<'_>) -> PyResult<()> {
             ("event-dag", event_dag_db()?),
             ("auth-chain", auth_chain_db()?),
         ] {
-            engine.sync().map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "mtxdb sync error for {name} pool: {e}"
-                ))
-            })?;
+            sync_one(name, engine)?;
         }
         room_index::sync()?;
         Ok(())
+    })
+}
+
+/// Sync only the `state` pool (plus the room index, which is published
+/// off state-group root writes -- see `room_index::sync`'s doc comment on
+/// why an index entry must never be synced ahead of the root it points
+/// at). Callers should prefer this (or `sync_event_dag`/`sync_auth_chain`)
+/// over the blanket `sync()`: a DURABLE write only needs its own pool
+/// durable, not every other pool's currently-dirty shards along with it.
+#[pyfunction]
+pub fn sync_state(py: Python<'_>) -> PyResult<()> {
+    py.detach(|| {
+        sync_one("state", state_db()?)?;
+        room_index::sync()
+    })
+}
+
+/// Sync only the `event_dag` pool (event_json bodies + locator buckets,
+/// prev_event_edges).
+#[pyfunction]
+pub fn sync_event_dag(py: Python<'_>) -> PyResult<()> {
+    py.detach(|| sync_one("event-dag", event_dag_db()?))
+}
+
+/// Sync only the `auth_chain` pool (auth-chain links, manifests, short-id
+/// index).
+#[pyfunction]
+pub fn sync_auth_chain(py: Python<'_>) -> PyResult<()> {
+    py.detach(|| sync_one("auth-chain", auth_chain_db()?))
+}
+
+fn sync_one(name: &str, engine: &Arc<dyn StorageEngine>) -> PyResult<()> {
+    engine.sync().map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb sync error for {name} pool: {e}"))
     })
 }
 
@@ -2334,6 +2364,9 @@ pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     m.add_function(wrap_pyfunction!(get_room_index, m)?)?;
     m.add_function(wrap_pyfunction!(increment_counters_batch, m)?)?;
     m.add_function(wrap_pyfunction!(sync, m)?)?;
+    m.add_function(wrap_pyfunction!(sync_state, m)?)?;
+    m.add_function(wrap_pyfunction!(sync_event_dag, m)?)?;
+    m.add_function(wrap_pyfunction!(sync_auth_chain, m)?)?;
 
     py.import("sys")?
         .getattr("modules")?

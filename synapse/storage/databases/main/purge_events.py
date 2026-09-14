@@ -25,7 +25,7 @@ from typing import Any, cast
 from synapse.api.errors import SynapseError
 from synapse.storage.database import LoggingTransaction
 from synapse.storage.databases.main import CacheInvalidationWorkerStore
-from synapse.storage.databases.main.embedded_common import SyncTier, maybe_sync
+from synapse.storage.databases.main.embedded_common import Pool, SyncTier, maybe_sync
 from synapse.storage.databases.main.embedded_event_json import delete_event_json_batch
 from synapse.storage.databases.main.embedded_event_to_state_group import (
     decrement_state_group_refcounts_batch,
@@ -326,7 +326,7 @@ class PurgeEventsStore(StateGroupWorkerStore, CacheInvalidationWorkerStore):
             # One sync for the whole purge batch (delete + decrement above),
             # not one per helper call -- see put_event_to_state_group_batch's
             # docstring.
-            maybe_sync(SyncTier.DURABLE)
+            maybe_sync(SyncTier.DURABLE, pools=[Pool.STATE])
         else:
             # Get all state groups that are referenced by events that are to be
             # deleted.
@@ -663,10 +663,12 @@ class PurgeEventsStore(StateGroupWorkerStore, CacheInvalidationWorkerStore):
                 self._embedded_hamt_namespace,
                 list(event_id_to_state_group.values()),
             )
-            # One sync for the whole purge batch (delete + decrement above),
-            # not one per helper call -- see put_event_to_state_group_batch's
-            # docstring.
-            maybe_sync(SyncTier.DURABLE)
+            # One sync for the whole purge batch (event_json delete +
+            # event_to_state_groups delete + decrement above), not one per
+            # helper call -- see put_event_to_state_group_batch's docstring.
+            # Touches both event_dag (event_json delete) and state
+            # (event_to_state_groups delete + refcount decrement).
+            maybe_sync(SyncTier.DURABLE, pools=[Pool.EVENT_DAG, Pool.STATE])
 
         # Other tables we do NOT need to clear out:
         #

@@ -48,7 +48,7 @@ origin_* searches").
 from __future__ import annotations
 
 from synapse.storage.databases.embedded_engine import get_embedded_engine
-from synapse.storage.databases.main.embedded_common import SyncTier, maybe_sync
+from synapse.storage.databases.main.embedded_common import Pool, SyncTier, maybe_sync
 
 
 def resolve_namespace(store: object) -> str | None:
@@ -89,7 +89,7 @@ def put_chain_links_batch(
         return
     get_embedded_engine(engine_name).put_auth_chain_links_batch(namespace, links)
     if sync:
-        maybe_sync(SyncTier.DURABLE)
+        maybe_sync(SyncTier.DURABLE, pools=[Pool.AUTH_CHAIN])
 
 
 def get_chain_links_batch(
@@ -137,4 +137,4 @@ def delete_chain_links_batch(
         namespace, origin_chain_seq_pairs
     )
     if sync:
-        maybe_sync(SyncTier.DURABLE)
+        maybe_sync(SyncTier.DURABLE, pools=[Pool.AUTH_CHAIN])

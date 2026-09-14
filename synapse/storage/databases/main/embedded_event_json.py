@@ -68,6 +68,7 @@ import struct
 from typing import TYPE_CHECKING
 
 from synapse.storage.databases.main.embedded_common import (
+    Pool,
     SyncTier,
     maybe_sync,
 )
@@ -165,7 +166,7 @@ def put_event_json_batch(
     event_json_put(namespace, tuples)
 
     if sync:
-        maybe_sync(SyncTier.DURABLE)
+        maybe_sync(SyncTier.DURABLE, pools=[Pool.EVENT_DAG])
 
 
 def get_event_json_batch(
@@ -199,4 +200,4 @@ def delete_event_json_batch(
     from synapse.synapse_rust.mtxdb_engine import event_json_delete
 
     event_json_delete(namespace, event_ids)
-    maybe_sync(SyncTier.DURABLE)
+    maybe_sync(SyncTier.DURABLE, pools=[Pool.EVENT_DAG])
