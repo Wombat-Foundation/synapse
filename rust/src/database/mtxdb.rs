@@ -1799,6 +1799,12 @@ pub fn batch_delete(py: Python<'_>, keys: Vec<Vec<u8>>) -> PyResult<()> {
 /// to 1/N of the server's event ids.
 const EVENT_LOCATOR_BUCKETS: u32 = 256;
 
+/// One `event_json_get` result row: `(event_id, internal_metadata, body)`.
+/// `body` is `format_version(4B) + json`; either half is `None` on a miss
+/// (including a partial mirror write, which counts as a miss rather than a
+/// mismatched pair -- see `event_json_get`'s doc comment).
+type EventJsonGetRow = (String, Option<Vec<u8>>, Option<Vec<u8>>);
+
 /// 128-bit identity for an event inside the mirror, derived exactly the way
 /// every other `NodeId` in this adapter is (first 16 bytes of SHA-256 over a
 /// domain-separated key -- see `kv_node_id`/`chain_node_id`/`root_node_id`).
@@ -1830,32 +1836,6 @@ fn event_meta_node_id(namespace: &str, event_id: &str) -> NodeId {
     let mut id = [0u8; 16];
     id.copy_from_slice(&hash[..16]);
     id
-}
-
-/// Split a **legacy** (pre-split) combined `event_json` record -- the
-/// `format_version(4B) + metadata_len(4B) + metadata + json` framing
-/// `_encode_event_json_record` used to produce and that old mirror entries
-/// still hold on disk -- into the same `(metadata, body)` shape the current
-/// split layout returns, so `event_json_get`'s legacy fallback can serve old
-/// entries through the same return contract as new ones. `body` here is
-/// `format_version(4B) + json`, matching what `event_json_put`/`_get` store
-/// for the body node under the new layout.
-fn split_legacy_record(record: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
-    if record.len() < 8 {
-        return None;
-    }
-    let format_version_bytes = &record[0..4];
-    let metadata_len = u32::from_be_bytes([record[4], record[5], record[6], record[7]]) as usize;
-    let metadata_start = 8;
-    let json_start = metadata_start + metadata_len;
-    if record.len() < json_start {
-        return None;
-    }
-    let metadata = record[metadata_start..json_start].to_vec();
-    let mut body = Vec::with_capacity(4 + (record.len() - json_start));
-    body.extend_from_slice(format_version_bytes);
-    body.extend_from_slice(&record[json_start..]);
-    Some((metadata, body))
 }
 
 /// Deterministic locator collection for `node_id`: one of
@@ -1893,20 +1873,6 @@ fn event_dag_room_id(namespace: &str, room_id: &str) -> [u8; 16] {
     out
 }
 
-/// Reconstruct the legacy global flat-KV key this mirror used before it became
-/// room-aware (Python's `embedded_event_json._event_json_key`): `event_json:`
-/// plus the namespace-hash hex plus `:` plus the event id. Replicated here so
-/// the read path can still serve pre-migration mirror entries and the delete
-/// path can tombstone them, until a backfill retires the legacy layout.
-fn event_json_legacy_key(namespace: &str, event_id: &str) -> Vec<u8> {
-    let mut key = Vec::with_capacity(b"event_json:".len() + 32 + 1 + event_id.len());
-    key.extend_from_slice(b"event_json:");
-    key.extend_from_slice(hex::encode(&Sha256::digest(namespace.as_bytes())[..16]).as_bytes());
-    key.push(b':');
-    key.extend_from_slice(event_id.as_bytes());
-    key
-}
-
 /// Put split event_json records into the room-aware mirror: a locator entry
 /// (`event_locator_collection_id` bucket -> room EventDag collection id) and
 /// two physically separate records in the room's own EventDag collection --
@@ -1927,7 +1893,7 @@ fn event_json_legacy_key(namespace: &str, event_id: &str) -> Vec<u8> {
 /// Writes are plain `put_many` (idempotent overwrite -- censoring, expiry, and
 /// re-signing replace the body in place through this same call). Room bodies
 /// are persisted BEFORE their locators are published: a reader that races
-/// between the two sees a miss and falls back to legacy/SQL, never a locator
+/// between the two sees a miss and falls back to SQL, never a locator
 /// pointing at a not-yet-written body.
 ///
 /// Like the old `batch_put` path, writes are deliberately not fsynced by
@@ -1985,12 +1951,11 @@ pub fn event_json_put(
 
 /// Read split event_json records by event id: resolve each id's locator to
 /// its room EventDag collection, then read the metadata and body records
-/// from that room collection. Ids with no locator entry (pre-migration
-/// mirror writes) fall back to the legacy global flat-KV key -- still the
-/// old combined framing on disk -- split via `split_legacy_record` into the
-/// same shape, so old entries keep serving through this same contract until
-/// a backfill retires them. Empty-byte values are treated as absent
-/// everywhere.
+/// from that room collection. Ids with no locator entry are simply a miss
+/// (the caller's SQL `event_json` fallback takes over) -- no legacy combined-
+/// blob format is supported; this mirror predates any released version, so
+/// there's nothing to stay compatible with. Empty-byte values are treated as
+/// absent everywhere.
 ///
 /// Returns `(event_id, metadata, body)` in input order; ids the mirror has
 /// nowhere return `(None, None)` and the caller's SQL `event_json` fallback
@@ -2000,7 +1965,7 @@ pub fn event_json_get(
     py: Python<'_>,
     namespace: String,
     event_ids: Vec<String>,
-) -> PyResult<Vec<(String, Option<Vec<u8>>, Option<Vec<u8>>)>> {
+) -> PyResult<Vec<EventJsonGetRow>> {
     py.detach(|| {
         let engine = event_dag_db()?;
         let node_ids: Vec<NodeId> = event_ids
@@ -2037,26 +2002,22 @@ pub fn event_json_get(
         // Phase 2 -- read metadata + body from the resolved room collections,
         // grouped the same way (both node ids per position, tagged so the
         // results can be told apart after one combined get_many); ids
-        // without a locator go to the legacy fallback.
+        // without a locator are simply a miss.
         #[derive(Clone, Copy)]
         enum Kind {
             Body,
             Meta,
         }
         let mut dag_ids: HashMap<[u8; 16], Vec<(usize, Kind, NodeId)>> = HashMap::new();
-        let mut legacy_positions: Vec<usize> = Vec::new();
         for (position, room_collection) in room_collections.iter().enumerate() {
-            match room_collection {
-                Some(room_collection) => {
-                    let entries = dag_ids.entry(*room_collection).or_default();
-                    entries.push((position, Kind::Body, node_ids[position]));
-                    entries.push((
-                        position,
-                        Kind::Meta,
-                        event_meta_node_id(&namespace, &event_ids[position]),
-                    ));
-                }
-                None => legacy_positions.push(position),
+            if let Some(room_collection) = room_collection {
+                let entries = dag_ids.entry(*room_collection).or_default();
+                entries.push((position, Kind::Body, node_ids[position]));
+                entries.push((
+                    position,
+                    Kind::Meta,
+                    event_meta_node_id(&namespace, &event_ids[position]),
+                ));
             }
         }
         let mut bodies: Vec<Option<Vec<u8>>> = vec![None; event_ids.len()];
@@ -2077,32 +2038,6 @@ pub fn event_json_get(
                 }
             }
         }
-        // Legacy fallback -- ids the new layout never saw (written before this
-        // change) still resolve through the old global key, still holding the
-        // old combined framing; split it locally into the same shape.
-        if !legacy_positions.is_empty() {
-            let legacy_node_ids: Vec<NodeId> = legacy_positions
-                .iter()
-                .map(|&position| {
-                    kv_node_id(&event_json_legacy_key(&namespace, &event_ids[position]))
-                })
-                .collect();
-            let found = engine
-                .get_many(&kv_room_id(), &legacy_node_ids)
-                .map_err(|e| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb get_many error: {e}"))
-                })?;
-            for (&position, value) in legacy_positions.iter().zip(found) {
-                if let Some(data) = value {
-                    if !data.bytes.is_empty() {
-                        if let Some((metadata, body)) = split_legacy_record(&data.bytes) {
-                            metadatas[position] = Some(metadata);
-                            bodies[position] = Some(body);
-                        }
-                    }
-                }
-            }
-        }
 
         Ok(event_ids
             .into_iter()
@@ -2114,9 +2049,7 @@ pub fn event_json_get(
 }
 
 /// Tombstone event_json mirror records: resolve each event's locator (if
-/// any), tombstone the room-local body and the locator entry, and always
-/// tombstone the legacy global key -- otherwise a stale legacy entry could
-/// resurrect a purged event through the read path's legacy fallback.
+/// any), then tombstone the room-local body, metadata, and locator entry.
 /// Locator-driven: no room_id needed, so history purge, which only has event
 /// ids, can use it directly.
 #[pyfunction]
@@ -2157,12 +2090,11 @@ pub fn event_json_delete(
             }
         }
 
-        // Tombstone locators (always), room-local bodies (when a room was
-        // resolved), and legacy keys (always). Empty values are the
-        // deletion marker -- same encoding `batch_delete` already uses.
+        // Tombstone locators (always) and room-local bodies+metadata (when a
+        // room was resolved). Empty values are the deletion marker -- same
+        // encoding `batch_delete` already uses.
         let mut locator_tombs: HashMap<[u8; 16], Vec<(NodeId, NodeData)>> = HashMap::new();
         let mut dag_tombs: HashMap<[u8; 16], Vec<(NodeId, NodeData)>> = HashMap::new();
-        let mut legacy_tombs: Vec<(NodeId, NodeData)> = Vec::with_capacity(event_ids.len());
         for (position, room_collection) in room_collections.iter().enumerate() {
             let identity = node_ids[position];
             let locator_collection = event_locator_collection_id(&namespace, &identity);
@@ -2178,10 +2110,6 @@ pub fn event_json_delete(
                     NodeData::new(bytes::Bytes::new()),
                 ));
             }
-            legacy_tombs.push((
-                kv_node_id(&event_json_legacy_key(&namespace, &event_ids[position])),
-                NodeData::new(bytes::Bytes::new()),
-            ));
         }
         for (collection, pairs) in locator_tombs {
             engine.put_many(&collection, &pairs).map_err(|e| {
@@ -2190,11 +2118,6 @@ pub fn event_json_delete(
         }
         for (collection, pairs) in dag_tombs {
             engine.put_many(&collection, &pairs).map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb put error: {e}"))
-            })?;
-        }
-        if !legacy_tombs.is_empty() {
-            engine.put_many(&kv_room_id(), &legacy_tombs).map_err(|e| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb put error: {e}"))
             })?;
         }
@@ -2871,13 +2794,6 @@ mod event_json_mirror_tests {
     }
 
     #[test]
-    fn legacy_key_matches_python_namespace_hash_hex() {
-        // `namespace_hash("complement1")` == sha256("complement1")[:16].hex().
-        let key = event_json_legacy_key("complement1", "$abc");
-        assert_eq!(key, b"event_json:88783dc95388d053dd08532a2082be38:$abc");
-    }
-
-    #[test]
     fn put_get_cross_bucket_delete_and_purge_round_trip() {
         super::auth_chain_closure_tests::ensure_open();
         let ns = "ns-ev-roundtrip";
@@ -3071,62 +2987,16 @@ mod event_json_mirror_tests {
     }
 
     #[test]
-    fn get_falls_back_to_legacy_global_keys() {
+    fn get_with_no_locator_is_a_plain_miss() {
         super::auth_chain_closure_tests::ensure_open();
-        let ns = "ns-ev-legacy";
-        // Pre-migration entry: written straight to the old global flat-KV key,
-        // still in the old combined framing (format_version + metadata_len +
-        // metadata + json) that predates the metadata/body split.
-        let legacy_key = event_json_legacy_key(ns, "$old");
-        let legacy_meta = b"{\"device_id\":\"OLD\"}".to_vec();
-        let legacy_json = b"{\"type\":\"m.room.message\"}".to_vec();
-        let mut legacy_value: Vec<u8> = Vec::new();
-        legacy_value.extend_from_slice(&7i32.to_be_bytes());
-        legacy_value.extend_from_slice(&(legacy_meta.len() as u32).to_be_bytes());
-        legacy_value.extend_from_slice(&legacy_meta);
-        legacy_value.extend_from_slice(&legacy_json);
-        let mut expected_body: Vec<u8> = Vec::new();
-        expected_body.extend_from_slice(&7i32.to_be_bytes());
-        expected_body.extend_from_slice(&legacy_json);
+        let ns = "ns-ev-no-locator";
+        // No writes at all for this id: no legacy fallback exists any more,
+        // so an id with no locator entry is just (None, None).
         pyo3::Python::attach(|py| {
-            batch_put(py, vec![(legacy_key.clone(), legacy_value.clone())]).expect("legacy put");
-            let got =
-                event_json_get(py, ns.to_string(), vec!["$old".to_string()]).expect("get legacy");
-            assert_eq!(got[0].1.as_deref(), Some(&legacy_meta[..]), "split metadata");
-            assert_eq!(got[0].2.as_deref(), Some(&expected_body[..]), "split body");
-
-            // Deleting tombstones the legacy key too, so a purged event can't
-            // resurrect through the fallback.
-            event_json_delete(py, ns.to_string(), vec!["$old".to_string()]).expect("delete");
-            let gone = event_json_get(py, ns.to_string(), vec!["$old".to_string()])
-                .expect("get deleted legacy");
-            assert_eq!(gone[0].1, None);
-            assert_eq!(gone[0].2, None);
+            let got = event_json_get(py, ns.to_string(), vec!["$never-written".to_string()])
+                .expect("get");
+            assert_eq!(got[0].1, None);
+            assert_eq!(got[0].2, None);
         });
-    }
-
-    #[test]
-    fn split_legacy_record_round_trips() {
-        let meta = b"{\"a\":1}".to_vec();
-        let json = b"{\"b\":2}".to_vec();
-        let mut record: Vec<u8> = Vec::new();
-        record.extend_from_slice(&3i32.to_be_bytes());
-        record.extend_from_slice(&(meta.len() as u32).to_be_bytes());
-        record.extend_from_slice(&meta);
-        record.extend_from_slice(&json);
-
-        let (got_meta, got_body) = split_legacy_record(&record).expect("parses");
-        assert_eq!(got_meta, meta);
-        let mut expected_body = Vec::new();
-        expected_body.extend_from_slice(&3i32.to_be_bytes());
-        expected_body.extend_from_slice(&json);
-        assert_eq!(got_body, expected_body);
-
-        assert_eq!(split_legacy_record(b"short"), None);
-        // metadata_len larger than what's actually present.
-        let mut truncated = Vec::new();
-        truncated.extend_from_slice(&0i32.to_be_bytes());
-        truncated.extend_from_slice(&100u32.to_be_bytes());
-        assert_eq!(split_legacy_record(&truncated), None);
     }
 }

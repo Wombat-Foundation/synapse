@@ -26,19 +26,21 @@ functions for the exact derivations):
 - A sharded **locator** maps event_id -> its room's EventDag collection:
   256 deterministic bucket collections derived from the event's 128-bit
   identity hash, so no single index accumulates the server's whole event
-  history (the old single global collection did -- see below).
-- The room's `EventDag` collection holds two domain-separated records per
-  event: the framed **body** (`event-body:` node) and, at initial persist, a
-  compact **prev-edge** record (`prev-edges:` node) of its predecessor ids.
-  Both coexist safely because their node ids are derived from differently
-  tagged keys.
+  history.
+- The room's `EventDag` collection holds two physically separate records per
+  event: the **body** (`format_version + json`, `event_node_id`) and
+  **`internal_metadata`** (`event_meta_node_id`) -- matching SQL's own
+  `event_json` table, which has always carried `internal_metadata` and
+  `json` as separate columns rather than one combined blob. Both coexist
+  safely because their node ids are derived from differently tagged keys,
+  and both resolve via the same locator, so no second lookup is needed to
+  find the metadata record.
 
 `event_json` (Postgres) stays authoritative and is always written; the
-embedded engine is consulted first on reads, then the **legacy** global
-`event_json:<ns>:<id>` keys that this module used before the layout became
-room-aware (the Rust read path falls through to those automatically so
-pre-migration mirror entries keep serving until a backfill retires them),
-and finally a normal SQL `event_json` fetch.
+embedded engine is consulted first on reads, and a normal SQL `event_json`
+fetch is the fallback on any miss (including a partial mirror write, which
+`get_event_json_batch` treats as a miss rather than serving a mismatched
+metadata/body pair).
 
 Unlike the HAMT nodes/roots this mirrors, `event_json` rows are NOT
 write-once/immutable in practice: censoring, expiry, and re-signing all
@@ -95,38 +97,39 @@ def open_embedded_event_json_engine(hs: "HomeServer") -> bool:
     )
 
 
-def _encode_event_json_record(
-    internal_metadata: str, json: str, format_version: int | None
-) -> bytes:
-    """Encode event_json record. The entry type tag (0x04) is prepended by
-    batch_put, so this function only encodes the payload."""
-    internal_metadata_bytes = internal_metadata.encode("utf-8")
-    json_bytes = json.encode("utf-8")
+def _encode_event_json_body(json: str, format_version: int | None) -> bytes:
+    """Encode the event_json body record: `format_version + json`. Stored as
+    its own physically separate mtxdb record from `internal_metadata` (see
+    `_encode_event_json_metadata`) -- matching SQL's own `event_json` table,
+    which has always carried `internal_metadata` and `json` as separate
+    columns (see `full_schemas/72/full.sql.sqlite`)."""
     # format_version is nullable in the schema (older rows); encode as a
     # signed int with -1 standing in for NULL rather than adding a presence
     # flag byte.
-    return (
-        struct.pack(">i", -1 if format_version is None else format_version)
-        + struct.pack(">I", len(internal_metadata_bytes))
-        + internal_metadata_bytes
-        + json_bytes
-    )
+    return struct.pack(
+        ">i", -1 if format_version is None else format_version
+    ) + json.encode("utf-8")
 
 
-def _decode_event_json_record(value: bytes) -> tuple[str, str, int | None]:
-    """Decode an event_json payload returned by `event_json_get`."""
-    if len(value) < 8:
-        raise RuntimeError("truncated event_json record")
+def _decode_event_json_body(value: bytes) -> tuple[str, int | None]:
+    """Decode an event_json body payload returned by `event_json_get`."""
+    if len(value) < 4:
+        raise RuntimeError("truncated event_json body record")
     (format_version_raw,) = struct.unpack(">i", value[0:4])
-    (metadata_len,) = struct.unpack(">I", value[4:8])
-    metadata_start = 8
-    json_start = metadata_start + metadata_len
-    if len(value) < json_start:
-        raise RuntimeError("truncated event_json record")
-    internal_metadata = value[metadata_start:json_start].decode("utf-8")
-    json_str = value[json_start:].decode("utf-8")
+    json_str = value[4:].decode("utf-8")
     format_version = None if format_version_raw == -1 else format_version_raw
-    return internal_metadata, json_str, format_version
+    return json_str, format_version
+
+
+def _encode_event_json_metadata(internal_metadata: str) -> bytes:
+    """Encode the event_json metadata record: `internal_metadata` verbatim,
+    utf-8, with no framing -- it's its own record now, not packed alongside
+    the body."""
+    return internal_metadata.encode("utf-8")
+
+
+def _decode_event_json_metadata(value: bytes) -> str:
+    return value.decode("utf-8")
 
 
 def put_event_json_batch(
@@ -159,7 +162,8 @@ def put_event_json_batch(
         (
             room_id,
             event_id,
-            _encode_event_json_record(internal_metadata, json, format_version),
+            _encode_event_json_metadata(internal_metadata),
+            _encode_event_json_body(json, format_version),
         )
         for event_id, room_id, internal_metadata, json, format_version in rows
     ]
@@ -174,16 +178,24 @@ def get_event_json_batch(
 ) -> dict[str, tuple[str, str, int | None]]:
     """Returns `event_id -> (internal_metadata, json, format_version)` for
     every id found in the embedded engine; a missing id is simply absent
-    from the result (the caller falls back to SQL for it).
+    from the result (the caller falls back to SQL for it). `internal_metadata`
+    and `json`/`format_version` are stored as two physically separate mtxdb
+    records (see `event_json_put` on the Rust side); both must be present to
+    count as a hit -- a partial write (which `event_json_put` never produces,
+    since both are written in the same `put_many` call) would otherwise
+    silently serve a mismatched pair.
     """
     from synapse.synapse_rust.mtxdb_engine import event_json_get
 
     found = event_json_get(namespace, event_ids)
-    return {
-        event_id: _decode_event_json_record(record)
-        for event_id, record in found
-        if record is not None
-    }
+    result: dict[str, tuple[str, str, int | None]] = {}
+    for event_id, metadata_record, body_record in found:
+        if metadata_record is None or body_record is None:
+            continue
+        internal_metadata = _decode_event_json_metadata(metadata_record)
+        json_str, format_version = _decode_event_json_body(body_record)
+        result[event_id] = (internal_metadata, json_str, format_version)
+    return result
 
 
 def delete_event_json_batch(
