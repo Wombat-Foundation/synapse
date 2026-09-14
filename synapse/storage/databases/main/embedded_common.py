@@ -17,6 +17,7 @@ _sync_disabled: bool = False
 # ── FFI boundary timing (opt-in via SYNAPSE_PG_TIMINGS=1) ────────────────
 _FFI_TIMINGS: dict[str, float] = defaultdict(float)
 _FFI_TIMING_COUNTS: dict[str, int] = defaultdict(int)
+_FFI_LATENCIES: dict[str, list[float]] = defaultdict(list)
 _FFI_TIMING_LOCK: "threading.Lock | None" = (
     threading.Lock() if os.environ.get("SYNAPSE_PG_TIMINGS") else None
 )
@@ -47,9 +48,11 @@ def ffi_timing(tag: str, elapsed: float) -> None:
         with lock:
             _FFI_TIMINGS[tag] += elapsed
             _FFI_TIMING_COUNTS[tag] += 1
+            _FFI_LATENCIES[tag].append(elapsed)
     else:
         _FFI_TIMINGS[tag] += elapsed
         _FFI_TIMING_COUNTS[tag] += 1
+        _FFI_LATENCIES[tag].append(elapsed)
 
 
 def _print_ffi_timings() -> None:
@@ -63,18 +66,42 @@ def _print_ffi_timings() -> None:
             return
         timings = dict(_FFI_TIMINGS)
         counts = dict(_FFI_TIMING_COUNTS)
+        latencies = {k: sorted(v) for k, v in _FFI_LATENCIES.items() if v}
     _ffi_timings_print("\n=== FFI boundary timings ===")
-    _ffi_timings_print(
-        f"  {'':50s}  {'total':>9s}  {'calls':>6s}  {'avg':>11s}",
-    )
+    has_hist = bool(latencies)
+    if has_hist:
+        _ffi_timings_print(
+            f"  {'':50s}  {'total':>9s}  {'calls':>6s}  {'avg':>11s}  {'p50':>10s}  {'p95':>10s}  {'p99':>10s}",
+        )
+    else:
+        _ffi_timings_print(
+            f"  {'':50s}  {'total':>9s}  {'calls':>6s}  {'avg':>11s}",
+        )
+
+    def _percentile(sorted_vals: list[float], p: float) -> float:
+        if not sorted_vals:
+            return 0.0
+        idx = int(len(sorted_vals) * p)
+        idx = min(idx, len(sorted_vals) - 1)
+        return sorted_vals[idx]
+
     for tag in sorted(timings):
         total_s = timings[tag]
         count = counts[tag]
         total_ms = total_s * 1000
         avg_ms = (total_s / count) * 1000 if count else 0.0
-        _ffi_timings_print(
-            f"  {tag:50s}  {total_ms:8.1f}ms  {count:6d}  {avg_ms:10.3f}ms",
-        )
+        if tag in latencies:
+            s = latencies[tag]
+            p50_ms = _percentile(s, 0.50) * 1000
+            p95_ms = _percentile(s, 0.95) * 1000
+            p99_ms = _percentile(s, 0.99) * 1000
+            _ffi_timings_print(
+                f"  {tag:50s}  {total_ms:8.1f}ms  {count:6d}  {avg_ms:10.3f}ms  {p50_ms:9.3f}ms  {p95_ms:9.3f}ms  {p99_ms:9.3f}ms",
+            )
+        else:
+            _ffi_timings_print(
+                f"  {tag:50s}  {total_ms:8.1f}ms  {count:6d}  {avg_ms:10.3f}ms",
+            )
     total_s = sum(timings.values())
     total_count = sum(counts.values())
     total_ms = total_s * 1000
