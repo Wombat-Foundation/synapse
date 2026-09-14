@@ -23,7 +23,7 @@ lint: ##H Lint the code with mypy
 
 .PHONY: sync
 sync:	##H Runs: uv run maturin develop
-	uv run maturin develop
+	uv run maturin develop --release
 
 p ?=
 
