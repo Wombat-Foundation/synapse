@@ -429,6 +429,7 @@ pub fn refresh_state_hamt_collections_for_groups(
 /// against files written under the old layout) hits this same failure
 /// mode for every group it doesn't happen to already cover.
 mod room_index {
+    use std::collections::HashSet;
     use std::fs::{File, OpenOptions};
     use std::num::NonZeroUsize;
     use std::os::unix::fs::FileExt;
@@ -488,6 +489,20 @@ mod room_index {
 
     #[allow(clippy::type_complexity)]
     static HANDLES: Mutex<Option<LruCache<String, std::sync::Arc<File>>>> = Mutex::new(None);
+
+    /// Namespaces `put` has written to since the last `sync()`. `sync()`
+    /// used to unconditionally `sync_data()` every cached handle -- with
+    /// `HANDLE_CACHE_CAPACITY` at 64 and one namespace per homeserver (see
+    /// `HANDLES`'s doc comment), a workload that opens many short-lived
+    /// namespaces (e.g. the test suite, one per HS) fills the cache with
+    /// mostly-idle handles from *other* namespaces, so every write-path
+    /// sync (`sync_state`, called on essentially every event persist) paid
+    /// an `fsync_data()` on all of them, not just the one actually
+    /// written -- a roughly-constant per-call tax that scaled with cache
+    /// occupancy, not with actual write volume. Mirrors the dirty-only
+    /// fsync `PackfileStorage::sync()` (mtxdb-core) already does for the
+    /// three pools proper.
+    static DIRTY_NAMESPACES: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
     fn index_path(namespace: &str) -> PyResult<std::path::PathBuf> {
         let dir = ROOM_INDEX_DIR
@@ -551,6 +566,14 @@ mod room_index {
             file.write_all_at(&record, offset).map_err(|e| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!("room_index write failed: {e}"))
             })?;
+        }
+        {
+            let mut dirty = DIRTY_NAMESPACES.lock().map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("lock poison: {e}"))
+            })?;
+            dirty
+                .get_or_insert_with(HashSet::new)
+                .insert(namespace.to_string());
         }
         let mut cache = PREFIX_CACHE
             .lock()
@@ -634,16 +657,40 @@ mod room_index {
     /// gap rather than being the only thing standing between a crash and
     /// data loss.
     pub fn sync() -> PyResult<()> {
+        // Only fsync namespaces `put` actually touched since the last
+        // sync -- see `DIRTY_NAMESPACES`'s doc comment. A namespace can be
+        // dirty-marked but no longer cached (LRU-evicted since the write):
+        // that's fine to skip, same as a normal eviction -- the comment on
+        // `HANDLES` already establishes that an evicted handle's dirty
+        // pages survive `close()` via kernel writeback, so this call's job
+        // was already effectively done for it by the eviction itself.
+        let dirty: HashSet<String> = {
+            let mut guard = DIRTY_NAMESPACES.lock().map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("lock poison: {e}"))
+            })?;
+            match guard.as_mut() {
+                Some(set) => std::mem::take(set),
+                None => return Ok(()),
+            }
+        };
+        if dirty.is_empty() {
+            return Ok(());
+        }
         let guard = HANDLES
             .lock()
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("lock poison: {e}")))?;
         let Some(map) = guard.as_ref() else {
             return Ok(());
         };
-        for (_, file) in map.iter() {
-            file.sync_data().map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!("room_index sync failed: {e}"))
-            })?;
+        for namespace in &dirty {
+            // `peek`, not `get`: syncing must not perturb LRU recency.
+            if let Some(file) = map.peek(namespace) {
+                file.sync_data().map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "room_index sync failed: {e}"
+                    ))
+                })?;
+            }
         }
         Ok(())
     }
@@ -681,6 +728,32 @@ mod room_index {
 
             let got = get_many(ns_kept, &[1]).expect("get kept");
             assert_eq!(got, vec![Some(prefix)]);
+        }
+
+        #[test]
+        fn sync_only_touches_dirty_namespaces_and_is_idempotent() {
+            super::super::auth_chain_closure_tests::ensure_open();
+            let ns = "ns-dirty-sync";
+            put(ns, &[(1, b"ROOM3DEF".to_vec())]).expect("put");
+
+            // A namespace `put` wrote to is dirty-marked and must sync
+            // without error.
+            sync().expect("sync after write");
+
+            // Nothing was written since the prior sync -- must still
+            // succeed (empty dirty set is a no-op, not an error). This
+            // only proves the dirty-set bookkeeping doesn't panic/error on
+            // an empty set; it does not measure the fsync count actually
+            // skipped in production (a syscall count isn't something a
+            // portable unit test can assert on).
+            sync().expect("sync with nothing dirty");
+
+            // The write is still durably readable either way.
+            *PREFIX_CACHE.lock().expect("no poison") = None;
+            assert_eq!(
+                get_many(ns, &[1]).expect("get after sync"),
+                vec![Some(b"ROOM3DEF".to_vec())]
+            );
         }
     }
 }
