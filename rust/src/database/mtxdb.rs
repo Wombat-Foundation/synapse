@@ -9,9 +9,9 @@ use sha2::{Digest, Sha256};
 use crate::database::core::{NodeStore, ROOM_PREFIX_LEN};
 
 struct MtxdbPools {
-    state: Arc<dyn StorageEngine>,
-    event_dag: Arc<dyn StorageEngine>,
-    auth_chain: Arc<dyn StorageEngine>,
+    state: Arc<PackfileStorage>,
+    event_dag: Arc<PackfileStorage>,
+    auth_chain: Arc<PackfileStorage>,
 }
 
 /// Base directory for the state_group -> room_prefix room-index files (see
@@ -31,15 +31,15 @@ fn pools() -> PyResult<&'static MtxdbPools> {
         .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("mtxdb not opened"))
 }
 
-fn state_db() -> PyResult<&'static Arc<dyn StorageEngine>> {
+fn state_db() -> PyResult<&'static Arc<PackfileStorage>> {
     Ok(&pools()?.state)
 }
 
-fn event_dag_db() -> PyResult<&'static Arc<dyn StorageEngine>> {
+fn event_dag_db() -> PyResult<&'static Arc<PackfileStorage>> {
     Ok(&pools()?.event_dag)
 }
 
-fn auth_chain_db() -> PyResult<&'static Arc<dyn StorageEngine>> {
+fn auth_chain_db() -> PyResult<&'static Arc<PackfileStorage>> {
     Ok(&pools()?.auth_chain)
 }
 
@@ -51,7 +51,7 @@ fn shard_type_for_key(key: &[u8]) -> ShardType {
     }
 }
 
-fn db_for_shard_type(shard_type: ShardType) -> PyResult<&'static Arc<dyn StorageEngine>> {
+fn db_for_shard_type(shard_type: ShardType) -> PyResult<&'static Arc<PackfileStorage>> {
     match shard_type {
         ShardType::State => state_db(),
         ShardType::EventDag => event_dag_db(),
@@ -781,7 +781,7 @@ pub fn get_room_index(
 }
 
 pub struct MtxdbStore {
-    pub engine: Arc<dyn StorageEngine>,
+    pub engine: Arc<PackfileStorage>,
 }
 
 impl NodeStore for MtxdbStore {
@@ -2419,9 +2419,141 @@ pub fn sync_auth_chain(py: Python<'_>) -> PyResult<()> {
     py.detach(|| sync_one("auth-chain", auth_chain_db()?))
 }
 
-fn sync_one(name: &str, engine: &Arc<dyn StorageEngine>) -> PyResult<()> {
+fn sync_one(name: &str, engine: &Arc<PackfileStorage>) -> PyResult<()> {
     engine.sync().map_err(|e| {
         pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb sync error for {name} pool: {e}"))
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Runtime stats
+// ---------------------------------------------------------------------------
+
+use pyo3::types::PyDict;
+
+fn stats_to_dict(
+    py: Python<'_>,
+    name: &str,
+    s: &mtxdb::packfile::storage::RuntimeStats,
+) -> PyResult<Py<PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("pool", name)?;
+    d.set_item("open_count", s.open_count)?;
+    d.set_item("get_calls", s.get_calls)?;
+    d.set_item("get_misses", s.get_misses)?;
+    d.set_item("get_many_calls", s.get_many_calls)?;
+    d.set_item("get_many_records", s.get_many_records)?;
+    d.set_item("get_many_misses", s.get_many_misses)?;
+    d.set_item("put_calls", s.put_calls)?;
+    d.set_item("put_bytes", s.put_bytes)?;
+    d.set_item("put_many_calls", s.put_many_calls)?;
+    d.set_item("put_many_records", s.put_many_records)?;
+    d.set_item("put_many_bytes", s.put_many_bytes)?;
+    d.set_item("put_many_fast_path_calls", s.put_many_fast_path_calls)?;
+    d.set_item("put_many_clone_path_calls", s.put_many_clone_path_calls)?;
+    d.set_item("index_clone_time_us", s.index_clone_time.as_micros() as u64)?;
+    d.set_item("index_grow_count", s.index_grow_count)?;
+    d.set_item("index_rebuild_count", s.index_rebuild_count)?;
+    d.set_item("sync_calls", s.sync_calls)?;
+    d.set_item("checkpoint_writes", s.checkpoint_writes)?;
+    d.set_item("delta_appends", s.delta_appends)?;
+    d.set_item("delta_invalidations", s.delta_invalidations)?;
+    d.set_item("cache_hits", s.cache.hits)?;
+    d.set_item("cache_misses", s.cache.misses)?;
+    d.set_item("cache_hit_rate", s.cache.hit_rate)?;
+    d.set_item("repack_count", s.repack.repack_count)?;
+    d.set_item("repack_kept", s.repack.kept_total)?;
+    d.set_item("repack_dropped", s.repack.dropped_total)?;
+    d.set_item("index_bytes", s.index_bytes)?;
+    d.set_item("collection_count", s.collection_count)?;
+    d.set_item("shard_count", s.shards.len())?;
+    let mut shard_writes: u64 = 0;
+    let mut shard_bytes: u64 = 0;
+    let mut shard_syncs: u64 = 0;
+    for (_, ss) in &s.shards {
+        shard_writes += ss.write_count;
+        shard_bytes += ss.bytes_written;
+        shard_syncs += ss.sync_count;
+    }
+    d.set_item("shard_write_count", shard_writes)?;
+    d.set_item("shard_bytes_written", shard_bytes)?;
+    d.set_item("shard_sync_count", shard_syncs)?;
+    if let Some(ref ot) = s.last_open_timings {
+        let od = PyDict::new(py);
+        od.set_item("shard_open_us", ot.shard_open.as_micros() as u64)?;
+        od.set_item("metadata_load_us", ot.metadata_load.as_micros() as u64)?;
+        od.set_item(
+            "checkpoint_decode_us",
+            ot.checkpoint_decode.as_micros() as u64,
+        )?;
+        od.set_item("fingerprint_us", ot.fingerprint.as_micros() as u64)?;
+        od.set_item(
+            "index_materialization_us",
+            ot.index_materialization.as_micros() as u64,
+        )?;
+        od.set_item("delta_replay_us", ot.delta_replay.as_micros() as u64)?;
+        od.set_item("full_scan_us", ot.full_scan.as_micros() as u64)?;
+        od.set_item("total_us", ot.total.as_micros() as u64)?;
+        d.set_item("last_open_timings", od)?;
+    }
+    if let Some(ref st) = s.last_sync_timings {
+        let sd = PyDict::new(py);
+        sd.set_item("pack_flush_us", st.pack_flush.as_micros() as u64)?;
+        sd.set_item("pack_fsync_us", st.pack_fsync.as_micros() as u64)?;
+        sd.set_item("sidecar_us", st.sidecar.as_micros() as u64)?;
+        sd.set_item("delta_log_us", st.delta_log.as_micros() as u64)?;
+        sd.set_item("checkpoint_us", st.checkpoint.as_micros() as u64)?;
+        sd.set_item("total_us", st.total.as_micros() as u64)?;
+        d.set_item("last_sync_timings", sd)?;
+    }
+    Ok(d.unbind())
+}
+
+/// Return a dict-of-dicts with runtime stats for all three pools.
+///
+/// Read counters are only meaningful after `set_stats_enabled(true)` was
+/// called; write/batch/sync counters are always-on.
+#[pyfunction]
+pub fn stats(py: Python<'_>) -> PyResult<Py<PyDict>> {
+    let snapshots = py.detach(
+        || -> Result<Vec<(&str, mtxdb::packfile::storage::RuntimeStats)>, pyo3::PyErr> {
+            let pools = pools()?;
+            Ok(vec![
+                ("state", pools.state.stats()),
+                ("event_dag", pools.event_dag.stats()),
+                ("auth_chain", pools.auth_chain.stats()),
+            ])
+        },
+    )?;
+    let out = PyDict::new(py);
+    for (name, s) in &snapshots {
+        out.set_item(*name, stats_to_dict(py, name, s)?)?;
+    }
+    Ok(out.unbind())
+}
+
+/// Zero all runtime counters (except open_count and persisted pool stats).
+#[pyfunction]
+pub fn reset_stats(py: Python<'_>) -> PyResult<()> {
+    py.detach(|| {
+        let pools = pools()?;
+        pools.state.reset_stats();
+        pools.event_dag.reset_stats();
+        pools.auth_chain.reset_stats();
+        Ok(())
+    })
+}
+
+/// Enable or disable logical read-path counters (get/get_many).
+/// Write/batch/sync counters are always-on.
+#[pyfunction]
+pub fn set_stats_enabled(py: Python<'_>, enabled: bool) -> PyResult<()> {
+    py.detach(|| {
+        let pools = pools()?;
+        pools.state.set_stats_enabled(enabled);
+        pools.event_dag.set_stats_enabled(enabled);
+        pools.auth_chain.set_stats_enabled(enabled);
+        Ok(())
     })
 }
 
@@ -2466,6 +2598,9 @@ pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     m.add_function(wrap_pyfunction!(sync_state, m)?)?;
     m.add_function(wrap_pyfunction!(sync_event_dag, m)?)?;
     m.add_function(wrap_pyfunction!(sync_auth_chain, m)?)?;
+    m.add_function(wrap_pyfunction!(stats, m)?)?;
+    m.add_function(wrap_pyfunction!(reset_stats, m)?)?;
+    m.add_function(wrap_pyfunction!(set_stats_enabled, m)?)?;
 
     py.import("sys")?
         .getattr("modules")?

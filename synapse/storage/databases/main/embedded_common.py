@@ -90,6 +90,132 @@ if os.environ.get("SYNAPSE_PG_TIMINGS"):
     atexit.register(_print_ffi_timings)
 
 
+# ── mtxdb runtime stats (opt-in via SYNAPSE_MTXDB_STATS=1) ──────────────
+
+
+def _print_mtxdb_stats() -> None:
+    """Print an end-of-run mtxdb runtime stats report for all three pools."""
+    if not os.environ.get("SYNAPSE_MTXDB_STATS"):
+        return
+    try:
+        from synapse.storage.databases.embedded_engine import get_embedded_engine
+
+        engine = get_embedded_engine("mtxdb")
+        s = engine.stats()
+    except Exception:
+        return
+
+    import sys
+
+    out = sys.stderr
+
+    def _fmt_us(us: int) -> str:
+        if us < 1000:
+            return f"{us}us"
+        if us < 1_000_000:
+            return f"{us / 1000:.1f}ms"
+        return f"{us / 1_000_000:.2f}s"
+
+    print("\n=== mtxdb runtime stats ===", file=out)
+    for pool_name in ("state", "event_dag", "auth_chain"):
+        ps = s.get(pool_name, {})
+        if not ps:
+            continue
+        print(f"\n  [{pool_name}]", file=out)
+        print(
+            f"    collections: {ps.get('collection_count', 0)}  shards: {ps.get('shard_count', 0)}  index: {ps.get('index_bytes', 0):,}B",
+            file=out,
+        )
+
+        # Read counters (only meaningful when stats_enabled was true).
+        gc = ps.get("get_calls", 0)
+        gm = ps.get("get_misses", 0)
+        gmc = ps.get("get_many_calls", 0)
+        gmr = ps.get("get_many_records", 0)
+        gmm = ps.get("get_many_misses", 0)
+        if gc or gmc:
+            hit_rate = ps.get("cache_hit_rate", 0.0)
+            print(
+                f"    get: {gc} calls, {gm} misses | get_many: {gmc} calls, {gmr} records, {gmm} misses",
+                file=out,
+            )
+            print(
+                f"    cache: hits={ps.get('cache_hits', 0)}  misses={ps.get('cache_misses', 0)}  rate={hit_rate:.3f}",
+                file=out,
+            )
+
+        # Write / batch counters.
+        pc = ps.get("put_calls", 0)
+        pmc = ps.get("put_many_calls", 0)
+        pmr = ps.get("put_many_records", 0)
+        pmb = ps.get("put_many_bytes", 0)
+        if pc or pmc:
+            avg_r = pmr / pmc if pmc else 0
+            avg_b = pmb / pmc if pmc else 0
+            fast = ps.get("put_many_fast_path_calls", 0)
+            clone = ps.get("put_many_clone_path_calls", 0)
+            print(
+                f"    put: {pc} calls, {ps.get('put_bytes', 0):,}B | put_many: {pmc} calls, {pmr:,} records, {pmb:,}B (avg {avg_r:.1f}r/{avg_b:.0f}B)",
+                file=out,
+            )
+            if fast or clone:
+                print(
+                    f"    put_many path: fast={fast}  clone={clone}  index_clone={_fmt_us(ps.get('index_clone_time_us', 0))}",
+                    file=out,
+                )
+
+        # Sync / persistence.
+        sc = ps.get("sync_calls", 0)
+        if sc:
+            print(
+                f"    sync: {sc} calls  checkpoint_writes={ps.get('checkpoint_writes', 0)}  delta_appends={ps.get('delta_appends', 0)}  invalidations={ps.get('delta_invalidations', 0)}",
+                file=out,
+            )
+
+        # Shard write stats (persisted across opens).
+        sw = ps.get("shard_write_count", 0)
+        sb = ps.get("shard_bytes_written", 0)
+        ss = ps.get("shard_sync_count", 0)
+        if sw:
+            print(f"    shard writes: {sw:,} records, {sb:,}B, {ss} syncs", file=out)
+
+        # Index ops.
+        ig = ps.get("index_grow_count", 0)
+        ir = ps.get("index_rebuild_count", 0)
+        if ig or ir:
+            print(f"    index: grows={ig}  rebuilds={ir}", file=out)
+
+        # Repack.
+        rc = ps.get("repack_count", 0)
+        if rc:
+            print(
+                f"    repack: {rc} calls, kept={ps.get('repack_kept', 0):,}, dropped={ps.get('repack_dropped', 0):,}",
+                file=out,
+            )
+
+        # Open timings.
+        ot = ps.get("last_open_timings")
+        if ot:
+            print(
+                f"    last open: {_fmt_us(ot.get('total_us', 0))} (shard={_fmt_us(ot.get('shard_open_us', 0))} metadata={_fmt_us(ot.get('metadata_load_us', 0))} checkpoint={_fmt_us(ot.get('checkpoint_decode_us', 0))} index={_fmt_us(ot.get('index_materialization_us', 0))} delta={_fmt_us(ot.get('delta_replay_us', 0))} scan={_fmt_us(ot.get('full_scan_us', 0))})",
+                file=out,
+            )
+
+        # Sync timings.
+        st = ps.get("last_sync_timings")
+        if st:
+            print(
+                f"    last sync: {_fmt_us(st.get('total_us', 0))} (flush={_fmt_us(st.get('pack_flush_us', 0))} fsync={_fmt_us(st.get('pack_fsync_us', 0))} sidecar={_fmt_us(st.get('sidecar_us', 0))} delta={_fmt_us(st.get('delta_log_us', 0))} checkpoint={_fmt_us(st.get('checkpoint_us', 0))})",
+                file=out,
+            )
+
+    print("=============================\n", file=out)
+
+
+if os.environ.get("SYNAPSE_MTXDB_STATS"):
+    atexit.register(_print_mtxdb_stats)
+
+
 @contextmanager
 def mirror_timing(tag: str) -> Iterator[None]:
     """Bracket an entire mirror-helper call (Python row/metadata construction
