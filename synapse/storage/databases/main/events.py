@@ -66,7 +66,7 @@ from synapse.storage.database import (
     LoggingTransaction,
     make_tuple_in_list_sql_clause,
 )
-from synapse.storage.databases.main.embedded_common import SyncTier, maybe_sync
+from synapse.storage.databases.main.embedded_common import Pool, SyncTier, maybe_sync
 from synapse.storage.databases.main.embedded_event_json import (
     open_embedded_event_json_engine,
     put_event_json_batch,
@@ -1245,7 +1245,7 @@ class PersistEventsStore:
         # never opened, so skip the sync entirely (matching how the other
         # embedded writes above gate on the engine being configured).
         if self._embedded_hamt_engine == "mtxdb":
-            maybe_sync(SyncTier.DURABLE)
+            maybe_sync(SyncTier.DURABLE, pools=[Pool.STATE, Pool.AUTH_CHAIN])
 
     def _persist_event_auth_chain_txn(
         self,
