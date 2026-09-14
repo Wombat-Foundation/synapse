@@ -20,6 +20,7 @@
 #
 
 import logging
+import os
 import time
 from typing import (
     TYPE_CHECKING,
@@ -192,6 +193,11 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 else:
                     engine.open_client_read_only(self._embedded_hamt_path)
                 ffi_timing("embedded_engine_open", time.monotonic() - _oet)
+                # `stats()` only counts logical reads when explicitly enabled,
+                # avoiding atomic increments on the hot read path in normal
+                # deployments. Enable them for the opt-in end-of-run report.
+                if os.environ.get("SYNAPSE_MTXDB_STATS"):
+                    engine.set_stats_enabled(True)
                 logger.info(
                     "Opened embedded %s engine (%s) at %s for state HAMT offload",
                     self._embedded_hamt_engine,
