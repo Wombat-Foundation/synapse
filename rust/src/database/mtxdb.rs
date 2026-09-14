@@ -1706,6 +1706,367 @@ pub fn batch_delete(py: Python<'_>, keys: Vec<Vec<u8>>) -> PyResult<()> {
 }
 
 // -----------------------------------------------------------------------------
+// Event JSON mirror (room-aware)
+// -----------------------------------------------------------------------------
+
+/// Number of deterministic locator collections the event_id -> room_mapping is
+/// sharded across. A single global locator would accumulate every event id in
+/// one index -- the exact unbounded-growth problem the old global
+/// `kv_room_id()` collection had (a whole server's worth of event ids parked
+/// in one collection, so every index write/rewrite/delta cost scaled with the
+/// total). Bucketing keeps any one locator collection's index cost proportional
+/// to 1/N of the server's event ids.
+const EVENT_LOCATOR_BUCKETS: u32 = 256;
+
+/// 128-bit identity for an event inside the mirror, derived exactly the way
+/// every other `NodeId` in this adapter is (first 16 bytes of SHA-256 over a
+/// domain-separated key -- see `kv_node_id`/`chain_node_id`/`root_node_id`).
+/// No u64 truncation of the event id anywhere; the id is hashed in full.
+fn event_node_id(namespace: &str, event_id: &str) -> NodeId {
+    let mut hasher = Sha256::new();
+    hasher.update(b"event_json:event:");
+    hasher.update(namespace.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(event_id.as_bytes());
+    let hash = hasher.finalize();
+    let mut id = [0u8; 16];
+    id.copy_from_slice(&hash[..16]);
+    id
+}
+
+/// Deterministic locator collection for `node_id`: one of
+/// `EVENT_LOCATOR_BUCKETS` collections, picked from low bits of the event's
+/// own node id so a server's event ids spread evenly. Domain-separated from
+/// every other collection derivation -- deliberately NOT State's 8-byte
+/// room-prefix scheme, whose fixed-width zero-extension semantics are tuned
+/// for 8-byte prefixes, not arbitrary room_ids.
+fn event_locator_collection_id(namespace: &str, node_id: &NodeId) -> [u8; 16] {
+    let bucket =
+        u32::from_le_bytes([node_id[0], node_id[1], node_id[2], node_id[3]]) % EVENT_LOCATOR_BUCKETS;
+    let mut hasher = Sha256::new();
+    hasher.update(b"event_json:locator:");
+    hasher.update(namespace.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(&bucket.to_be_bytes());
+    let hash = hasher.finalize();
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&hash[..16]);
+    out
+}
+
+/// Room-scoped EventDag collection id: a domain-separated 128-bit derivation
+/// from `(namespace, room_id)`, the same shape `auth_chain_closure_room_id`
+/// uses. Not a copy of State's room-prefix scheme.
+fn event_dag_room_id(namespace: &str, room_id: &str) -> [u8; 16] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"event_json:dag:");
+    hasher.update(namespace.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(room_id.as_bytes());
+    let hash = hasher.finalize();
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&hash[..16]);
+    out
+}
+
+/// Reconstruct the legacy global flat-KV key this mirror used before it became
+/// room-aware (Python's `embedded_event_json._event_json_key`): `event_json:`
+/// plus the namespace-hash hex plus `:` plus the event id. Replicated here so
+/// the read path can still serve pre-migration mirror entries and the delete
+/// path can tombstone them, until a backfill retires the legacy layout.
+fn event_json_legacy_key(namespace: &str, event_id: &str) -> Vec<u8> {
+    let mut key = Vec::with_capacity(b"event_json:".len() + 32 + 1 + event_id.len());
+    key.extend_from_slice(b"event_json:");
+    key.extend_from_slice(
+        hex::encode(&Sha256::digest(namespace.as_bytes())[..16]).as_bytes(),
+    );
+    key.push(b':');
+    key.extend_from_slice(event_id.as_bytes());
+    key
+}
+
+/// Put framed event_json records into the room-aware mirror: a locator entry
+/// (`event_locator_collection_id` bucket -> room EventDag collection id) and
+/// the framed body record in the room's own EventDag collection. The locator
+/// and body share `event_node_id` -- they live in distinct collections, so no
+/// domain-separated body node id is needed.
+///
+/// `rows` are `(room_id, event_id, framed_record)`. The framing
+/// (`format_version + metadata_len + metadata + json`) is produced on the
+/// Python side by `_encode_event_json_record` and preserved byte-for-byte.
+///
+/// Writes are plain `put_many` (idempotent overwrite -- censoring, expiry, and
+/// re-signing replace the body in place through this same call). Room bodies
+/// are persisted BEFORE their locators are published: a reader that races
+/// between the two sees a miss and falls back to legacy/SQL, never a locator
+/// pointing at a not-yet-written body.
+///
+/// Like the old `batch_put` path, writes are deliberately not fsynced by
+/// default -- the Python caller decides via `maybe_sync`, and a lost unflushed
+/// write only costs a slower SQL-fallback read, never silent data loss.
+/// Generic KV (`batch_put`) remains for flat data and no longer carries
+/// event_json.
+#[pyfunction]
+pub fn event_json_put(
+    py: Python<'_>,
+    namespace: String,
+    rows: Vec<(String, String, Vec<u8>)>,
+) -> PyResult<()> {
+    for (_, _, record) in &rows {
+        if record.is_empty() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "event_json_put does not accept empty records (used as tombstones)",
+            ));
+        }
+    }
+    py.detach(|| {
+        let engine = event_dag_db()?;
+        // Group by collection so each locator bucket / room dag collection is
+        // written with a single put_many.
+        let mut locator_puts: HashMap<[u8; 16], Vec<(NodeId, NodeData)>> = HashMap::new();
+        let mut dag_puts: HashMap<[u8; 16], Vec<(NodeId, NodeData)>> = HashMap::new();
+        for (room_id, event_id, record) in rows {
+            let identity = event_node_id(&namespace, &event_id);
+            let room_collection = event_dag_room_id(&namespace, &room_id);
+            let locator_collection = event_locator_collection_id(&namespace, &identity);
+            dag_puts.entry(room_collection).or_default().push((
+                identity,
+                NodeData::new(bytes::Bytes::from(record)),
+            ));
+            locator_puts.entry(locator_collection).or_default().push((
+                identity,
+                NodeData::new(bytes::Bytes::copy_from_slice(&room_collection)),
+            ));
+        }
+        // Body writes first, locator publication last: a stale locator may
+        // only ever be a miss, never a pointer to a body that isn't there.
+        for (collection, pairs) in dag_puts {
+            engine.put_many(&collection, &pairs).map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb put error: {e}"))
+            })?;
+        }
+        for (collection, pairs) in locator_puts {
+            engine.put_many(&collection, &pairs).map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb put error: {e}"))
+            })?;
+        }
+        Ok(())
+    })
+}
+
+/// Read framed event_json records by event id: resolve each id's locator to
+/// its room EventDag collection, then read the record from that room
+/// collection. Ids with no locator entry (pre-migration mirror writes) fall
+/// back to the legacy global flat-KV key, so old entries keep serving until a
+/// backfill retires them. Empty-byte values are treated as absent everywhere.
+///
+/// Returns `(event_id, Some(record))` in input order; ids the mirror has
+/// nowhere are `(event_id, None)` and the caller's SQL `event_json` fallback
+/// takes over, exactly as before.
+#[pyfunction]
+pub fn event_json_get(
+    py: Python<'_>,
+    namespace: String,
+    event_ids: Vec<String>,
+) -> PyResult<Vec<(String, Option<Vec<u8>>)>> {
+    py.detach(|| {
+        let engine = event_dag_db()?;
+        let node_ids: Vec<NodeId> = event_ids
+            .iter()
+            .map(|id| event_node_id(&namespace, id))
+            .collect();
+
+        // Phase 1 -- resolve room collections via the locator, grouped by
+        // bucket collection so each is fetched with a single get_many.
+        let mut locator_ids: HashMap<[u8; 16], Vec<(usize, NodeId)>> = HashMap::new();
+        for (position, node_id) in node_ids.iter().enumerate() {
+            locator_ids
+                .entry(event_locator_collection_id(&namespace, node_id))
+                .or_default()
+                .push((position, *node_id));
+        }
+        let mut room_collections: Vec<Option<[u8; 16]>> = vec![None; event_ids.len()];
+        for (collection, ids) in locator_ids {
+            let node_ids_only: Vec<NodeId> = ids.iter().map(|(_, id)| *id).collect();
+            let found = engine.get_many(&collection, &node_ids_only).map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb get_many error: {e}"))
+            })?;
+            for ((position, _), value) in ids.into_iter().zip(found) {
+                if let Some(data) = value {
+                    if !data.bytes.is_empty() {
+                        if let Ok(room) = <[u8; 16]>::try_from(data.bytes.as_ref()) {
+                            room_collections[position] = Some(room);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Phase 2 -- read bodies from the resolved room collections, grouped
+        // the same way; ids without a locator go to the legacy fallback.
+        let mut dag_ids: HashMap<[u8; 16], Vec<(usize, NodeId)>> = HashMap::new();
+        let mut legacy_positions: Vec<usize> = Vec::new();
+        for (position, room_collection) in room_collections.iter().enumerate() {
+            match room_collection {
+                Some(room_collection) => dag_ids
+                    .entry(*room_collection)
+                    .or_default()
+                    .push((position, node_ids[position])),
+                None => legacy_positions.push(position),
+            }
+        }
+        let mut payloads: Vec<Option<Vec<u8>>> = vec![None; event_ids.len()];
+        for (collection, ids) in dag_ids {
+            let node_ids_only: Vec<NodeId> = ids.iter().map(|(_, id)| *id).collect();
+            let found = engine.get_many(&collection, &node_ids_only).map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb get_many error: {e}"))
+            })?;
+            for ((position, _), value) in ids.into_iter().zip(found) {
+                if let Some(data) = value {
+                    if !data.bytes.is_empty() {
+                        payloads[position] = Some(data.bytes.to_vec());
+                    }
+                }
+            }
+        }
+        // Legacy fallback -- ids the new layout never saw (written before this
+        // change) still resolve through the old global key.
+        if !legacy_positions.is_empty() {
+            let legacy_node_ids: Vec<NodeId> = legacy_positions
+                .iter()
+                .map(|&position| {
+                    kv_node_id(&event_json_legacy_key(&namespace, &event_ids[position]))
+                })
+                .collect();
+            let found = engine.get_many(&kv_room_id(), &legacy_node_ids).map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb get_many error: {e}"))
+            })?;
+            for (&position, value) in legacy_positions.iter().zip(found) {
+                if let Some(data) = value {
+                    if !data.bytes.is_empty() {
+                        payloads[position] = Some(data.bytes.to_vec());
+                    }
+                }
+            }
+        }
+
+        Ok(event_ids.into_iter().zip(payloads).collect())
+    })
+}
+
+/// Tombstone event_json mirror records: resolve each event's locator (if
+/// any), tombstone the room-local body and the locator entry, and always
+/// tombstone the legacy global key -- otherwise a stale legacy entry could
+/// resurrect a purged event through the read path's legacy fallback.
+/// Locator-driven: no room_id needed, so history purge, which only has event
+/// ids, can use it directly.
+#[pyfunction]
+pub fn event_json_delete(
+    py: Python<'_>,
+    namespace: String,
+    event_ids: Vec<String>,
+) -> PyResult<()> {
+    py.detach(|| {
+        let engine = event_dag_db()?;
+        let node_ids: Vec<NodeId> = event_ids
+            .iter()
+            .map(|id| event_node_id(&namespace, id))
+            .collect();
+
+        // Resolve locators first (grouped by bucket collection).
+        let mut locator_ids: HashMap<[u8; 16], Vec<(usize, NodeId)>> = HashMap::new();
+        for (position, node_id) in node_ids.iter().enumerate() {
+            locator_ids
+                .entry(event_locator_collection_id(&namespace, node_id))
+                .or_default()
+                .push((position, *node_id));
+        }
+        let mut room_collections: Vec<Option<[u8; 16]>> = vec![None; event_ids.len()];
+        for (collection, ids) in locator_ids {
+            let node_ids_only: Vec<NodeId> = ids.iter().map(|(_, id)| *id).collect();
+            let found = engine.get_many(&collection, &node_ids_only).map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb get_many error: {e}"))
+            })?;
+            for ((position, _), value) in ids.into_iter().zip(found) {
+                if let Some(data) = value {
+                    if !data.bytes.is_empty() {
+                        if let Ok(room) = <[u8; 16]>::try_from(data.bytes.as_ref()) {
+                            room_collections[position] = Some(room);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Tombstone locators (always), room-local bodies (when a room was
+        // resolved), and legacy keys (always). Empty values are the
+        // deletion marker -- same encoding `batch_delete` already uses.
+        let mut locator_tombs: HashMap<[u8; 16], Vec<(NodeId, NodeData)>> = HashMap::new();
+        let mut dag_tombs: HashMap<[u8; 16], Vec<(NodeId, NodeData)>> = HashMap::new();
+        let mut legacy_tombs: Vec<(NodeId, NodeData)> = Vec::with_capacity(event_ids.len());
+        for (position, room_collection) in room_collections.iter().enumerate() {
+            let identity = node_ids[position];
+            let locator_collection = event_locator_collection_id(&namespace, &identity);
+            locator_tombs
+                .entry(locator_collection)
+                .or_default()
+                .push((identity, NodeData::new(bytes::Bytes::new())));
+            if let Some(room_collection) = room_collection {
+                dag_tombs
+                    .entry(*room_collection)
+                    .or_default()
+                    .push((identity, NodeData::new(bytes::Bytes::new())));
+            }
+            legacy_tombs.push((
+                kv_node_id(&event_json_legacy_key(&namespace, &event_ids[position])),
+                NodeData::new(bytes::Bytes::new()),
+            ));
+        }
+        for (collection, pairs) in locator_tombs {
+            engine.put_many(&collection, &pairs).map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb put error: {e}"))
+            })?;
+        }
+        for (collection, pairs) in dag_tombs {
+            engine.put_many(&collection, &pairs).map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb put error: {e}"))
+            })?;
+        }
+        if !legacy_tombs.is_empty() {
+            engine.put_many(&kv_room_id(), &legacy_tombs).map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb put error: {e}"))
+            })?;
+        }
+        Ok(())
+    })
+}
+
+/// Whole-room purge of the event mirror: drops the room's EventDag collection
+/// outright with `delete_collection`. Locator entries for the room's events
+/// live in the bucketed locator collections and are NOT enumerated here --
+/// `purge_events.py`'s room purge still runs `event_json_delete` over the
+/// room's known event ids first, which tombstones those; any locator left
+/// behind resolves to a now-empty collection and its read falls back to SQL,
+/// so it is never served stale data.
+#[pyfunction]
+pub fn event_json_purge_room(
+    py: Python<'_>,
+    namespace: String,
+    room_id: String,
+) -> PyResult<()> {
+    py.detach(|| {
+        let engine = event_dag_db()?;
+        let collection = event_dag_room_id(&namespace, &room_id);
+        engine.delete_collection(&collection).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "mtxdb delete_collection error: {}",
+                e
+            ))
+        })
+    })
+}
+
+// -----------------------------------------------------------------------------
 // HAMT Materialize / Lookup Wrappers
 // -----------------------------------------------------------------------------
 
@@ -1958,6 +2319,10 @@ pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     m.add_function(wrap_pyfunction!(batch_get, m)?)?;
     m.add_function(wrap_pyfunction!(batch_put, m)?)?;
     m.add_function(wrap_pyfunction!(batch_delete, m)?)?;
+    m.add_function(wrap_pyfunction!(event_json_put, m)?)?;
+    m.add_function(wrap_pyfunction!(event_json_get, m)?)?;
+    m.add_function(wrap_pyfunction!(event_json_delete, m)?)?;
+    m.add_function(wrap_pyfunction!(event_json_purge_room, m)?)?;
     m.add_function(wrap_pyfunction!(materialize_state_hamt, m)?)?;
     m.add_function(wrap_pyfunction!(materialize_state_hamts, m)?)?;
     m.add_function(wrap_pyfunction!(lookup_state_hamts, m)?)?;
@@ -2252,6 +2617,230 @@ mod auth_chain_closure_tests {
             )
             .expect("resolve gone (post-purge)");
             assert_eq!(purged_resolves, vec![None]);
+        });
+    }
+}
+
+#[cfg(test)]
+mod event_json_mirror_tests {
+    //! Same isolation contract as `auth_chain_closure_tests`: `DBS` is
+    //! process-global, so engine-backed tests use their own unique
+    //! namespace/room ids.
+
+    use super::*;
+
+    /// Raw engine view of a node: non-empty value stored?
+    fn node_present(collection: &[u8; 16], node: &NodeId) -> bool {
+        let engine = event_dag_db().expect("db");
+        matches!(engine.get(collection, node), Ok(Some(data)) if !data.bytes.is_empty())
+    }
+
+    #[test]
+    fn event_node_id_is_16_bytes_and_domain_separated() {
+        let a = event_node_id("ns-ev", "$e1");
+        let b = event_node_id("ns-ev", "$e2");
+        let c = event_node_id("other-ns", "$e1");
+        assert_eq!(a.len(), 16);
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+        assert_eq!(event_node_id("ns-ev", "$e1"), a, "deterministic");
+    }
+
+    #[test]
+    fn event_dag_room_id_is_domain_separated_and_distinct() {
+        let a = event_dag_room_id("ns-ev", "!ra:example.org");
+        let b = event_dag_room_id("ns-ev", "!rb:example.org");
+        let c = event_dag_room_id("other-ns", "!ra:example.org");
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+        assert_ne!(b, c);
+    }
+
+    #[test]
+    fn locator_collections_spread_and_are_deterministic() {
+        let ns = "ns-ev-loc";
+        let mut seen: HashSet<[u8; 16]> = HashSet::new();
+        for i in 0..512u32 {
+            let node = event_node_id(ns, &format!("$ev-{i}"));
+            seen.insert(event_locator_collection_id(ns, &node));
+        }
+        assert!(
+            seen.len() >= 8,
+            "512 ids must spread across many of the {} locator buckets",
+            EVENT_LOCATOR_BUCKETS
+        );
+        for i in 0..256u32 {
+            let key = format!("$ev-{i}");
+            let node = event_node_id(ns, &key);
+            let again = event_locator_collection_id(ns, &event_node_id(ns, &key));
+            assert_eq!(again, event_locator_collection_id(ns, &node), "deterministic");
+        }
+    }
+
+    #[test]
+    fn legacy_key_matches_python_namespace_hash_hex() {
+        // `namespace_hash("complement1")` == sha256("complement1")[:16].hex().
+        let key = event_json_legacy_key("complement1", "$abc");
+        assert_eq!(key, b"event_json:88783dc95388d053dd08532a2082be38:$abc");
+    }
+
+    #[test]
+    fn put_get_cross_bucket_delete_and_purge_round_trip() {
+        super::auth_chain_closure_tests::ensure_open();
+        let ns = "ns-ev-roundtrip";
+        let room = "!room-ev-roundtrip:example.org";
+        let record_a: Vec<u8> = b"FRAMED-A".to_vec();
+        let record_b: Vec<u8> = b"FRAMED-B".to_vec();
+        let id_a = event_node_id(ns, "$ev-a");
+        let id_b = event_node_id(ns, "$ev-b");
+        assert_ne!(
+            event_locator_collection_id(ns, &id_a),
+            event_locator_collection_id(ns, &id_b),
+            "the two ids must land in different locator buckets"
+        );
+        let dag = event_dag_room_id(ns, room);
+
+        pyo3::Python::attach(|py| {
+            event_json_put(
+                py,
+                ns.to_string(),
+                vec![
+                    (room.to_string(), "$ev-a".to_string(), record_a.clone()),
+                    (room.to_string(), "$ev-b".to_string(), record_b.clone()),
+                ],
+            )
+            .expect("put");
+
+            let got = event_json_get(
+                py,
+                ns.to_string(),
+                vec![
+                    "$ev-a".to_string(),
+                    "$ev-b".to_string(),
+                    "$ev-none".to_string(),
+                ],
+            )
+            .expect("get");
+            assert_eq!(got[0].1.as_deref(), Some(&record_a[..]));
+            assert_eq!(got[1].1.as_deref(), Some(&record_b[..]));
+            assert_eq!(got[2].1, None);
+
+            // Point deletion removes the payload AND the locator.
+            event_json_delete(py, ns.to_string(), vec!["$ev-a".to_string()]).expect("delete");
+            let after_delete = event_json_get(
+                py,
+                ns.to_string(),
+                vec!["$ev-a".to_string(), "$ev-b".to_string()],
+            )
+            .expect("get after delete");
+            assert_eq!(after_delete[0].1, None);
+            assert_eq!(after_delete[1].1.as_deref(), Some(&record_b[..]));
+            assert!(
+                !node_present(&event_locator_collection_id(ns, &id_a), &id_a),
+                "locator must be tombstoned too"
+            );
+            assert!(
+                !node_present(&dag, &event_node_id(ns, "$ev-a")),
+                "room-local body must be tombstoned too"
+            );
+
+            event_json_purge_room(py, ns.to_string(), room.to_string()).expect("purge room");
+            let after_purge = event_json_get(py, ns.to_string(), vec!["$ev-b".to_string()])
+                .expect("get after purge");
+            assert_eq!(after_purge[0].1, None);
+        });
+    }
+
+    #[test]
+    fn overwrite_replaces_body_in_place() {
+        super::auth_chain_closure_tests::ensure_open();
+        let ns = "ns-ev-overwrite";
+        let room = "!room-ev-overwrite:example.org";
+        pyo3::Python::attach(|py| {
+            event_json_put(
+                py,
+                ns.to_string(),
+                vec![(room.to_string(), "$e1".to_string(), b"BODY-1".to_vec())],
+            )
+            .expect("put");
+            // Censoring/expiry/re-signing replace the body in place through
+            // the same call: one record per event, latest wins.
+            event_json_put(
+                py,
+                ns.to_string(),
+                vec![(room.to_string(), "$e1".to_string(), b"BODY-2".to_vec())],
+            )
+            .expect("overwrite");
+
+            let got = event_json_get(py, ns.to_string(), vec!["$e1".to_string()]).expect("get");
+            assert_eq!(got[0].1.as_deref(), Some(&b"BODY-2"[..]));
+            let dag = event_dag_room_id(ns, room);
+            assert!(node_present(&dag, &event_node_id(ns, "$e1")), "a single body record");
+        });
+    }
+
+    #[test]
+    fn room_purge_is_isolated_and_stale_locator_misses() {
+        super::auth_chain_closure_tests::ensure_open();
+        let ns = "ns-ev-isolation";
+        let room_gone = "!room-gone:example.org";
+        let room_keep = "!room-keep:example.org";
+        let id_gone = event_node_id(ns, "$gone");
+        let dag_gone = event_dag_room_id(ns, room_gone);
+        let dag_keep = event_dag_room_id(ns, room_keep);
+        let locator_gone = event_locator_collection_id(ns, &id_gone);
+
+        pyo3::Python::attach(|py| {
+            event_json_put(
+                py,
+                ns.to_string(),
+                vec![(room_gone.to_string(), "$gone".to_string(), b"FRAMED-GONE".to_vec())],
+            )
+            .expect("put gone");
+            event_json_put(
+                py,
+                ns.to_string(),
+                vec![(room_keep.to_string(), "$keep".to_string(), b"FRAMED-KEEP".to_vec())],
+            )
+            .expect("put keep");
+
+            event_json_purge_room(py, ns.to_string(), room_gone.to_string()).expect("purge");
+
+            // The surviving room is untouched.
+            let keep = event_json_get(py, ns.to_string(), vec!["$keep".to_string()]).expect("get keep");
+            assert_eq!(keep[0].1.as_deref(), Some(&b"FRAMED-KEEP"[..]));
+
+            // The purged room misses even though its locator still points at
+            // the now-empty collection -- a stale locator is a miss, not an
+            // error, and the caller's SQL fallback takes over.
+            assert!(
+                node_present(&locator_gone, &id_gone),
+                "purge alone leaves the locator (Python removes it with point deletes)"
+            );
+            assert!(dag_gone != dag_keep);
+            let gone = event_json_get(py, ns.to_string(), vec!["$gone".to_string()]).expect("get gone");
+            assert_eq!(gone[0].1, None);
+        });
+    }
+
+    #[test]
+    fn get_falls_back_to_legacy_global_keys() {
+        super::auth_chain_closure_tests::ensure_open();
+        let ns = "ns-ev-legacy";
+        // Pre-migration entry: written straight to the old global flat-KV key.
+        let legacy_key = event_json_legacy_key(ns, "$old");
+        let legacy_value: Vec<u8> = b"FRAMED-LEGACY".to_vec();
+        pyo3::Python::attach(|py| {
+            batch_put(py, vec![(legacy_key.clone(), legacy_value.clone())]).expect("legacy put");
+            let got = event_json_get(py, ns.to_string(), vec!["$old".to_string()]).expect("get legacy");
+            assert_eq!(got[0].1.as_deref(), Some(&legacy_value[..]));
+
+            // Deleting tombstones the legacy key too, so a purged event can't
+            // resurrect through the fallback.
+            event_json_delete(py, ns.to_string(), vec!["$old".to_string()]).expect("delete");
+            let gone = event_json_get(py, ns.to_string(), vec!["$old".to_string()])
+                .expect("get deleted legacy");
+            assert_eq!(gone[0].1, None);
         });
     }
 }

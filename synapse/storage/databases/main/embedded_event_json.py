@@ -14,35 +14,51 @@
 
 """Mirrors `event_json` (the raw event blob: internal_metadata, json,
 format_version, keyed by event_id) into the same embedded mtxdb keyspace the
-state HAMT uses -- same rationale, same shape: write-once, immutable,
-content-addressed by event_id, pure point lookups (`get_event`), no
+state HAMT uses -- same rationale: write-once, immutable-ish, content-
+addressed by event_id, pure point lookups (`get_event`), no
 aggregation/joins needed against the blob itself (see
 scripts-dev/benchmark_event_json_storage.py for the measurements: mtxdb
 beat Postgres 23x at batch=1, 3.8x at batch=100).
+
+Layout is room-aware (see `rust/src/database/mtxdb.rs`'s `event_json_*`
+functions for the exact derivations):
+
+- A sharded **locator** maps event_id -> its room's EventDag collection:
+  256 deterministic bucket collections derived from the event's 128-bit
+  identity hash, so no single index accumulates the server's whole event
+  history (the old single global collection did -- see below).
+- The room's `EventDag` collection holds two domain-separated records per
+  event: the framed **body** (`event-body:` node) and, at initial persist, a
+  compact **prev-edge** record (`prev-edges:` node) of its predecessor ids.
+  Both coexist safely because their node ids are derived from differently
+  tagged keys.
+
+`event_json` (Postgres) stays authoritative and is always written; the
+embedded engine is consulted first on reads, then the **legacy** global
+`event_json:<ns>:<id>` keys that this module used before the layout became
+room-aware (the Rust read path falls through to those automatically so
+pre-migration mirror entries keep serving until a backfill retires them),
+and finally a normal SQL `event_json` fetch.
+
+Unlike the HAMT nodes/roots this mirrors, `event_json` rows are NOT
+write-once/immutable in practice: censoring, expiry, and re-signing all
+replace a row's `json` in place. Both of those paths explicitly re-mirror
+the new value into mtxdb as part of the same transaction that updates SQL
+(passing an empty prev list, so the write-once edge record is preserved).
+The read-path SQL fallback in `events_worker.py`, however, deliberately
+does NOT write back into mtxdb on a miss -- doing so racing a concurrent
+censor/expiry could land a stale pre-censor value in mtxdb after the pruned
+one, quietly undoing it, and there's no version/CAS scheme here to prevent
+that. So a mirror gap (e.g. an id that predates this feature) stays a
+permanent SQL fallback rather than self-healing; closing that gap needs an
+explicit, serialized backfill job, not a read-path write.
 
 Reuses the same `embedded_hamt_engine`/`embedded_hamt_path` config and mtxdb
 keyspace the state store already opens (one flat keyspace, prefixed keys --
 `hamt:node:...`, `hamt:root:...`, `event_json:...` -- rather than a second
 mtxdb directory/config knob), and is on whenever that is -- see
-`open_embedded_event_json_engine`. Keys are namespaced by
-`embedded_hamt_namespace`, same scheme as `embedded_event_to_state_group.py`,
-so multiple homeservers sharing one mtxdb file don't collide on event_id.
-`event_json` (Postgres) stays authoritative and is always written; the
-embedded engine is consulted first on reads and any event_id it's missing
-falls back to a normal SQL `event_json` fetch.
-
-Unlike the HAMT nodes/roots this mirrors, `event_json` rows are NOT
-write-once/immutable in practice: censoring and expiry both replace a
-row's `json` in place (see `censor_events.py`'s `_censor_event_txn`,
-called by both). Both of those paths explicitly re-mirror the new value
-into mtxdb as part of the same transaction that updates SQL. The read-path
-SQL fallback in `events_worker.py`, however, deliberately does NOT write
-back into mtxdb on a miss -- doing so racing a concurrent censor/expiry
-could land a stale pre-censor value in mtxdb after the pruned one, quietly
-undoing it, and there's no version/CAS scheme here to prevent that. So a
-mirror gap (e.g. an id that predates this feature) stays a permanent SQL
-fallback rather than self-healing; closing that gap needs an explicit,
-serialized backfill job, not a read-path write.
+`open_embedded_event_json_engine`. Namespacing via `embedded_hamt_namespace`
+keeps multiple homeservers sharing one mtxdb file from colliding on event_id.
 """
 
 from __future__ import annotations
@@ -54,7 +70,6 @@ from typing import TYPE_CHECKING
 from synapse.storage.databases.main.embedded_common import (
     SyncTier,
     maybe_sync,
-    namespace_hash,
 )
 
 if TYPE_CHECKING:
