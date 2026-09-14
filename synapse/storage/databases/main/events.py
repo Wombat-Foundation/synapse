@@ -405,6 +405,14 @@ class PersistEventsStore:
                 sliding_sync_table_changes=sliding_sync_table_changes,
                 new_state_dag_forward_extremities=new_state_dag_forward_extremities,
             )
+
+            # Sync embedded engine pools AFTER the SQL transaction commits.
+            # Moved here from _persist_events_txn so a failed SQL transaction
+            # doesn't waste a synchronous fsync, and dirty pools from this
+            # persist batch are flushed exactly once on success.
+            if self._embedded_hamt_engine == "mtxdb":
+                maybe_sync(SyncTier.DURABLE, pools=[Pool.STATE, Pool.AUTH_CHAIN])
+
             persist_event_counter.labels(**{SERVER_NAME_LABEL: self.server_name}).inc(
                 len(events_and_contexts)
             )
@@ -1244,8 +1252,12 @@ class PersistEventsStore:
         # put_chain_links_batch's docstrings. In SQL mode the engine was
         # never opened, so skip the sync entirely (matching how the other
         # embedded writes above gate on the engine being configured).
-        if self._embedded_hamt_engine == "mtxdb":
-            maybe_sync(SyncTier.DURABLE, pools=[Pool.STATE, Pool.AUTH_CHAIN])
+        #
+        # NOTE: This sync is intentionally *not* called here.  It was
+        # moved to _persist_events_and_state_updates (after the
+        # runInteraction commit) so that a failed SQL transaction doesn't
+        # waste a synchronous fsync, and so the caller can batch the sync
+        # across multiple persist transactions if desired.
 
     def _persist_event_auth_chain_txn(
         self,
