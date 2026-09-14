@@ -764,16 +764,10 @@ pub fn put_room_index(
     namespace: String,
     entries: Vec<(i64, Vec<u8>)>,
 ) -> PyResult<()> {
-    // Unlike every other pyfunction in this file, this one was written
-    // without a `py.detach` -- PyO3 does not release the GIL automatically
-    // just because the underlying call blocks (pwrite + a Mutex lock on
-    // room_index::HANDLES here), the way CPython's own stdlib I/O does.
-    // Called once per state-group HAMT root write (~20k times in a full
-    // trial run), holding the GIL that whole time serializes every other
-    // Python thread in the process behind it -- including whatever thread
-    // is dispatching "concurrent" Postgres queries in the test harness --
-    // which shows up as a uniform slowdown across every SQL table's
-    // measured time, not as cost attributed to this function itself.
+    // `room_index::put` does blocking local I/O and takes its own handle
+    // cache mutex. Release the GIL while it runs so concurrent Python threads
+    // (including test-harness Postgres dispatchers) are not serialized behind
+    // this write.
     py.detach(|| room_index::put(&namespace, &entries))
 }
 
@@ -1201,99 +1195,108 @@ pub fn put_auth_chain_links_batch(
     namespace: String,
     links: Vec<(i64, i64, i64, i64)>,
 ) -> PyResult<()> {
-    let _guard = RMW_LOCK
-        .lock()
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("lock poison: {}", e)))?;
-    // No `py.detach` here — see increment_counters_batch's comment for why.
-    let engine = auth_chain_db()?;
-    let room_id = namespace_room_id(&namespace);
+    Python::attach(|py| {
+        py.detach(|| {
+            // Acquire the RMW lock after releasing the GIL. The lock remains held for
+            // the whole read-modify-write operation, but must not be captured by the
+            // Ungil closure (MutexGuard is !Send).
+            let _guard = RMW_LOCK.lock().map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("lock poison: {}", e))
+            })?;
+            let engine = auth_chain_db()?;
+            let room_id = namespace_room_id(&namespace);
 
-    let mut grouped: HashMap<i64, Vec<(i64, i64, i64)>> = HashMap::new();
-    for (o_chain, o_seq, t_chain, t_seq) in links {
-        grouped
-            .entry(o_chain)
-            .or_default()
-            .push((o_seq, t_chain, t_seq));
-    }
-
-    let mut pairs_to_put = Vec::with_capacity(grouped.len());
-
-    for (chain_id, new_edges) in grouped {
-        let node_id = chain_node_id(chain_id);
-        let mut edges = match engine.get(&room_id, &node_id) {
-            Ok(Some(data)) => deserialize_manifest(&data.bytes),
-            Ok(None) => Vec::new(),
-            Err(e) => {
-                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "mtxdb get error reading chain {}: {}",
-                    chain_id, e
-                )))
+            let mut grouped: HashMap<i64, Vec<(i64, i64, i64)>> = HashMap::new();
+            for (o_chain, o_seq, t_chain, t_seq) in links {
+                grouped
+                    .entry(o_chain)
+                    .or_default()
+                    .push((o_seq, t_chain, t_seq));
             }
-        };
-        // Dedup against what's already stored: a retried caller (e.g. a
-        // retried persist_events transaction, or a re-run background
-        // migration batch) recomputes the same edges and calls this again
-        // -- these writes aren't part of the SQL transaction's rollback,
-        // so a retry after a partial success would otherwise duplicate
-        // edges here forever. Existing edges are deduped first so an edge
-        // already present twice from before this fix existed collapses
-        // down rather than being preserved.
-        let mut seen: HashSet<(i64, i64, i64)> = HashSet::with_capacity(edges.len());
-        edges.retain(|edge| seen.insert(*edge));
-        for edge in new_edges {
-            if seen.insert(edge) {
-                edges.push(edge);
-            }
-        }
-        let bytes = serialize_manifest(&edges);
-        pairs_to_put.push((node_id, NodeData::new(bytes::Bytes::from(bytes))));
-    }
 
-    engine.put_many(&room_id, &pairs_to_put).map_err(|e| {
-        pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb put error: {}", e))
-    })?;
-    Ok(())
+            let mut pairs_to_put = Vec::with_capacity(grouped.len());
+
+            for (chain_id, new_edges) in grouped {
+                let node_id = chain_node_id(chain_id);
+                let mut edges = match engine.get(&room_id, &node_id) {
+                    Ok(Some(data)) => deserialize_manifest(&data.bytes),
+                    Ok(None) => Vec::new(),
+                    Err(e) => {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "mtxdb get error reading chain {}: {}",
+                            chain_id, e
+                        )))
+                    }
+                };
+                // Dedup against what's already stored: a retried caller (e.g. a
+                // retried persist_events transaction, or a re-run background
+                // migration batch) recomputes the same edges and calls this again
+                // -- these writes aren't part of the SQL transaction's rollback,
+                // so a retry after a partial success would otherwise duplicate
+                // edges here forever. Existing edges are deduped first so an edge
+                // already present twice from before this fix existed collapses
+                // down rather than being preserved.
+                let mut seen: HashSet<(i64, i64, i64)> = HashSet::with_capacity(edges.len());
+                edges.retain(|edge| seen.insert(*edge));
+                for edge in new_edges {
+                    if seen.insert(edge) {
+                        edges.push(edge);
+                    }
+                }
+                let bytes = serialize_manifest(&edges);
+                pairs_to_put.push((node_id, NodeData::new(bytes::Bytes::from(bytes))));
+            }
+
+            engine.put_many(&room_id, &pairs_to_put).map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb put error: {}", e))
+            })?;
+            Ok(())
+        })
+    })
 }
 
 #[pyfunction]
 pub fn delete_auth_chain_links_batch(namespace: String, pairs: Vec<(i64, i64)>) -> PyResult<()> {
-    let _guard = RMW_LOCK
-        .lock()
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("lock poison: {}", e)))?;
-    // No `py.detach` here — see increment_counters_batch's comment for why.
-    let engine = auth_chain_db()?;
-    let room_id = namespace_room_id(&namespace);
+    Python::attach(|py| {
+        py.detach(|| {
+            let _guard = RMW_LOCK.lock().map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("lock poison: {}", e))
+            })?;
+            let engine = auth_chain_db()?;
+            let room_id = namespace_room_id(&namespace);
 
-    let mut grouped: HashMap<i64, HashSet<i64>> = HashMap::new();
-    for (o_chain, o_seq) in pairs {
-        grouped.entry(o_chain).or_default().insert(o_seq);
-    }
+            let mut grouped: HashMap<i64, HashSet<i64>> = HashMap::new();
+            for (o_chain, o_seq) in pairs {
+                grouped.entry(o_chain).or_default().insert(o_seq);
+            }
 
-    let mut pairs_to_put = Vec::with_capacity(grouped.len());
+            let mut pairs_to_put = Vec::with_capacity(grouped.len());
 
-    for (chain_id, seqs_to_delete) in grouped {
-        let node_id = chain_node_id(chain_id);
-        let data = engine.get(&room_id, &node_id).map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb get error: {}", e))
-        })?;
-        if let Some(data) = data {
-            let edges = deserialize_manifest(&data.bytes);
-            let filtered: Vec<_> = edges
-                .into_iter()
-                .filter(|(seq, _, _)| !seqs_to_delete.contains(seq))
-                .collect();
+            for (chain_id, seqs_to_delete) in grouped {
+                let node_id = chain_node_id(chain_id);
+                let data = engine.get(&room_id, &node_id).map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb get error: {}", e))
+                })?;
+                if let Some(data) = data {
+                    let edges = deserialize_manifest(&data.bytes);
+                    let filtered: Vec<_> = edges
+                        .into_iter()
+                        .filter(|(seq, _, _)| !seqs_to_delete.contains(seq))
+                        .collect();
 
-            let bytes = serialize_manifest(&filtered);
-            pairs_to_put.push((node_id, NodeData::new(bytes::Bytes::from(bytes))));
-        }
-    }
+                    let bytes = serialize_manifest(&filtered);
+                    pairs_to_put.push((node_id, NodeData::new(bytes::Bytes::from(bytes))));
+                }
+            }
 
-    if !pairs_to_put.is_empty() {
-        engine.put_many(&room_id, &pairs_to_put).map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb put error: {}", e))
-        })?;
-    }
-    Ok(())
+            if !pairs_to_put.is_empty() {
+                engine.put_many(&room_id, &pairs_to_put).map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb put error: {}", e))
+                })?;
+            }
+            Ok(())
+        })
+    })
 }
 
 /// Room-scoped: for each `event_id`, returns its `u32` short id, allocating
@@ -1317,38 +1320,109 @@ pub fn get_or_create_short_ids(
     room_id: String,
     event_ids: Vec<String>,
 ) -> PyResult<Vec<u32>> {
-    let _guard = RMW_LOCK
-        .lock()
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("lock poison: {}", e)))?;
-    // No `py.detach` here -- see increment_counters_batch's comment for why:
-    // the RMW lock must be held across get->put, and MutexGuard is !Send.
-    let engine = db_for_shard_type(ShardType::AuthChain)?;
-    let collection = auth_chain_closure_room_id(&namespace, &room_id);
-
-    let mut out = Vec::with_capacity(event_ids.len());
-    let mut counter_value: Option<u64> = None;
-
-    for event_id in event_ids {
-        let fwd_id = short_id_forward_node_id(&event_id);
-        let existing = engine.get(&collection, &fwd_id).map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb get error: {}", e))
-        })?;
-
-        if let Some(data) = existing {
-            if data.bytes.len() != 4 {
-                return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                    "corrupt auth-chain short-id forward record",
-                ));
-            }
-            let short_id = u32::from_be_bytes(data.bytes.as_ref().try_into().unwrap());
-
-            // Verify + repair the reverse mapping even though the forward
-            // mapping already exists (see docstring above).
-            let rev_id = short_id_reverse_node_id(short_id);
-            let rev_present = engine.get(&collection, &rev_id).map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb get error: {}", e))
+    Python::attach(|py| {
+        py.detach(|| {
+            let _guard = RMW_LOCK.lock().map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("lock poison: {}", e))
             })?;
-            if rev_present.is_none() {
+            let engine = db_for_shard_type(ShardType::AuthChain)?;
+            let collection = auth_chain_closure_room_id(&namespace, &room_id);
+
+            let mut out = Vec::with_capacity(event_ids.len());
+            let mut counter_value: Option<u64> = None;
+
+            for event_id in event_ids {
+                let fwd_id = short_id_forward_node_id(&event_id);
+                let existing = engine.get(&collection, &fwd_id).map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb get error: {}", e))
+                })?;
+
+                if let Some(data) = existing {
+                    if data.bytes.len() != 4 {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                            "corrupt auth-chain short-id forward record",
+                        ));
+                    }
+                    let short_id = u32::from_be_bytes(data.bytes.as_ref().try_into().unwrap());
+
+                    // Verify + repair the reverse mapping even though the forward
+                    // mapping already exists (see docstring above).
+                    let rev_id = short_id_reverse_node_id(short_id);
+                    let rev_present = engine.get(&collection, &rev_id).map_err(|e| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb get error: {}", e))
+                    })?;
+                    if rev_present.is_none() {
+                        engine
+                            .put(
+                                &collection,
+                                &rev_id,
+                                &NodeData::new(bytes::Bytes::from(event_id.into_bytes())),
+                            )
+                            .map_err(|e| {
+                                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                    "mtxdb put error repairing reverse mapping: {}",
+                                    e
+                                ))
+                            })?;
+                    }
+                    out.push(short_id);
+                    continue;
+                }
+
+                let counter_id = short_id_counter_node_id();
+                let current = match counter_value {
+                    Some(v) => v,
+                    None => match engine.get(&collection, &counter_id) {
+                        Ok(Some(data)) if data.bytes.len() == 8 => {
+                            u64::from_be_bytes(data.bytes.as_ref().try_into().unwrap())
+                        }
+                        Ok(_) => 0,
+                        Err(e) => {
+                            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                                "mtxdb get error reading counter: {}",
+                                e
+                            )))
+                        }
+                    },
+                };
+                let next = current + 1;
+                if next > AUTH_CHAIN_SHORT_ID_MAX {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                        "auth-chain short-id space exhausted for room",
+                    ));
+                }
+                let short_id = next as u32;
+                counter_value = Some(next);
+
+                engine
+                    .put(
+                        &collection,
+                        &counter_id,
+                        &NodeData::new(bytes::Bytes::copy_from_slice(&next.to_be_bytes())),
+                    )
+                    .map_err(|e| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "mtxdb put error updating counter: {}",
+                            e
+                        ))
+                    })?;
+
+                // Forward mapping first (authoritative), then reverse -- see
+                // docstring above for why this order matters for crash recovery.
+                engine
+                    .put(
+                        &collection,
+                        &fwd_id,
+                        &NodeData::new(bytes::Bytes::copy_from_slice(&short_id.to_be_bytes())),
+                    )
+                    .map_err(|e| {
+                        pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "mtxdb put error writing forward mapping: {}",
+                            e
+                        ))
+                    })?;
+
+                let rev_id = short_id_reverse_node_id(short_id);
                 engine
                     .put(
                         &collection,
@@ -1357,86 +1431,17 @@ pub fn get_or_create_short_ids(
                     )
                     .map_err(|e| {
                         pyo3::exceptions::PyRuntimeError::new_err(format!(
-                            "mtxdb put error repairing reverse mapping: {}",
+                            "mtxdb put error writing reverse mapping: {}",
                             e
                         ))
                     })?;
+
+                out.push(short_id);
             }
-            out.push(short_id);
-            continue;
-        }
 
-        let counter_id = short_id_counter_node_id();
-        let current = match counter_value {
-            Some(v) => v,
-            None => match engine.get(&collection, &counter_id) {
-                Ok(Some(data)) if data.bytes.len() == 8 => {
-                    u64::from_be_bytes(data.bytes.as_ref().try_into().unwrap())
-                }
-                Ok(_) => 0,
-                Err(e) => {
-                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "mtxdb get error reading counter: {}",
-                        e
-                    )))
-                }
-            },
-        };
-        let next = current + 1;
-        if next > AUTH_CHAIN_SHORT_ID_MAX {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "auth-chain short-id space exhausted for room",
-            ));
-        }
-        let short_id = next as u32;
-        counter_value = Some(next);
-
-        engine
-            .put(
-                &collection,
-                &counter_id,
-                &NodeData::new(bytes::Bytes::copy_from_slice(&next.to_be_bytes())),
-            )
-            .map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "mtxdb put error updating counter: {}",
-                    e
-                ))
-            })?;
-
-        // Forward mapping first (authoritative), then reverse -- see
-        // docstring above for why this order matters for crash recovery.
-        engine
-            .put(
-                &collection,
-                &fwd_id,
-                &NodeData::new(bytes::Bytes::copy_from_slice(&short_id.to_be_bytes())),
-            )
-            .map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "mtxdb put error writing forward mapping: {}",
-                    e
-                ))
-            })?;
-
-        let rev_id = short_id_reverse_node_id(short_id);
-        engine
-            .put(
-                &collection,
-                &rev_id,
-                &NodeData::new(bytes::Bytes::from(event_id.into_bytes())),
-            )
-            .map_err(|e| {
-                pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "mtxdb put error writing reverse mapping: {}",
-                    e
-                ))
-            })?;
-
-        out.push(short_id);
-    }
-
-    Ok(out)
+            Ok(out)
+        })
+    })
 }
 
 /// Room-scoped batch reverse lookup: `short_id -> event_id`, `None` for an
@@ -1582,61 +1587,64 @@ pub fn auth_chain_children_append(
     room_id: String,
     rows: Vec<(u32, Vec<u32>)>,
 ) -> PyResult<()> {
-    let _guard = RMW_LOCK
-        .lock()
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("lock poison: {}", e)))?;
-    // No `py.detach` here -- see increment_counters_batch's comment for why.
-    let engine = db_for_shard_type(ShardType::AuthChain)?;
-    let collection = auth_chain_closure_room_id(&namespace, &room_id);
+    Python::attach(|py| {
+        py.detach(|| {
+            let _guard = RMW_LOCK.lock().map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("lock poison: {}", e))
+            })?;
+            let engine = db_for_shard_type(ShardType::AuthChain)?;
+            let collection = auth_chain_closure_room_id(&namespace, &room_id);
 
-    // Aggregate by parent first: the batched put below only applies at the
-    // end, so two rows for the same parent in one call would otherwise each
-    // read the same *un-put* state and both emit a put for the same key --
-    // last-write-wins silently dropping the first row's children.
-    let mut by_parent: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
-    for (parent_short_id, new_children) in rows {
-        if new_children.is_empty() {
-            continue;
-        }
-        by_parent
-            .entry(parent_short_id)
-            .or_default()
-            .extend(new_children);
-    }
-
-    let mut pairs_to_put = Vec::with_capacity(by_parent.len());
-    for (parent_short_id, new_children) in by_parent {
-        let node_id = auth_chain_child_node_id(parent_short_id);
-        let mut children = match engine.get(&collection, &node_id) {
-            Ok(Some(data)) => decode_auth_edges(&data.bytes)?,
-            Ok(None) => Vec::new(),
-            Err(e) => {
-                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "mtxdb get error reading children of {}: {}",
-                    parent_short_id, e
-                )))
+            // Aggregate by parent first: the batched put below only applies at the
+            // end, so two rows for the same parent in one call would otherwise each
+            // read the same *un-put* state and both emit a put for the same key --
+            // last-write-wins silently dropping the first row's children.
+            let mut by_parent: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+            for (parent_short_id, new_children) in rows {
+                if new_children.is_empty() {
+                    continue;
+                }
+                by_parent
+                    .entry(parent_short_id)
+                    .or_default()
+                    .extend(new_children);
             }
-        };
-        let mut seen: HashSet<u32> = children.iter().copied().collect();
-        let mut changed = false;
-        for child in new_children {
-            if seen.insert(child) {
-                children.push(child);
-                changed = true;
-            }
-        }
-        if changed {
-            let bytes = encode_auth_edges(&children);
-            pairs_to_put.push((node_id, NodeData::new(bytes::Bytes::from(bytes))));
-        }
-    }
 
-    if !pairs_to_put.is_empty() {
-        engine.put_many(&collection, &pairs_to_put).map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb put error: {}", e))
-        })?;
-    }
-    Ok(())
+            let mut pairs_to_put = Vec::with_capacity(by_parent.len());
+            for (parent_short_id, new_children) in by_parent {
+                let node_id = auth_chain_child_node_id(parent_short_id);
+                let mut children = match engine.get(&collection, &node_id) {
+                    Ok(Some(data)) => decode_auth_edges(&data.bytes)?,
+                    Ok(None) => Vec::new(),
+                    Err(e) => {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "mtxdb get error reading children of {}: {}",
+                            parent_short_id, e
+                        )))
+                    }
+                };
+                let mut seen: HashSet<u32> = children.iter().copied().collect();
+                let mut changed = false;
+                for child in new_children {
+                    if seen.insert(child) {
+                        children.push(child);
+                        changed = true;
+                    }
+                }
+                if changed {
+                    let bytes = encode_auth_edges(&children);
+                    pairs_to_put.push((node_id, NodeData::new(bytes::Bytes::from(bytes))));
+                }
+            }
+
+            if !pairs_to_put.is_empty() {
+                engine.put_many(&collection, &pairs_to_put).map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb put error: {}", e))
+                })?;
+            }
+            Ok(())
+        })
+    })
 }
 
 /// Room-scoped full purge of the closure skeleton (counter, forward/reverse
@@ -2264,52 +2272,51 @@ pub type PyRootRecord = (i64, Vec<u8>, Vec<u8>, String, Vec<u8>);
 
 #[pyfunction]
 pub fn increment_counters_batch(pairs: Vec<(Vec<u8>, i64)>) -> PyResult<Vec<i64>> {
-    let _guard = RMW_LOCK
-        .lock()
-        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("lock poison: {}", e)))?;
-    // No `py.detach` here: the RMW lock must be held across get→put_many,
-    // and MutexGuard is !Send so it can't cross the Ungil boundary. The GIL
-    // stays held for the duration (#[pyfunction] holds it by default), which
-    // also serializes concurrent Python callers — so this is safe and fast
-    // for local mmap I/O.
-    let engine = state_db()?;
-    let room_id = kv_room_id();
-    let mut results = Vec::with_capacity(pairs.len());
-    let mut puts = Vec::with_capacity(pairs.len());
+    Python::attach(|py| {
+        py.detach(|| {
+            let _guard = RMW_LOCK.lock().map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!("lock poison: {}", e))
+            })?;
+            let engine = state_db()?;
+            let room_id = kv_room_id();
+            let mut results = Vec::with_capacity(pairs.len());
+            let mut puts = Vec::with_capacity(pairs.len());
 
-    for (key, delta) in pairs {
-        let node_id = kv_node_id(&key);
-        let current = match engine.get(&room_id, &node_id) {
-            Ok(Some(data)) => {
-                if data.bytes.len() == 8 {
-                    i64::from_be_bytes(data.bytes.as_ref().try_into().unwrap())
-                } else {
-                    0
-                }
+            for (key, delta) in pairs {
+                let node_id = kv_node_id(&key);
+                let current = match engine.get(&room_id, &node_id) {
+                    Ok(Some(data)) => {
+                        if data.bytes.len() == 8 {
+                            i64::from_be_bytes(data.bytes.as_ref().try_into().unwrap())
+                        } else {
+                            0
+                        }
+                    }
+                    Ok(None) => 0,
+                    Err(e) => {
+                        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                            "mtxdb get error reading counter: {}",
+                            e
+                        )))
+                    }
+                };
+                let new_value = current + delta;
+                results.push(new_value);
+                puts.push((
+                    node_id,
+                    NodeData::new(bytes::Bytes::copy_from_slice(&new_value.to_be_bytes())),
+                ));
             }
-            Ok(None) => 0,
-            Err(e) => {
-                return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                    "mtxdb get error reading counter: {}",
-                    e
-                )))
+
+            if !puts.is_empty() {
+                engine.put_many(&room_id, &puts).map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb put error: {}", e))
+                })?;
             }
-        };
-        let new_value = current + delta;
-        results.push(new_value);
-        puts.push((
-            node_id,
-            NodeData::new(bytes::Bytes::copy_from_slice(&new_value.to_be_bytes())),
-        ));
-    }
 
-    if !puts.is_empty() {
-        engine.put_many(&room_id, &puts).map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!("mtxdb put error: {}", e))
-        })?;
-    }
-
-    Ok(results)
+            Ok(results)
+        })
+    })
 }
 
 /// Batch-read HAMT nodes from the native mtxdb store using the same
