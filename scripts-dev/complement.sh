@@ -462,9 +462,13 @@ main() {
     # writable there (the image's WORKDIR) rather than making them supply an
     # in-container path themselves.
     SYNAPSE_EMBEDDED_HAMT_PATH="${SYNAPSE_EMBEDDED_HAMT_PATH:-/data/embedded_hamt}"
-  fi
-  if [[ -n "$SYNAPSE_EMBEDDED_HAMT_PATH" ]]; then
     export PASS_SYNAPSE_EMBEDDED_HAMT_PATH="$SYNAPSE_EMBEDDED_HAMT_PATH"
+  elif [[ -n "$SYNAPSE_EMBEDDED_HAMT_PATH" ]]; then
+    # A host shell may set a path for Trial or a real homeserver while this
+    # Complement invocation deliberately has mtxdb disabled (for example,
+    # SQLite dirty deployments). Forwarding the half-config makes Synapse
+    # reject its configuration before its health check can succeed.
+    echo "Ignoring embedded HAMT path because no embedded HAMT engine is enabled" >&2
   fi
 
   echo "Database: ${PASS_SYNAPSE_COMPLEMENT_DATABASE} (workers: ${PASS_SYNAPSE_COMPLEMENT_USE_WORKERS:-false}) | Embedded HAMT engine: ${PASS_SYNAPSE_EMBEDDED_HAMT_ENGINE:-<none>}${PASS_SYNAPSE_EMBEDDED_HAMT_ENGINE:+ at ${PASS_SYNAPSE_EMBEDDED_HAMT_PATH:-<not set>}}" >&2
