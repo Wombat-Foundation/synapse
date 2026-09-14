@@ -38,6 +38,11 @@ test: ##H Run tests, e.g., on tests/storage/
 build: ##H Build the package
 	uv build
 
+.PHONY: all
+all:	##H Run the main targets
+all: format lint sync test
+
+
 .PHONY: publish
 publish: build ##H Upload the package to PyPI using twine
 	uv run --with twine twine upload dist/*
