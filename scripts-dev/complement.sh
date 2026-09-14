@@ -591,14 +591,9 @@ main() {
   export PASS_COMPLEMENT_WRAPPER_TOKEN="$COMPLEMENT_WRAPPER_TOKEN"
   export COMPLEMENT_SHARE_ENV_PREFIX=PASS_
   export COMPLEMENT_SPAWN_HS_TIMEOUT_SECS=${COMPLEMENT_SPAWN_HS_TIMEOUT_SECS:-120}
-  # 30s (Complement's own hardcoded default) is fine for a request that's
-  # actually hung, but under host contention a homeserver can simply be
-  # slow to get scheduled rather than stuck -- that shows up as spurious
-  # "context deadline exceeded"/502 test failures that look like product
-  # bugs but are really the harness being impatient. Give it more slack by
-  # default (still overridable) instead of pretending the fix is to run
-  # fewer things at once.
-  export COMPLEMENT_CLIENT_TIMEOUT_SECS=${COMPLEMENT_CLIENT_TIMEOUT_SECS:-90}
+  # Keep genuinely stalled requests from consuming a minute and a half of a
+  # test run. Callers can still raise this for intentionally slow scenarios.
+  export COMPLEMENT_CLIENT_TIMEOUT_SECS=${COMPLEMENT_CLIENT_TIMEOUT_SECS:-30}
   # Placeholder until merge_and_report exists below; replaced with the real
   # combined EXIT trap once it's defined, so merging is never optional --
   # it happens on literal end-of-script, an explicit `exit`, a `set -e`
