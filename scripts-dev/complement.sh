@@ -436,22 +436,16 @@ main() {
   # particularly tricky.
   export PASS_SYNAPSE_LOG_TESTING=1
 
-  # SYNAPSE_MTXDB=1 is the concise production on-switch (see
-  # config/database.py) but was never actually forwarded into the
-  # container here -- treat it the same as SYNAPSE_EMBEDDED_HAMT_ENGINE=mtxdb
-  # so it does something locally too.
-  #
-  # Also accept the SYNAPSE_TEST_* names used by tests/utils.py's in-process
-  # trial runner, so a single .env can drive both test runners instead of
-  # silently no-opping here while working there. The TEST var wins when both
-  # are set; the non-TEST (production on-switch) name is only a fallback.
-  SYNAPSE_MTXDB="${SYNAPSE_TEST_MTXDB:-${SYNAPSE_MTXDB:-}}"
-  SYNAPSE_EMBEDDED_HAMT_ENGINE="${SYNAPSE_TEST_EMBEDDED_HAMT_ENGINE:-${SYNAPSE_EMBEDDED_HAMT_ENGINE:-}}"
-  SYNAPSE_EMBEDDED_HAMT_PATH="${SYNAPSE_TEST_EMBEDDED_HAMT_PATH:-${SYNAPSE_EMBEDDED_HAMT_PATH:-}}"
+  # Only TEST-scoped controls may enter Complement containers. In particular,
+  # never inherit a developer's production embedded-HAMT path: a path without
+  # its engine is an invalid Synapse config, and a path with its engine could
+  # mutate a real local store.
+  SYNAPSE_MTXDB="${SYNAPSE_TEST_MTXDB:-}"
+  SYNAPSE_EMBEDDED_HAMT_ENGINE="${SYNAPSE_TEST_EMBEDDED_HAMT_ENGINE:-}"
+  SYNAPSE_EMBEDDED_HAMT_PATH="${SYNAPSE_TEST_EMBEDDED_HAMT_PATH:-}"
 
   if [[ -n "${SYNAPSE_MTXDB:-}" && -z "$SYNAPSE_EMBEDDED_HAMT_ENGINE" ]]; then
     SYNAPSE_EMBEDDED_HAMT_ENGINE="mtxdb"
-    SYNAPSE_EMBEDDED_HAMT_PATH="${SYNAPSE_EMBEDDED_HAMT_PATH:-${SYNAPSE_MTXDB_PATH:-}}"
   fi
 
   if [[ -n "$SYNAPSE_EMBEDDED_HAMT_ENGINE" ]]; then
@@ -463,12 +457,6 @@ main() {
     # in-container path themselves.
     SYNAPSE_EMBEDDED_HAMT_PATH="${SYNAPSE_EMBEDDED_HAMT_PATH:-/data/embedded_hamt}"
     export PASS_SYNAPSE_EMBEDDED_HAMT_PATH="$SYNAPSE_EMBEDDED_HAMT_PATH"
-  elif [[ -n "$SYNAPSE_EMBEDDED_HAMT_PATH" ]]; then
-    # A host shell may set a path for Trial or a real homeserver while this
-    # Complement invocation deliberately has mtxdb disabled (for example,
-    # SQLite dirty deployments). Forwarding the half-config makes Synapse
-    # reject its configuration before its health check can succeed.
-    echo "Ignoring embedded HAMT path because no embedded HAMT engine is enabled" >&2
   fi
 
   echo "Database: ${PASS_SYNAPSE_COMPLEMENT_DATABASE} (workers: ${PASS_SYNAPSE_COMPLEMENT_USE_WORKERS:-false}) | Embedded HAMT engine: ${PASS_SYNAPSE_EMBEDDED_HAMT_ENGINE:-<none>}${PASS_SYNAPSE_EMBEDDED_HAMT_ENGINE:+ at ${PASS_SYNAPSE_EMBEDDED_HAMT_PATH:-<not set>}}" >&2
