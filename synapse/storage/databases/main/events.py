@@ -66,7 +66,6 @@ from synapse.storage.database import (
     LoggingTransaction,
     make_tuple_in_list_sql_clause,
 )
-from synapse.storage.databases.main.embedded_common import Pool, SyncTier, maybe_sync
 from synapse.storage.databases.main.embedded_event_json import (
     open_embedded_event_json_engine,
     put_event_json_batch,
@@ -405,13 +404,6 @@ class PersistEventsStore:
                 sliding_sync_table_changes=sliding_sync_table_changes,
                 new_state_dag_forward_extremities=new_state_dag_forward_extremities,
             )
-
-            # Sync embedded engine pools AFTER the SQL transaction commits.
-            # Moved here from _persist_events_txn so a failed SQL transaction
-            # doesn't waste a synchronous fsync, and dirty pools from this
-            # persist batch are flushed exactly once on success.
-            if self._embedded_hamt_engine == "mtxdb":
-                maybe_sync(SyncTier.DURABLE, pools=[Pool.STATE, Pool.AUTH_CHAIN])
 
             persist_event_counter.labels(**{SERVER_NAME_LABEL: self.server_name}).inc(
                 len(events_and_contexts)
