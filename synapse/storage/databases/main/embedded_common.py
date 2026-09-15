@@ -20,6 +20,15 @@ logger = logging.getLogger(__name__)
 # Set once during HomeServer init via configure_sync(); never mutated after.
 _sync_disabled: bool = False
 
+# Whether any store in this process configured an embedded engine. Set once
+# during HomeServer init (see StateGroupDataStore.__init__); monotonic
+# (only ever False -> True), so multi-homeserver processes sharing this
+# module (e.g. Complement trial) can't unset it for each other. Lets
+# maybe_sync/sync_now no-op when the engine was never configured instead of
+# importing the native module and issuing FFI syncs against a never-opened
+# engine.
+_engine_configured: bool = False
+
 # ── FFI boundary timing (opt-in via SYNAPSE_PG_TIMINGS=1) ────────────────
 _FFI_TIMINGS: dict[str, float] = defaultdict(float)
 _FFI_TIMING_COUNTS: dict[str, int] = defaultdict(int)
@@ -283,6 +292,13 @@ def configure_sync(*, no_sync: bool) -> None:
     _sync_disabled = no_sync
 
 
+def _set_engine_configured() -> None:
+    """Record that an embedded engine was configured. Called once per store
+    init when `embedded_hamt.engine` + `embedded_hamt.path` are set."""
+    global _engine_configured
+    _engine_configured = True
+
+
 def namespace_hash(namespace: str) -> bytes:
     """16-byte digest of a namespace, used to key every embedded mirror.
 
@@ -349,6 +365,9 @@ def maybe_sync(tier: SyncTier, pools: Iterable[Pool] | None = None) -> None:
     write to one pool doesn't force a flush of another pool's unrelated
     dirty shards.
     """
+    if not _engine_configured:
+        return
+
     if tier is not SyncTier.DURABLE:
         return
 
@@ -513,6 +532,9 @@ def sync_now(pools: Iterable[Pool] | None = None) -> None:
     delayed flush does not redundantly re-sync them.  Falls back to
     maybe_sync if the coalescer hasn't been initialized.
     """
+    if not _engine_configured:
+        return
+
     if _coalescer is not None:
         _coalescer.sync_now(pools)
     elif pools is not None:

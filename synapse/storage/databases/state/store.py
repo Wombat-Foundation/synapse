@@ -50,6 +50,7 @@ from synapse.storage.databases.main.embedded_common import (
     _clear_coalescer,
     _FlushCoalescer,
     _set_coalescer,
+    _set_engine_configured,
     configure_sync,
     ffi_timing,
     mark_dirty,
@@ -168,6 +169,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             # benchmark (point reads, batch reads) and needs no worker-
             # process bridge (native multi-process mmap access), so fjall
             # was dropped rather than kept as a second maintained option.
+            _set_engine_configured()
             if self._embedded_hamt_engine != "mtxdb":
                 raise RuntimeError(
                     f"Unknown embedded_hamt_engine: {self._embedded_hamt_engine!r} "
@@ -732,7 +734,10 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 pending_room_roots=pending_room_roots,
             )
         if incremental is not None:
-            txn.call_after(mark_dirty, Pool.STATE)
+            # Only the embedded path has a coalescer to notify; skip the
+            # registration entirely when the engine isn't configured.
+            if self._embedded_hamt_engine:
+                txn.call_after(mark_dirty, Pool.STATE)
             return incremental
 
         _gg_reb_start = time.monotonic()
@@ -805,7 +810,10 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             len(current_state_ids),
             (time.monotonic() - _gg_reb_start) * 1000,
         )
-        txn.call_after(mark_dirty, Pool.STATE)
+        # Only the embedded path has a coalescer to notify; skip the
+        # registration entirely when the engine isn't configured.
+        if self._embedded_hamt_engine:
+            txn.call_after(mark_dirty, Pool.STATE)
         return root_structural_hash, root_lattice, nodes
 
     def _persist_state_hamt_incremental_txn(
