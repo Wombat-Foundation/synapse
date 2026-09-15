@@ -46,8 +46,10 @@ from synapse.storage.database import (
 )
 from synapse.storage.databases.embedded_engine import get_embedded_engine
 from synapse.storage.databases.main.embedded_common import (
+    SyncTier,
     configure_sync,
     ffi_timing,
+    maybe_sync,
     mirror_timing,
 )
 from synapse.storage.databases.state.bg_updates import (
@@ -221,11 +223,25 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     self._drain_embedded_state_hamt_root_deletion_queue,
                     Duration(minutes=5),
                 )
-                # Writes are now flushed by the event-driven coalescing
-                # flush in embedded_common (mark_dirty → reactor.callLater
-                # → _flush_dirty_pools).  The old 1s periodic timer is
-                # removed; only explicit barriers (purge, shutdown) call
-                # sync_flush() directly.
+                # Every write path into the embedded engine above was
+                # changed to *not* fsync per write/per batch -- an fsync
+                # there is a whole-device write-cache flush, not scoped to
+                # those bytes (see the mtxdb shard-sync discussion), so
+                # paying it per state-group/per-event was both wrong
+                # (dominated actual write cost, ~59ms/call measured) and
+                # unnecessary (SQL's own commit durability isn't improved
+                # by it -- these embedded writes have no SQL fallback once
+                # the engine is exclusive, but bounding the durability
+                # window to a few seconds via a timer, instead of an fsync
+                # on every write, is the same tradeoff SQL's own
+                # asynchronous-commit mode makes). Only the writer can
+                # fsync at all now (a read-only handle has nothing dirty of
+                # its own to flush), so this can no longer be "any process
+                # holding it open" -- it must be the one process that is.
+                hs.get_clock().looping_call(
+                    self._periodic_embedded_sync,
+                    Duration(seconds=1),
+                )
 
             self.db_pool.updates.register_background_update_handler(
                 self.EMBEDDED_HAMT_MIGRATION_UPDATE_NAME,
@@ -1944,6 +1960,30 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
         )
         if self._embedded_hamt_engine == "mtxdb":
             await self._drain_embedded_state_hamt_root_deletion_queue()
+
+    @wrap_as_background_process("periodic_embedded_sync")
+    async def _periodic_embedded_sync(self) -> None:
+        """Flush the embedded engine's shard file on a timer instead of
+        fsyncing on every write/batch -- see the call site in `__init__`
+        for why. Runs on a single worker (gated by `run_background_tasks`
+        the same as the other looping calls here); mtxdb's shard file is
+        shared across all workers via mmap, so this flushes every
+        process's writes, not just this one's.
+
+        Best-effort: an fsync failure here is observability/durability, not
+        correctness -- the data is already written, just not yet forced to
+        disk -- so it's logged and swallowed rather than raised into the
+        reactor's looping-call error handling.
+        """
+        if self._embedded_hamt_engine != "mtxdb":
+            return
+        try:
+            maybe_sync(SyncTier.DURABLE)
+        except Exception:
+            logger.warning(
+                "Periodic embedded-engine sync failed (will retry in ~1s)",
+                exc_info=True,
+            )
 
     @wrap_as_background_process("drain_embedded_state_hamt_root_deletion_queue")
     async def _drain_embedded_state_hamt_root_deletion_queue(self) -> None:

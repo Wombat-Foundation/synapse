@@ -14,98 +14,6 @@ from typing import IO, Iterable, Iterator
 # Set once during HomeServer init via configure_sync(); never mutated after.
 _sync_disabled: bool = False
 
-# ── Event-driven coalescing flush (replaces per-write and periodic sync) ──
-# Write helpers call mark_dirty(pool) after a successful embedded write.
-# On the clean→dirty transition a single delayed flush is scheduled via the
-# Twisted reactor; only dirty pools are synced and the flags are cleared
-# after a successful sync.  maybe_sync(DURABLE) remains for explicit
-# barriers (purge, destructive redaction, shutdown) that need immediate
-# durability.
-_DIRTY_POOLS: set[Pool] = set()
-_FLUSH_SCHEDULED: bool = False
-_FLUSH_DELAY: float = 0.5  # seconds — batches bursts without stale data
-
-
-def _flush_dirty_pools() -> None:
-    """Sync only dirty pools and clear the dirty flags.
-
-    Called by the reactor after a short delay following the clean→dirty
-    transition.  Removes the flushed pools from ``_DIRTY_POOLS`` so a
-    new write can schedule another flush if needed.
-    """
-    global _FLUSH_SCHEDULED
-    _FLUSH_SCHEDULED = False
-    if not _DIRTY_POOLS or _sync_disabled:
-        return
-    pools_to_sync = set(_DIRTY_POOLS)
-    _DIRTY_POOLS.clear()
-    _do_sync(pools_to_sync)
-
-
-def mark_dirty(pool: Pool) -> None:
-    """Mark a pool as having unflushed writes.
-
-    On the first clean→dirty transition for *any* pool, schedules a
-    delayed flush (``_FLUSH_DELAY`` seconds) so a burst of rapid writes
-    coalesces into a single fsync.  Subsequent dirty marks while a flush
-    is already scheduled are free (one ``set.add``).
-    """
-    global _FLUSH_SCHEDULED
-    if _sync_disabled:
-        return
-    _DIRTY_POOLS.add(pool)
-    if not _FLUSH_SCHEDULED:
-        _FLUSH_SCHEDULED = True
-        from twisted.internet import reactor
-
-        reactor.callLater(_FLUSH_DELAY, _flush_dirty_pools)  # type: ignore[attr-defined]
-
-
-def sync_flush(pools: Iterable[Pool] | None = None) -> None:
-    """Immediately sync the specified pools (or all if ``None``).
-
-    Used for explicit durability barriers: purge, destructive redaction,
-    and shutdown.  Also clears dirty flags for the synced pools so the
-    next ``mark_dirty`` correctly re-schedules.
-    """
-    if _sync_disabled:
-        return
-    if pools is not None:
-        _DIRTY_POOLS.difference_update(pools)
-    else:
-        _DIRTY_POOLS.clear()
-    pool_set = (
-        set(pools)
-        if pools is not None
-        else {Pool.STATE, Pool.EVENT_DAG, Pool.AUTH_CHAIN}
-    )
-    _do_sync(pool_set)
-
-
-def _do_sync(pool_set: set[Pool]) -> None:
-    """Perform the actual sync for the given set of pools."""
-    from synapse.storage.databases.embedded_engine import get_embedded_engine
-
-    engine = get_embedded_engine("mtxdb")
-    if pool_set == {Pool.STATE, Pool.EVENT_DAG, Pool.AUTH_CHAIN}:
-        _st = time.monotonic()
-        engine.sync()
-        ffi_timing("ffi_sync_all", time.monotonic() - _st)
-        return
-    if Pool.STATE in pool_set:
-        _st = time.monotonic()
-        engine.sync_state()
-        ffi_timing("ffi_sync_state", time.monotonic() - _st)
-    if Pool.EVENT_DAG in pool_set:
-        _st = time.monotonic()
-        engine.sync_event_dag()
-        ffi_timing("ffi_sync_event_dag", time.monotonic() - _st)
-    if Pool.AUTH_CHAIN in pool_set:
-        _st = time.monotonic()
-        engine.sync_auth_chain()
-        ffi_timing("ffi_sync_auth_chain", time.monotonic() - _st)
-
-
 # ── FFI boundary timing (opt-in via SYNAPSE_PG_TIMINGS=1) ────────────────
 _FFI_TIMINGS: dict[str, float] = defaultdict(float)
 _FFI_TIMING_COUNTS: dict[str, int] = defaultdict(int)
@@ -417,12 +325,48 @@ class Pool(Enum):
 
 
 def maybe_sync(tier: SyncTier, pools: Iterable[Pool] | None = None) -> None:
-    """Immediate durability barrier — sync the specified pools now.
+    """Sync mtxdb for DURABLE writes; no-op for CACHE writes.
 
-    Use for destructive operations (purge, redaction) and shutdown.
-    Normal write paths should call ``mark_dirty(pool)`` instead; the
-    coalescing flush handles durability without per-write fsyncs.
+    A DURABLE write has no SQL fallback, or uses accumulating/delta
+    semantics (counters, auth-chain links, HAMT roots). A lost unflushed
+    write here means silent data loss or incorrect state, so sync() is
+    called after every batch.
+
+    A CACHE write has a SQL fallback on the read path. A lost unflushed
+    write just means a slower read via that fallback, not data loss.
+
+    `pools`: which pool(s) this call site's batch actually wrote to (see
+    `Pool`'s doc comment). Omit only for a generic backstop that isn't
+    tied to a specific write (e.g. a periodic timer flush) -- that syncs
+    all three pools, same as before this parameter existed. A call site
+    that knows what it wrote should always pass `pools` explicitly, so a
+    write to one pool doesn't force a flush of another pool's unrelated
+    dirty shards.
     """
     if tier is not SyncTier.DURABLE:
         return
-    sync_flush(pools)
+
+    if _sync_disabled:
+        return
+
+    from synapse.storage.databases.embedded_engine import get_embedded_engine
+
+    engine = get_embedded_engine("mtxdb")
+    if pools is None:
+        _st = time.monotonic()
+        engine.sync()
+        ffi_timing("ffi_sync_all", time.monotonic() - _st)
+        return
+    pool_set = set(pools)
+    if Pool.STATE in pool_set:
+        _st = time.monotonic()
+        engine.sync_state()
+        ffi_timing("ffi_sync_state", time.monotonic() - _st)
+    if Pool.EVENT_DAG in pool_set:
+        _st = time.monotonic()
+        engine.sync_event_dag()
+        ffi_timing("ffi_sync_event_dag", time.monotonic() - _st)
+    if Pool.AUTH_CHAIN in pool_set:
+        _st = time.monotonic()
+        engine.sync_auth_chain()
+        ffi_timing("ffi_sync_auth_chain", time.monotonic() - _st)
