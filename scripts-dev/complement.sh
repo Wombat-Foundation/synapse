@@ -459,6 +459,12 @@ main() {
     export PASS_SYNAPSE_EMBEDDED_HAMT_PATH="$SYNAPSE_EMBEDDED_HAMT_PATH"
   fi
 
+  # Record the exact checkout that produced the image alongside the effective
+  # test configuration. `--dirty` makes a locally modified build explicit,
+  # which is essential when comparing Complement timings or failures later.
+  local synapse_revision
+  synapse_revision="$(git -C "$repo_root" describe --tags --always --dirty 2>/dev/null || echo '<unknown>')"
+  echo "Synapse revision: ${synapse_revision}" >&2
   echo "Database: ${PASS_SYNAPSE_COMPLEMENT_DATABASE} (workers: ${PASS_SYNAPSE_COMPLEMENT_USE_WORKERS:-false}) | Embedded HAMT engine: ${PASS_SYNAPSE_EMBEDDED_HAMT_ENGINE:-<none>}${PASS_SYNAPSE_EMBEDDED_HAMT_ENGINE:+ at ${PASS_SYNAPSE_EMBEDDED_HAMT_PATH:-<not set>}}" >&2
 
   # Complement's Destroy() force-removes every homeserver container
