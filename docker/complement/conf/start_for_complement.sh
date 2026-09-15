@@ -51,8 +51,16 @@ if [[ -n "$SYNAPSE_COMPLEMENT_USE_WORKERS" ]]; then
   # -n True if the length of string is non-zero.
   # -z True if the length of string is zero.
   if [[ -z "$SYNAPSE_WORKER_TYPES" ]]; then
+    # mtxdb supports exactly one events writer at a time (see
+    # StateGroupDataStore.__init__'s writer/read-only split) -- a second
+    # event_persister would independently open the store writable and hit
+    # mtxdb's own exclusive-lock rejection at startup.
+    event_persister_workers="event_persister:2"
+    if [[ -n "$SYNAPSE_EMBEDDED_HAMT_ENGINE" ]]; then
+      event_persister_workers="event_persister"
+    fi
     export SYNAPSE_WORKER_TYPES="\
-      event_persister:2, \
+      $event_persister_workers, \
       background_worker, \
       event_creator, \
       user_dir, \
