@@ -46,10 +46,13 @@ from synapse.storage.database import (
 )
 from synapse.storage.databases.embedded_engine import get_embedded_engine
 from synapse.storage.databases.main.embedded_common import (
-    close_coalescer,
-    configure_coalescer,
+    Pool,
+    _clear_coalescer,
+    _FlushCoalescer,
+    _set_coalescer,
     configure_sync,
     ffi_timing,
+    mark_dirty,
     mirror_timing,
 )
 from synapse.storage.databases.state.bg_updates import (
@@ -228,7 +231,13 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 # Commit-aware flush coalescer: dirty marking happens via
                 # txn.call_after (after SQL commit), debounced 250-500ms.
                 # Replaces the former 1-second periodic sync timer.
-                configure_coalescer(hs.get_clock())
+                self._flush_coalescer = _FlushCoalescer(hs.get_clock())
+                _set_coalescer(self._flush_coalescer)
+                hs.register_sync_shutdown_handler(
+                    phase="during",
+                    eventType="shutdown",
+                    shutdown_func=self._flush_coalescer.close,
+                )
 
             self.db_pool.updates.register_background_update_handler(
                 self.EMBEDDED_HAMT_MIGRATION_UPDATE_NAME,
@@ -364,11 +373,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             engine.put_state_hamt_nodes(
                 self._embedded_hamt_namespace, room_prefix, list(nodes.items())
             )
-            # No sync here -- a periodic background task flushes the shard
-            # file on a timer instead of per-write (see
-            # _periodic_embedded_sync); an fsync is a whole-device cache
-            # flush, not scoped to this write, so it's too expensive to pay
-            # per state-group/per-event.
             if lattice:
                 self._store_state_hamt_root_embedded_txn(
                     state_group, room_prefix, root_hash, lattice, room_id
@@ -379,9 +383,9 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 migrate_one_txn(
                     txn, state_group, room_prefix, root_hash, lattice, room_id
                 )
-            # No sync here -- see _periodic_embedded_sync. This migration
-            # reads from SQL and is idempotent, so a crash mid-batch just
-            # means re-doing some work on restart, not data loss.
+            # Mark dirty after SQL commit.  Migration is idempotent, so a
+            # crash mid-batch just re-does work on restart.
+            txn.call_after(mark_dirty, Pool.STATE)
             self.db_pool.updates._background_update_progress_txn(
                 txn,
                 self.EMBEDDED_HAMT_MIGRATION_UPDATE_NAME,
@@ -685,12 +689,9 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
     ) -> tuple[bytes, bytes, list[tuple[bytes, bytes]]]:
         """Persist a new state_group's HAMT root and nodes.
 
-        Does not sync() the embedded engine itself -- every caller of this
-        function (directly, or via `_persist_state_group_snapshot_txn`) is
-        responsible for calling `maybe_sync(SyncTier.DURABLE)` once after
-        its own root write(s): a single call syncs immediately after, a
-        batching loop syncs once after the whole batch. See
-        `_store_state_hamt_root_embedded_txn`'s docstring.
+        Marks the STATE pool dirty via txn.call_after after SQL commit --
+        the coalescer flushes asynchronously (250-500ms debounce). See
+        _store_state_hamt_root_embedded_txn's docstring.
 
         If `prev_state_group` has a usable stored root+lattice and
         `updates` names the `(event_type, state_key, event_id)` changes
@@ -731,6 +732,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 pending_room_roots=pending_room_roots,
             )
         if incremental is not None:
+            txn.call_after(mark_dirty, Pool.STATE)
             return incremental
 
         _gg_reb_start = time.monotonic()
@@ -803,6 +805,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             len(current_state_ids),
             (time.monotonic() - _gg_reb_start) * 1000,
         )
+        txn.call_after(mark_dirty, Pool.STATE)
         return root_structural_hash, root_lattice, nodes
 
     def _persist_state_hamt_incremental_txn(
@@ -1327,10 +1330,10 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     txn, state_group, room_id, room_prefix, current_state_ids
                 )
 
-            # No sync here -- see _periodic_embedded_sync. This backfill
-            # reads from SQL and is idempotent (already_embedded above
-            # skips groups it finds on retry), so a crash mid-batch just
-            # means re-doing some work on restart, not data loss.
+            # Dirty marking handled by _persist_state_hamt_txn via
+            # txn.call_after(mark_dirty, Pool.STATE).  This backfill is
+            # idempotent (already_embedded above skips groups it finds on
+            # retry), so a crash mid-batch just re-does work on restart.
 
             self.db_pool.updates._background_update_progress_txn(
                 txn,
@@ -1571,7 +1574,8 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                 )
                 _state_timing("state_write_root_embedded", time.monotonic() - _et)
 
-            # No sync here -- see _periodic_embedded_sync.
+            # Dirty marking handled by _persist_state_hamt_txn via
+            # txn.call_after(mark_dirty, Pool.STATE).
 
             return events_and_context, hamt_writes
 
@@ -1693,14 +1697,14 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     local_roots=initial_roots,
                 )
             )
-            # No sync here -- see _periodic_embedded_sync.
+            # Dirty marking handled by _persist_state_hamt_txn via
+            # txn.call_after(mark_dirty, Pool.STATE).
 
             return state_group, root_structural_hash, lattice, nodes
 
         # Both SQL and (if configured) the embedded engine were already
-        # written (not synced -- see _periodic_embedded_sync) in
-        # insert_full_state_txn -- nothing left to
-        # publish post-commit.
+        # written (dirty marking via txn.call_after) in
+        # insert_full_state_txn -- nothing left to publish post-commit.
         state_group, _root_hash, _lattice, _nodes = await self.db_pool.runInteraction(
             "store_state_group.insert_full_state",
             insert_full_state_txn,
@@ -1950,7 +1954,9 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
 
     async def stop(self) -> None:
         """Flush outstanding coalescer dirty pools on shutdown."""
-        close_coalescer()
+        if hasattr(self, "_flush_coalescer"):
+            self._flush_coalescer.close()
+            _clear_coalescer(self._flush_coalescer)
 
     @wrap_as_background_process("drain_embedded_state_hamt_root_deletion_queue")
     async def _drain_embedded_state_hamt_root_deletion_queue(self) -> None:

@@ -52,10 +52,9 @@ import time
 from synapse.storage.databases.embedded_engine import get_embedded_engine
 from synapse.storage.databases.main.embedded_common import (
     Pool,
-    SyncTier,
     ffi_timing,
-    maybe_sync,
     mirror_timing,
+    sync_now,
 )
 
 
@@ -100,7 +99,7 @@ def put_chain_links_batch(
         get_embedded_engine(engine_name).put_auth_chain_links_batch(namespace, links)
         ffi_timing("ffi_put_auth_chain_links", time.monotonic() - _et)
         if sync:
-            maybe_sync(SyncTier.DURABLE, pools=[Pool.AUTH_CHAIN])
+            sync_now(pools=[Pool.AUTH_CHAIN])
 
 
 def get_chain_links_batch(
@@ -155,4 +154,4 @@ def delete_chain_links_batch(
         )
         ffi_timing("ffi_delete_auth_chain_links", time.monotonic() - _et)
         if sync:
-            maybe_sync(SyncTier.DURABLE, pools=[Pool.AUTH_CHAIN])
+            sync_now(pools=[Pool.AUTH_CHAIN])

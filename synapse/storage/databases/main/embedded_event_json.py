@@ -88,10 +88,9 @@ from typing import TYPE_CHECKING
 
 from synapse.storage.databases.main.embedded_common import (
     Pool,
-    SyncTier,
     ffi_timing,
-    maybe_sync,
     mirror_timing,
+    sync_now,
 )
 
 if TYPE_CHECKING:
@@ -192,7 +191,7 @@ def put_event_json_batch(
         ffi_timing("ffi_event_json_put", time.monotonic() - _et)
 
         if sync:
-            maybe_sync(SyncTier.DURABLE, pools=[Pool.EVENT_DAG])
+            sync_now(pools=[Pool.EVENT_DAG])
 
 
 def get_event_json_batch(
@@ -237,4 +236,4 @@ def delete_event_json_batch(
     from synapse.synapse_rust.mtxdb_engine import event_json_delete
 
     event_json_delete(namespace, event_ids)
-    maybe_sync(SyncTier.DURABLE, pools=[Pool.EVENT_DAG])
+    sync_now(pools=[Pool.EVENT_DAG])

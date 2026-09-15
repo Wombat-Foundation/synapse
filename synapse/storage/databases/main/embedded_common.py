@@ -483,10 +483,21 @@ def _do_sync_pools(pools: set[Pool]) -> None:
     maybe_sync(SyncTier.DURABLE, pools=pools)
 
 
-def configure_coalescer(clock: Clock) -> None:
-    """Initialize the flush coalescer.  Called by StateGroupDataStore.__init__."""
+def _set_coalescer(c: _FlushCoalescer) -> None:
+    """Set the module-level coalescer reference.  Called by StateGroupDataStore.__init__."""
     global _coalescer
-    _coalescer = _FlushCoalescer(clock)
+    _coalescer = c
+
+
+def _clear_coalescer(c: _FlushCoalescer) -> None:
+    """Clear the module-level coalescer reference only if it is still ``c``.
+
+    Identity-safe: stopping one homeserver's coalescer will not close
+    another's if they share a process (e.g. Complement trial).
+    """
+    global _coalescer
+    if _coalescer is c:
+        _coalescer = None
 
 
 def mark_dirty(pool: Pool) -> None:
@@ -498,7 +509,8 @@ def mark_dirty(pool: Pool) -> None:
 def sync_now(pools: Iterable[Pool] | None = None) -> None:
     """Immediate barrier for destructive ops (purge, redaction, shutdown).
 
-    Thin wrapper around the coalescer's sync_now.  Falls back to
+    Syncs the requested pools and clears their dirty flags so a pending
+    delayed flush does not redundantly re-sync them.  Falls back to
     maybe_sync if the coalescer hasn't been initialized.
     """
     if _coalescer is not None:
@@ -509,7 +521,8 @@ def sync_now(pools: Iterable[Pool] | None = None) -> None:
 
 def close_coalescer() -> None:
     """Flush outstanding dirty pools and shut down the coalescer."""
-    global _coalescer
     if _coalescer is not None:
         _coalescer.close()
-        _coalescer = None
+        # Don't clear _coalescer here — _clear_coalescer is the
+        # identity-safe path called by the owning store's stop().
+        # This is a fallback for process-level teardown.
