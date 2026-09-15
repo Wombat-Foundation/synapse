@@ -1243,18 +1243,19 @@ def generate_worker_files(
     # shared_config. Just set them on the container.
     #
     # TODO: this generator has no awareness of embedded_hamt/mtxdb at all --
-    # it will happily emit a topology with more than one events writer (e.g.
-    # SYNAPSE_WORKER_TYPES="event_persister:2, ...") alongside
-    # SYNAPSE_EMBEDDED_HAMT_ENGINE=mtxdb. That invalid combination is caught
-    # today, but only downstream, as a hard ConfigError at Synapse startup
-    # (see synapse/config/workers.py's embedded_hamt_engine validation, and
-    # docker/complement/conf/start_for_complement.sh's own hand-written
-    # single-persister guard for the Complement blueprint specifically).
-    # Consider having this generator auto-pin event_persister to a single
-    # instance (or refuse to start) when embedded_hamt.engine/
-    # SYNAPSE_EMBEDDED_HAMT_ENGINE is set, so real deployments get a clear
-    # error from the generator up front instead of failing later at
-    # Synapse's own config-validation step.
+    # it will happily emit a topology with an event_persister worker (or
+    # several) alongside SYNAPSE_EMBEDDED_HAMT_ENGINE=mtxdb. That invalid
+    # combination is caught today, but only downstream, as a hard ConfigError
+    # at Synapse startup (see synapse/config/workers.py's
+    # embedded_hamt_engine validation, which requires the sole events writer
+    # to be the main process itself -- not merely a single persister worker
+    # -- and docker/complement/conf/start_for_complement.sh, which omits
+    # event_persister from the Complement blueprint's defaults under mtxdb
+    # for exactly that reason). Consider having this generator drop
+    # event_persister workers (or refuse to start) when
+    # embedded_hamt.engine/SYNAPSE_EMBEDDED_HAMT_ENGINE is set, so real
+    # deployments get a clear error from the generator up front instead of
+    # failing later at Synapse's own config-validation step.
 
     # Shared homeserver config
     convert(

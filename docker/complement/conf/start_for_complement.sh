@@ -51,16 +51,22 @@ if [[ -n "$SYNAPSE_COMPLEMENT_USE_WORKERS" ]]; then
   # -n True if the length of string is non-zero.
   # -z True if the length of string is zero.
   if [[ -z "$SYNAPSE_WORKER_TYPES" ]]; then
-    # mtxdb supports exactly one events writer at a time (see
-    # StateGroupDataStore.__init__'s writer/read-only split) -- a second
-    # event_persister would independently open the store writable and hit
-    # mtxdb's own exclusive-lock rejection at startup.
-    event_persister_workers="event_persister:2"
+    # Under mtxdb, event persistence must stay on the main process, so no
+    # dedicated event_persister workers are spawned at all. workers.py's
+    # embedded_hamt_engine validation requires BOTH that there is exactly
+    # one events writer (a second persister would hit mtxdb's exclusive-lock
+    # rejection at startup) AND that the sole writer is main itself (the
+    # embedded-HAMT background migration only ever runs on main, and would
+    # crash writing through a read-only-opened store otherwise). Omitting
+    # event_persister leaves stream_writers.events unset, which defaults to
+    # ["main"] (see WriterLocations) and satisfies both checks; a single
+    # event_persister would pass the first but fail the second.
+    event_persister_entry="event_persister:2, "
     if [[ -n "$SYNAPSE_EMBEDDED_HAMT_ENGINE" ]]; then
-      event_persister_workers="event_persister"
+      event_persister_entry=""
     fi
     export SYNAPSE_WORKER_TYPES="\
-      $event_persister_workers, \
+      ${event_persister_entry}\
       background_worker, \
       event_creator, \
       user_dir, \
