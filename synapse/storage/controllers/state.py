@@ -64,6 +64,7 @@ class StateStorageController:
 
     def __init__(self, hs: "HomeServer", stores: "Databases"):
         self.server_name = hs.hostname  # nb must be called this for @cached
+        self._instance_name = hs.get_instance_name()
         self.clock = hs.get_clock()
         self._is_mine_id = hs.is_mine_id
         self.stores = stores
@@ -222,6 +223,13 @@ class StateStorageController:
 
         event_to_groups = await self.get_state_group_for_events(
             event_ids, await_full_state=await_full_state
+        )
+        logger.warning(
+            "DEBUG get_state_for_events[%s]: requested=%s returned_keys=%s missing=%s",
+            self._instance_name,
+            list(event_ids),
+            list(event_to_groups.keys()),
+            [e for e in event_ids if e not in event_to_groups],
         )
 
         groups = set(event_to_groups.values())

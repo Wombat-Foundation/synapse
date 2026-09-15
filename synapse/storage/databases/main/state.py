@@ -630,6 +630,11 @@ class StateGroupWorkerStore(EventsWorkerStore, SQLBaseStore):
         Raises:
              RuntimeError if the state is unknown at any of the given events
         """
+        logger.warning(
+            "DEBUG _get_state_group_for_events ENTRY: len=%d ids=%s",
+            len(event_ids),
+            list(event_ids),
+        )
         if getattr(self, "_embedded_event_json_enabled", False):
             # Exclusive by configured engine, not a dual-write -- see
             # embedded_event_to_state_group.py. A miss here (unlike
@@ -656,6 +661,11 @@ class StateGroupWorkerStore(EventsWorkerStore, SQLBaseStore):
             )
             res = dict(rows)
 
+        logger.warning(
+            "DEBUG _get_state_group_for_events RETURN: requested_len=%d res_keys=%s",
+            len(event_ids),
+            list(res.keys()),
+        )
         for e in event_ids:
             if e not in res:
                 raise RuntimeError("No state group for unknown or outlier event %s" % e)
