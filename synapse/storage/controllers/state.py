@@ -224,13 +224,6 @@ class StateStorageController:
         event_to_groups = await self.get_state_group_for_events(
             event_ids, await_full_state=await_full_state
         )
-        logger.warning(
-            "DEBUG get_state_for_events[%s]: requested=%s returned_keys=%s missing=%s",
-            self._instance_name,
-            list(event_ids),
-            list(event_to_groups.keys()),
-            [e for e in event_ids if e not in event_to_groups],
-        )
 
         groups = set(event_to_groups.values())
         group_to_state = await self.stores.state._get_state_for_groups(
