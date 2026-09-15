@@ -314,7 +314,7 @@ class EventFederationWorkerStore(
         if not initial_events:
             return set()
 
-        logger.warning(
+        logger.debug(
             "get_auth_chain_ids: using EMBEDDED CLOSURES path for room=%s "
             "namespace=%s initial_events=%s include_given=%s",
             room_id,
@@ -359,7 +359,7 @@ class EventFederationWorkerStore(
     ) -> set[str]:
         """Calculates the auth chain IDs using the chain index."""
 
-        logger.warning(
+        logger.debug(
             "get_auth_chain_ids: using LEGACY COVER-INDEX (chain_id/SQL) path "
             "for room=%s event_ids=%s include_given=%s",
             room_id,
@@ -607,7 +607,7 @@ class EventFederationWorkerStore(
 
         This is used when we don't have a cover index for the room.
         """
-        logger.warning(
+        logger.debug(
             "get_auth_chain_ids: using OLDEST no-cover-index SQL fallback "
             "for event_ids=%s include_given=%s",
             list(event_ids),
