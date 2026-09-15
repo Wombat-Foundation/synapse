@@ -488,7 +488,7 @@ main() {
   # that old environment. Include the immutable base-image ID and effective
   # forwarded configuration in the namespace to make such reuse impossible.
   local _base_image_id _cache_config_hash _namespace_prefix
-  _base_image_id="$(docker image inspect --format '{{.Id}}' "$COMPLEMENT_BASE_IMAGE")"
+  _base_image_id="$($CONTAINER_RUNTIME image inspect --format '{{.Id}}' "$COMPLEMENT_BASE_IMAGE")"
   _cache_config_hash="$(
     {
       printf '%s\n' "$_base_image_id"

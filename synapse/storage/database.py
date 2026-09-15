@@ -132,6 +132,7 @@ def _timings_print(*args: object) -> None:
     print(*args, file=sys.stderr)
     if _timings_file is not None:
         print(*args, file=_timings_file)
+        _timings_file.flush()
 
 
 _timings_file: IO[str] | None = None
