@@ -648,7 +648,13 @@ record_result() {
     if [ "${#_display_name}" -gt 80 ]; then
       _display_name="${_display_name:0:79}…"
     fi
-    printf '%-6s  %-80s  %8s\n' "${action^^}" "$_display_name" "$elapsed" >&2
+    # `printf %-80s` measures UTF-8 bytes, not terminal characters. A name
+    # containing `§` (as in the MSC4499 tests) would therefore make the
+    # duration appear one column early. Bash's `${#var}` is character-based
+    # under the UTF-8 locale used by the test runner, so pad explicitly.
+    local _name_padding=$((80 - ${#_display_name}))
+    printf '%-6s  %s%*s  %8s\n' \
+      "${action^^}" "$_display_name" "$_name_padding" "" "$elapsed" >&2
   fi
 }
 
