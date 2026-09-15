@@ -1249,13 +1249,15 @@ def generate_worker_files(
     # at Synapse startup (see synapse/config/workers.py's
     # embedded_hamt_engine validation, which requires the sole events writer
     # to be the main process itself -- not merely a single persister worker
-    # -- and docker/complement/conf/start_for_complement.sh, which omits
-    # event_persister from the Complement blueprint's defaults under mtxdb
-    # for exactly that reason). Consider having this generator drop
-    # event_persister workers (or refuse to start) when
-    # embedded_hamt.engine/SYNAPSE_EMBEDDED_HAMT_ENGINE is set, so real
-    # deployments get a clear error from the generator up front instead of
-    # failing later at Synapse's own config-validation step.
+    # -- plus run_background_tasks_on to be main, which rules out a
+    # background_worker too; and docker/complement/conf/
+    # start_for_complement.sh, which omits both from the Complement
+    # blueprint's defaults under mtxdb for exactly that reason). Consider
+    # having this generator drop event_persister/background_worker workers
+    # (or refuse to start) when embedded_hamt.engine/
+    # SYNAPSE_EMBEDDED_HAMT_ENGINE is set, so real deployments get a clear
+    # error from the generator up front instead of failing later at
+    # Synapse's own config-validation step.
 
     # Shared homeserver config
     convert(

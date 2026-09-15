@@ -61,13 +61,22 @@ if [[ -n "$SYNAPSE_COMPLEMENT_USE_WORKERS" ]]; then
     # event_persister leaves stream_writers.events unset, which defaults to
     # ["main"] (see WriterLocations) and satisfies both checks; a single
     # event_persister would pass the first but fail the second.
+    #
+    # The background_worker goes for the same reason: its generated config
+    # sets run_background_tasks_on to itself, but the third embedded_hamt
+    # check requires background tasks to run on main (main's own
+    # background-updates poll loop runs unconditionally, and mtxdb writes
+    # have no cross-instance coordination to survive a second concurrent
+    # loop). Without it, the setting defaults back to main.
     event_persister_entry="event_persister:2, "
+    background_worker_entry="background_worker, "
     if [[ -n "$SYNAPSE_EMBEDDED_HAMT_ENGINE" ]]; then
       event_persister_entry=""
+      background_worker_entry=""
     fi
     export SYNAPSE_WORKER_TYPES="\
       ${event_persister_entry}\
-      background_worker, \
+      ${background_worker_entry}\
       event_creator, \
       user_dir, \
       media_repository, \
