@@ -2,13 +2,19 @@ from __future__ import annotations
 
 import atexit
 import hashlib
+import logging
 import os
 import threading
 import time
 from collections import defaultdict
 from contextlib import contextmanager
 from enum import Enum, auto
-from typing import IO, Iterable, Iterator
+from typing import IO, TYPE_CHECKING, Iterable, Iterator
+
+if TYPE_CHECKING:
+    from synapse.util.clock import Clock, DelayedCallWrapper
+
+logger = logging.getLogger(__name__)
 
 # Module-level flag: when True, all DURABLE-tier sync() calls are suppressed.
 # Set once during HomeServer init via configure_sync(); never mutated after.
@@ -370,3 +376,140 @@ def maybe_sync(tier: SyncTier, pools: Iterable[Pool] | None = None) -> None:
         _st = time.monotonic()
         engine.sync_auth_chain()
         ffi_timing("ffi_sync_auth_chain", time.monotonic() - _st)
+
+
+# ── Commit-aware flush coalescer ──────────────────────────────────────
+#
+# Replaces the 1-second periodic timer with event-driven debounced
+# flushing.  Dirty marking happens via txn.call_after, which only fires
+# after successful SQL commit.  The coalescer debounces from the first
+# committed dirty write, flushes only dirty pools, clears a pool only
+# after its sync succeeds, and retries on failure with backoff.
+#
+# Immediate barriers (maybe_sync) are retained for destructive ops
+# (purge, redaction) and shutdown.
+
+
+class _FlushCoalescer:
+    """Commit-aware coalescing flush for mtxdb pools.
+
+    Owned by the writer StateGroupDataStore and initialized with its
+    clock.  Dirty marking happens via txn.call_after (after SQL commit),
+    so only committed writes trigger an fsync.
+
+    Debounces from the first committed dirty write (250-500ms) without
+    resetting the timer on subsequent writes.  Flushes only dirty pools.
+    Clears a pool only after its sync succeeds.  Retries on failure
+    with backoff.
+    """
+
+    def __init__(self, clock: Clock) -> None:
+        from synapse.util.duration import Duration
+
+        self._clock = clock
+        self._dirty: set[Pool] = set()
+        self._delayed_call: DelayedCallWrapper | None = None
+        self._closed: bool = False
+        self._FLUSH_DELAY = Duration(seconds=0.5)
+        self._RETRY_DELAY = Duration(seconds=1.0)
+
+    def mark_dirty(self, pool: Pool) -> None:
+        """Mark a pool as dirty.  Called via txn.call_after after SQL commit."""
+        if self._closed or _sync_disabled:
+            return
+        was_clean = not self._dirty
+        self._dirty.add(pool)
+        if was_clean and self._delayed_call is None:
+            self._delayed_call = self._clock.call_later(self._FLUSH_DELAY, self._flush)
+
+    def _flush(self) -> None:
+        """Flush dirty pools.  Called by the delayed callback."""
+        self._delayed_call = None
+        if self._closed:
+            return
+        to_flush = set(self._dirty)  # snapshot
+        if not to_flush:
+            return
+        try:
+            _do_sync_pools(to_flush)
+            self._dirty.difference_update(to_flush)
+        except Exception:
+            logger.warning(
+                "Flush coalescer sync failed for %s, will retry",
+                to_flush,
+                exc_info=True,
+            )
+        # Schedule retry if still dirty
+        if self._dirty and self._delayed_call is None:
+            self._delayed_call = self._clock.call_later(self._RETRY_DELAY, self._flush)
+
+    def sync_now(self, pools: Iterable[Pool] | None = None) -> None:
+        """Immediate barrier for destructive ops and shutdown.
+
+        Cancels any pending delayed flush, syncs the requested pools
+        (or all dirty pools if None), and reschedules if still dirty.
+        """
+        if self._closed:
+            return
+        if self._delayed_call is not None:
+            self._delayed_call.cancel()
+            self._delayed_call = None
+        to_flush = set(pools) if pools is not None else set(self._dirty)
+        if to_flush:
+            _do_sync_pools(to_flush)
+            self._dirty.difference_update(to_flush)
+        if self._dirty and self._delayed_call is None:
+            self._delayed_call = self._clock.call_later(self._FLUSH_DELAY, self._flush)
+
+    def close(self) -> None:
+        """Flush outstanding dirty pools and shut down."""
+        if self._delayed_call is not None:
+            self._delayed_call.cancel()
+            self._delayed_call = None
+        self._closed = True
+        if self._dirty:
+            try:
+                _do_sync_pools(self._dirty)
+            except Exception:
+                logger.warning("Flush coalescer close sync failed", exc_info=True)
+            self._dirty.clear()
+
+
+_coalescer: _FlushCoalescer | None = None
+
+
+def _do_sync_pools(pools: set[Pool]) -> None:
+    """Sync specific pools.  Internal helper for the coalescer."""
+    maybe_sync(SyncTier.DURABLE, pools=pools)
+
+
+def configure_coalescer(clock: Clock) -> None:
+    """Initialize the flush coalescer.  Called by StateGroupDataStore.__init__."""
+    global _coalescer
+    _coalescer = _FlushCoalescer(clock)
+
+
+def mark_dirty(pool: Pool) -> None:
+    """Mark a pool dirty.  Called via txn.call_after after SQL commit."""
+    if _coalescer is not None:
+        _coalescer.mark_dirty(pool)
+
+
+def sync_now(pools: Iterable[Pool] | None = None) -> None:
+    """Immediate barrier for destructive ops (purge, redaction, shutdown).
+
+    Thin wrapper around the coalescer's sync_now.  Falls back to
+    maybe_sync if the coalescer hasn't been initialized.
+    """
+    if _coalescer is not None:
+        _coalescer.sync_now(pools)
+    elif pools is not None:
+        maybe_sync(SyncTier.DURABLE, pools=pools)
+
+
+def close_coalescer() -> None:
+    """Flush outstanding dirty pools and shut down the coalescer."""
+    global _coalescer
+    if _coalescer is not None:
+        _coalescer.close()
+        _coalescer = None

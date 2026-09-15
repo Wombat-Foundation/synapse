@@ -50,7 +50,10 @@ from synapse.storage.database import (
     LoggingTransaction,
     make_in_list_sql_clause,
 )
-from synapse.storage.databases.main.embedded_common import Pool, SyncTier, maybe_sync
+from synapse.storage.databases.main.embedded_common import (
+    Pool,
+    mark_dirty,
+)
 from synapse.storage.databases.main.embedded_event_to_state_group import (
     decrement_state_group_refcounts_batch,
     get_referenced_state_groups_batch,
@@ -768,10 +771,8 @@ class StateGroupWorkerStore(EventsWorkerStore, SQLBaseStore):
                     self._embedded_hamt_namespace,
                     [state_group],
                 )
-            # One sync for the whole rewrite (put + decrement + increment
-            # above), not one per helper call -- see
-            # put_event_to_state_group_batch's docstring.
-            maybe_sync(SyncTier.DURABLE, pools=[Pool.STATE])
+            # Mark STATE pool dirty after SQL commit via txn.call_after.
+            txn.call_after(mark_dirty, Pool.STATE)
         else:
             self.db_pool.simple_update_txn(
                 txn,

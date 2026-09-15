@@ -66,6 +66,7 @@ from synapse.storage.database import (
     LoggingTransaction,
     make_tuple_in_list_sql_clause,
 )
+from synapse.storage.databases.main.embedded_common import Pool, mark_dirty
 from synapse.storage.databases.main.embedded_event_json import (
     open_embedded_event_json_engine,
     put_event_json_batch,
@@ -1238,18 +1239,12 @@ class PersistEventsStore:
             txn, room_id, events_and_contexts
         )
 
-        # One sync for everything this txn wrote to the embedded engine
-        # (event_to_state_groups batch + chain-links batch above), not one
-        # per helper call -- see put_event_to_state_group_batch's and
-        # put_chain_links_batch's docstrings. In SQL mode the engine was
-        # never opened, so skip the sync entirely (matching how the other
-        # embedded writes above gate on the engine being configured).
-        #
-        # NOTE: This sync is intentionally *not* called here.  It was
-        # moved to _persist_events_and_state_updates (after the
-        # runInteraction commit) so that a failed SQL transaction doesn't
-        # waste a synchronous fsync, and so the caller can batch the sync
-        # across multiple persist transactions if desired.
+        # Mark pools dirty after SQL commit via txn.call_after, so the
+        # coalescer flushes only committed writes.  Gated on the embedded
+        # engine being configured (same guard as the writes above).
+        if self._embedded_hamt_engine:
+            txn.call_after(mark_dirty, Pool.STATE)
+            txn.call_after(mark_dirty, Pool.AUTH_CHAIN)
 
     def _persist_event_auth_chain_txn(
         self,
