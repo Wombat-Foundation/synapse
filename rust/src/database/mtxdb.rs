@@ -526,15 +526,18 @@ mod room_index {
         let map = guard.get_or_insert_with(|| {
             LruCache::new(NonZeroUsize::new(HANDLE_CACHE_CAPACITY).expect("nonzero capacity"))
         });
-        if let Some(file) = map.get(namespace) {
+        // A read-only lookup may have populated the cache. OpenOptions'
+        // access mode is fixed at open time, so never reuse that handle for
+        // a later writer.
+        if create {
+            map.pop(namespace);
+        } else if let Some(file) = map.get(namespace) {
             return Ok(Some(Arc::clone(file)));
         }
         let path = index_path(namespace, create)?;
-        // `write(true)` unconditionally: the cached handle is shared for
-        // the namespace's lifetime, so a `get_many`-first ordering must
-        // not poison it read-only for every later `put` -- only whether a
-        // *missing* file gets created (`create`) should depend on which
-        // call warmed the cache.
+        // Writers and readers use separate cache lifetimes: a writer
+        // replaces any cached read-only handle above, while a read-only
+        // lookup never creates or modifies the index file.
         let opened = OpenOptions::new()
             .create(create)
             .truncate(false)
@@ -555,7 +558,11 @@ mod room_index {
             // An evicted namespace may still have dirty index pages.  Flush
             // before dropping its last handle so the room index cannot lag
             // behind the HAMT root after the next sync.
-            let _ = evicted_file.sync_data();
+            evicted_file.sync_data().map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "failed to sync evicted room index: {e}"
+                ))
+            })?;
         }
         Ok(Some(file))
     }

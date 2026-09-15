@@ -490,12 +490,24 @@ class _FlushCoalescer:
             self._delayed_call = None
         self._closed = True
         if self._dirty:
-            try:
-                _do_sync_pools(self._dirty)
-            except Exception:
-                logger.warning("Flush coalescer close sync failed", exc_info=True)
-            else:
-                self._dirty.clear()
+            for attempt in range(3):
+                try:
+                    _do_sync_pools(self._dirty)
+                except Exception:
+                    logger.warning(
+                        "Flush coalescer close sync failed (attempt %d/3)",
+                        attempt + 1,
+                        exc_info=True,
+                    )
+                else:
+                    self._dirty.clear()
+                    break
+            if self._dirty:
+                logger.error(
+                    "Unable to durably flush embedded pools during shutdown; "
+                    "writes remain pending: %s",
+                    self._dirty,
+                )
 
 
 _coalescer: _FlushCoalescer | None = None
