@@ -124,7 +124,10 @@ class DatabaseConfig(Config):
             self.embedded_hamt_engine = embedded_config.get("engine")
             self.embedded_hamt_path = embedded_config.get("path")
             self.embedded_hamt_namespace = embedded_config.get("namespace")
-            self.embedded_hamt_no_sync = bool(embedded_config.get("no_sync", False))
+            no_sync = embedded_config.get("no_sync", False)
+            if not isinstance(no_sync, bool):
+                raise ConfigError("embedded_hamt.no_sync must be a boolean")
+            self.embedded_hamt_no_sync = no_sync
 
         env_engine = os.environ.get("SYNAPSE_EMBEDDED_HAMT_ENGINE")
         if env_engine:

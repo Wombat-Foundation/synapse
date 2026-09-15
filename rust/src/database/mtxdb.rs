@@ -504,15 +504,17 @@ mod room_index {
     /// three pools proper.
     static DIRTY_NAMESPACES: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
-    fn index_path(namespace: &str) -> PyResult<std::path::PathBuf> {
+    fn index_path(namespace: &str, create: bool) -> PyResult<std::path::PathBuf> {
         let dir = ROOM_INDEX_DIR
             .get()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("mtxdb not opened"))?;
-        std::fs::create_dir_all(dir).map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "failed to create room_index dir: {e}"
-            ))
-        })?;
+        if create {
+            std::fs::create_dir_all(dir).map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "failed to create room_index dir: {e}"
+                ))
+            })?;
+        }
         let namespace_hash = Sha256::digest(namespace.as_bytes());
         Ok(dir.join(format!("{}.bin", hex::encode(&namespace_hash[..16]))))
     }
@@ -527,7 +529,7 @@ mod room_index {
         if let Some(file) = map.get(namespace) {
             return Ok(Some(Arc::clone(file)));
         }
-        let path = index_path(namespace)?;
+        let path = index_path(namespace, create)?;
         // `write(true)` unconditionally: the cached handle is shared for
         // the namespace's lifetime, so a `get_many`-first ordering must
         // not poison it read-only for every later `put` -- only whether a
@@ -537,7 +539,7 @@ mod room_index {
             .create(create)
             .truncate(false)
             .read(true)
-            .write(true)
+            .write(create)
             .open(&path);
         let file = match opened {
             Ok(f) => f,
@@ -549,7 +551,12 @@ mod room_index {
             }
         };
         let file = Arc::new(file);
-        map.put(namespace.to_string(), Arc::clone(&file));
+        if let Some(evicted_file) = map.put(namespace.to_string(), Arc::clone(&file)) {
+            // An evicted namespace may still have dirty index pages.  Flush
+            // before dropping its last handle so the room index cannot lag
+            // behind the HAMT root after the next sync.
+            let _ = evicted_file.sync_data();
+        }
         Ok(Some(file))
     }
 
@@ -1392,7 +1399,12 @@ pub fn get_or_create_short_ids(
                         Ok(Some(data)) if data.bytes.len() == 8 => {
                             u64::from_be_bytes(data.bytes.as_ref().try_into().unwrap())
                         }
-                        Ok(_) => 0,
+                        Ok(None) => 0,
+                        Ok(Some(_)) => {
+                            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                                "corrupt auth-chain short-id counter record",
+                            ));
+                        }
                         Err(e) => {
                             return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
                                 "mtxdb get error reading counter: {}",
@@ -1401,7 +1413,11 @@ pub fn get_or_create_short_ids(
                         }
                     },
                 };
-                let next = current + 1;
+                let next = current.checked_add(1).ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(
+                        "auth-chain short-id space exhausted for room",
+                    )
+                })?;
                 if next > AUTH_CHAIN_SHORT_ID_MAX {
                     return Err(pyo3::exceptions::PyRuntimeError::new_err(
                         "auth-chain short-id space exhausted for room",

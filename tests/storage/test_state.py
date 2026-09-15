@@ -710,17 +710,6 @@ class StateStoreTestCase(HomeserverTestCase):
         mtxdb_engine.open_client(tmpdir)
         self.state_datastore._embedded_hamt_engine = "mtxdb"
         self.state_datastore._embedded_hamt_path = tmpdir
-        # __init__ only assigns _embedded_hamt_namespace inside its own
-        # "engine and path configured" branch -- under the trial-mtxdb CI
-        # job (embedded on by default) that already ran and left a unique
-        # per-test value in place, but under any other job (embedded off by
-        # default, e.g. the plain trial/debian-build jobs) __init__ never
-        # ran that branch and the attribute doesn't exist at all yet. Set it
-        # unconditionally here so this helper doesn't depend on which job
-        # it's running under.
-        self.state_datastore._embedded_hamt_namespace = getattr(
-            self.state_datastore, "_embedded_hamt_namespace", None
-        ) or (self.state_datastore.server_name)
 
     def test_purge_unreferenced_state_groups_deletes_embedded_root(self) -> None:
         """Regression test: `purge_unreferenced_state_groups` used to call

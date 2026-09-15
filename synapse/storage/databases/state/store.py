@@ -1994,6 +1994,7 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
             if not state_groups:
                 return
 
+            resolved_groups: list[int] = []
             try:
                 # Same fix as purge_unreferenced_state_groups: roots live
                 # in their room's own collection now, not the old global
@@ -2011,7 +2012,6 @@ class StateGroupDataStore(StateBackgroundUpdateStore, SQLBaseStore):
                     state_groups,
                 )
                 by_room: dict[bytes, list[int]] = {}
-                resolved_groups: list[int] = []
                 for state_group, room_prefix in zip(state_groups, room_prefixes):
                     if room_prefix is not None:
                         by_room.setdefault(bytes(room_prefix), []).append(state_group)

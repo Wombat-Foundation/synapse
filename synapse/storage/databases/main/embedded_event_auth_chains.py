@@ -418,7 +418,7 @@ class ClosureCache:
             # either (see _fetch_direct_edges). Distinct from "not
             # embedded yet", which _fetch_direct_edges resolves via
             # cold-import before ever returning None.
-            logger.warning(
+            logger.debug(
                 "auth-chain closure walk: genuine gap at short_id=%s "
                 "(room=%s namespace=%s) -- no SQL event_auth rows and no "
                 "embedded edges; treating as incomplete",
@@ -430,7 +430,7 @@ class ClosureCache:
             memo[event_short_id] = result
             return result
 
-        logger.warning(
+        logger.debug(
             "auth-chain closure walk: short_id=%s has %d direct auth edge(s): %s",
             event_short_id,
             len(auth_short_ids),

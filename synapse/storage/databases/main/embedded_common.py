@@ -6,7 +6,7 @@ import logging
 import os
 import threading
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from contextlib import contextmanager
 from enum import Enum, auto
 from typing import IO, TYPE_CHECKING, Iterable, Iterator
@@ -32,7 +32,10 @@ _engine_configured: bool = False
 # ── FFI boundary timing (opt-in via SYNAPSE_PG_TIMINGS=1) ────────────────
 _FFI_TIMINGS: dict[str, float] = defaultdict(float)
 _FFI_TIMING_COUNTS: dict[str, int] = defaultdict(int)
-_FFI_LATENCIES: dict[str, list[float]] = defaultdict(list)
+_FFI_LATENCY_LIMIT = 4096
+_FFI_LATENCIES: dict[str, deque[float]] = defaultdict(
+    lambda: deque(maxlen=_FFI_LATENCY_LIMIT)
+)
 _FFI_TIMING_LOCK: "threading.Lock | None" = (
     threading.Lock() if os.environ.get("SYNAPSE_PG_TIMINGS") else None
 )
@@ -491,7 +494,8 @@ class _FlushCoalescer:
                 _do_sync_pools(self._dirty)
             except Exception:
                 logger.warning("Flush coalescer close sync failed", exc_info=True)
-            self._dirty.clear()
+            else:
+                self._dirty.clear()
 
 
 _coalescer: _FlushCoalescer | None = None
