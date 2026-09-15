@@ -474,6 +474,25 @@ main() {
     export PASS_SYNAPSE_PG_TIMINGS=1
   fi
 
+  # Complement's blueprint cache key is only (package namespace, blueprint
+  # name). A blueprint is a committed container image, so it also captures the
+  # base-image contents and every PASS_* variable passed into its homeservers.
+  # Without varying the namespace, a later SQLite/no-mtxdb run can reuse a
+  # blueprint built by an earlier Postgres/mtxdb run and silently boot with
+  # that old environment. Include the immutable base-image ID and effective
+  # forwarded configuration in the namespace to make such reuse impossible.
+  local _base_image_id _cache_config_hash _namespace_prefix
+  _base_image_id="$(docker image inspect --format '{{.Id}}' "$COMPLEMENT_BASE_IMAGE")"
+  _cache_config_hash="$(
+    {
+      printf '%s\n' "$_base_image_id"
+      env | LC_ALL=C sort | sed -n '/^PASS_/p'
+    } | sha256sum | cut -c1-16
+  )"
+  _namespace_prefix="${COMPLEMENT_PACKAGE_NAMESPACE_PREFIX:-synapse}"
+  export COMPLEMENT_PACKAGE_NAMESPACE_PREFIX="${_namespace_prefix}_cfg_${_cache_config_hash}"
+  echo "Complement blueprint cache namespace: ${COMPLEMENT_PACKAGE_NAMESPACE_PREFIX}" >&2
+
   # ── Run-filter and extra-tags from remaining args ───────────────────────────
   # RUN_TESTS=. means "run everything" (the default).
   # -run PATTERN and -run=PATTERN are extracted for package narrowing + anchoring.
